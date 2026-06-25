@@ -191,6 +191,20 @@
     <li>Capacity numbers to know.<div class="a">Key: 1536-dim float32 &asymp; 6 KB (~1.5 KB int8); frontier model ~$5/1M in, ~$15/1M out; aim ~90% cache-hit on hot reads.</div></li>
   </ul>
 
+  <!-- CLASSIC SYSTEM DESIGN PROBLEMS (System Design Primer) -->
+  <h2 id="sysdesign-classic">Classic system design problems (System Design Primer)</h2>
+  <p class="muted">The canonical web-scale problems from <a href="https://github.com/donnemartin/system-design-primer">The System Design Primer</a> (Donne Martin, MIT). Drive the seven-step framework on each; the keys are one-line solution sketches, not full designs.</p>
+  <ul class="q-list">
+    <li>Design Pastebin.com (or Bit.ly).<div class="a">Key: store text/URL under a base62 id (counter or hash); read is an O(1) key lookup, cache-heavy with TTL/expiry; large pastes in object storage, metadata in DB; CDN for hot reads; 301 vs 302 for links.</div></li>
+    <li>Design the Twitter timeline and search.<div class="a">Key: fan-out on write (precompute follower timelines) for fast reads with write amplification; pull for celebrities; hybrid in practice; timeline cache in Redis lists; search via inverted index; eventual consistency is fine.</div></li>
+    <li>Design a web crawler.<div class="a">Key: URL frontier (priority queue) + seen-set (bloom filter) for dedup; politeness (per-domain rate limit, robots.txt); fetch &rarr; parse &rarr; extract links &rarr; enqueue; distributed workers; re-crawl by freshness.</div></li>
+    <li>Design Mint.com.<div class="a">Key: async sync of transactions from bank APIs via queues + workers; idempotent sync; categorize (rules/ML); per-user ledger; budgets + alerts; encrypt sensitive data; eventual consistency on balances.</div></li>
+    <li>Design the data structures for a social network.<div class="a">Key: adjacency lists per user (following / followers), sharded KV or graph DB; BFS for degrees-of-separation and friend suggestions; denormalize and cache hot edges.</div></li>
+    <li>Design a key-value store for a search engine.<div class="a">Key: partition by key with consistent hashing; N-replica quorum (R+W&gt;N); LSM-tree storage + per-SSTable bloom filters for write throughput; versioning / conflict resolution; gossip membership (Dynamo-style).</div></li>
+    <li>Design Amazon's sales rank by category.<div class="a">Key: high-write order events &rarr; stream (Kafka) &rarr; windowed batch/stream aggregation per category &rarr; precomputed ranked lists in a fast store; MapReduce/Spark for history; eventual consistency; cache top-N.</div></li>
+    <li>Design a system that scales to millions of users on AWS.<div class="a">Key: incremental playbook: single box &rarr; split web/DB &rarr; LB + stateless app fleet &rarr; read replicas + cache &rarr; CDN for static &rarr; shard / move hot data to NoSQL &rarr; async queues for spiky work &rarr; multi-AZ. Scale the bottleneck the metrics show.</div></li>
+  </ul>
+
   <!-- LIVE CODING -->
   <h2 id="livecoding">Live coding patterns</h2>
   <p class="muted">Full deep-dive: <a href="https://app.notion.com/p/35402c23068e81e3b74bfdf9b5fcb99d">Notion &middot; Live Coding</a> &middot; Practice: every <a href="modules/m03-rag-retrieval/d21-rag-lab.html">Lab</a> day</p>

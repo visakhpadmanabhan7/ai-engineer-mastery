@@ -108,3 +108,10 @@ make test          # boots the app in-process and runs 28 assertions
 
 ---
 Built by Visakh Padmanabhan. Curriculum and question bank originated in `Resume-app/learning-path`, bundled here in `content/`.
+
+## Credits
+
+Curriculum content is original. The system-design module's classic problem set and
+the latency / powers-of-two reference are adapted from
+[The System Design Primer](https://github.com/donnemartin/system-design-primer)
+by Donne Martin (MIT License), synthesized in-house with attribution.

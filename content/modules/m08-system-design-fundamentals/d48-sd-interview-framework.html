@@ -247,6 +247,48 @@
 
   <hr class="section-rule">
 
+  <h2>Classic problems and the numbers to know (System Design Primer)</h2>
+  <div class="prose">
+    <p>The methodology above transfers to any prompt, but the fastest way to internalize it is to drive it across the canonical web-scale problems. The list below is the classic set from <a href="https://github.com/donnemartin/system-design-primer">The System Design Primer</a> (Donne Martin, MIT licensed), the most-referenced open system-design resource. Each one stresses a different bottleneck, so working all eight gives you a deep-dive for every shape of question. Every problem here is also in your <a href="../../question-bank.html">Question Bank</a> with a one-line solution key.</p>
+  </div>
+
+  <table>
+    <tr><th>Problem</th><th>What it really tests (the bottleneck)</th></tr>
+    <tr><td>Design Pastebin / Bit.ly</td><td>id generation + O(1) key lookup at read scale; cache + TTL; 301 vs 302.</td></tr>
+    <tr><td>Design the Twitter timeline &amp; search</td><td>fan-out on write vs read; the celebrity hot key; timeline cache + inverted index.</td></tr>
+    <tr><td>Design a web crawler</td><td>URL frontier + dedup (bloom filter); politeness / robots; distributed workers; freshness.</td></tr>
+    <tr><td>Design Mint.com</td><td>async ingestion from external APIs via queues; idempotent sync; categorization; encryption.</td></tr>
+    <tr><td>Design a social-network graph</td><td>adjacency lists, sharded; BFS for suggestions / degrees; denormalize + cache hot edges.</td></tr>
+    <tr><td>Design a key-value store</td><td>consistent hashing, quorum replication, LSM-tree + bloom filters, conflict resolution (Dynamo).</td></tr>
+    <tr><td>Design Amazon sales-rank by category</td><td>high-write events &rarr; stream + batch aggregation &rarr; precomputed ranked lists; eventual consistency.</td></tr>
+    <tr><td>Scale to millions of users on AWS</td><td>the incremental playbook: split tiers, LB, replicas, cache, CDN, shard, queues, multi-AZ.</td></tr>
+  </table>
+
+  <div class="prose">
+    <p>Two cheat-sheets the Primer is known for, worth committing to memory because they make the estimate step instant. <strong>Powers of two:</strong> 2<sup>10</sup> &asymp; 1 thousand (KB), 2<sup>20</sup> &asymp; 1 million (MB), 2<sup>30</sup> &asymp; 1 billion (GB), 2<sup>40</sup> &asymp; 1 trillion (TB). <strong>Latency numbers every engineer should know</strong> (orders of magnitude, not exact):</p>
+  </div>
+
+  <div class="diagram">  L1 cache reference .................... ~1 ns
+  main memory reference ................. ~100 ns      (memory is ~100x L1)
+  read 1 MB sequentially from memory .... ~10 us
+  SSD random read ....................... ~150 us      (SSD is ~100x memory)
+  round trip within a datacenter ........ ~500 us
+  read 1 MB sequentially from SSD ....... ~1 ms
+  disk (HDD) seek ....................... ~10 ms       (disk is ~100x SSD)
+  read 1 MB sequentially from disk ...... ~30 ms
+  send packet CA to Netherlands to CA ... ~150 ms
+
+  Rules of thumb: memory is fast, disk is slow, a network round trip inside a
+  datacenter is cheap, but a cross-continent round trip is not. Keep hot data
+  in memory; avoid disk seeks and cross-region hops on the critical path.</div>
+
+  <div class="callout connect">
+    <span class="label">Further reading</span>
+    <p>The full write-ups (with diagrams and worked solutions) for each problem live in <a href="https://github.com/donnemartin/system-design-primer">The System Design Primer</a>. The lessons that follow in this module, scaling, databases, caching and CDN, and async messaging, are the building blocks every one of these solutions composes from. Drive the seven-step framework on one new problem from the table per day and you will have covered the whole set by the end of the module.</p>
+  </div>
+
+  <hr class="section-rule">
+
   <h2>Interview questions for this topic</h2>
   <p class="muted">From your Notion bank's System Design Fundamentals slice. Drill the one-line keys, then expand each into a 90-second answer with Claude using protocol prompt #2.</p>
   <ul class="q-list">
