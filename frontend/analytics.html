@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Analytics — AI Engineer Mastery</title>
+<link rel="stylesheet" href="assets/base.css">
+<link rel="stylesheet" href="assets/app.css">
+</head>
+<body>
+<div class="wrap" id="app">
+  <div class="muted-center" id="loading"><span class="spinner"></span> Loading your analytics…</div>
+</div>
+
+<script src="assets/api.js"></script>
+<script>
+if (!requireAuth()) { /* redirected */ }
+renderNav("analytics");
+
+function fmtDate(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function topicColor(score) {
+  if (score < 5) return "var(--red)";
+  if (score < 7.5) return "var(--amber)";
+  return "var(--green)";
+}
+
+function barRow(t, color) {
+  const w = Math.max(0, Math.min(100, t.avg_score * 10));
+  const score = (Math.round(t.avg_score * 10) / 10);
+  return `<div class="bar-row">
+      <div class="name">${escapeHtml(t.topic)}</div>
+      <div class="bar-track"><div class="bar-fill" style="width:${w}%; background:${color}"></div></div>
+      <div class="val">${score}/10 (${t.attempts})</div>
+    </div>`;
+}
+
+function topicsBlock(topics, descending) {
+  if (!topics || !topics.length) return "";
+  const sorted = topics.slice().sort((a, b) =>
+    descending ? b.avg_score - a.avg_score : a.avg_score - b.avg_score);
+  const rows = sorted
+    .map((t) => barRow(t, descending ? "var(--green)" : topicColor(t.avg_score)))
+    .join("");
+  return `<div class="bars">${rows}</div>`;
+}
+
+async function load() {
+  let a;
+  try {
+    a = await getAnalytics();
+  } catch (e) {
+    document.getElementById("loading").innerHTML = "Could not load: " + escapeHtml(e.message);
+    return;
+  }
+
+  const avg = (a.avg_score === null || a.avg_score === undefined)
+    ? "&mdash;" : `${(Math.round(a.avg_score * 10) / 10)}/10`;
+
+  // Last 30 calendar dates, oldest -> newest.
+  const activity = a.activity || {};
+  const cells = [];
+  for (let i = 29; i >= 0; i--) {
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    d.setDate(d.getDate() - i);
+    const key = fmtDate(d);
+    const count = activity[key] || 0;
+    const lvl = count >= 4 ? "l4" : count === 3 ? "l3" : count === 2 ? "l2" : count === 1 ? "l1" : "";
+    cells.push(`<div class="heat-cell ${lvl}" title="${key}: ${count}"></div>`);
+  }
+
+  const weakEmpty = !a.weakest_topics || !a.weakest_topics.length;
+
+  const html = `
+    <div class="hero" style="padding:30px 0 6px">
+      <div class="eyebrow">Progress &amp; weak-area analysis</div>
+      <h1 style="font-size:2rem">Your analytics</h1>
+    </div>
+
+    <div class="stat-grid">
+      <div class="stat"><div class="num">${a.lessons_completed}/${a.lessons_total}</div><div class="label">lessons completed</div></div>
+      <div class="stat"><div class="num gold">${a.lessons_total ? Math.round((a.lessons_completed / a.lessons_total) * 100) : 0}%</div><div class="label">progress</div></div>
+      <div class="stat"><div class="num">${a.current_streak} &#128293;</div><div class="label">current streak</div></div>
+      <div class="stat"><div class="num">${a.longest_streak}</div><div class="label">longest streak</div></div>
+      <div class="stat"><div class="num">${a.reviews_total}</div><div class="label">reviews total</div></div>
+      <div class="stat"><div class="num">${a.attempts_total}</div><div class="label">attempts total</div></div>
+      <div class="stat"><div class="num">${a.cards_due}</div><div class="label">cards due</div></div>
+      <div class="stat"><div class="num">${avg}</div><div class="label">avg score</div></div>
+    </div>
+
+    <h2>Weakest topics</h2>
+    ${weakEmpty
+      ? `<div class="callout key"><span class="label">No data yet</span><p>Grade answers in the AI Tutor, Review, or a Mock to map your weak areas.</p></div>`
+      : topicsBlock(a.weakest_topics, false)}
+
+    <h2>Strongest topics</h2>
+    ${(!a.strongest_topics || !a.strongest_topics.length)
+      ? `<div class="callout key"><span class="label">No data yet</span><p>Grade answers in the AI Tutor, Review, or a Mock to map your strong areas.</p></div>`
+      : topicsBlock(a.strongest_topics, true)}
+
+    <h2>Last 30 days</h2>
+    <div class="heat">${cells.join("")}</div>
+    <p class="muted" style="font-size:13px; margin-top:6px">less &rarr; more</p>`;
+
+  document.getElementById("app").innerHTML = html;
+}
+
+load();
+</script>
+</body>
+</html>

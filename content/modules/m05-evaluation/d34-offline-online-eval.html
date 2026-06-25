@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 34 · Offline vs online eval</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 5 &middot; Evaluation &amp; Observability</span>
+    <span class="pill">Day 34</span>
+    <span class="pill">55 min</span>
+    <span class="diff" title="Difficulty: intermediate"><i class="on"></i><i class="on"></i><i></i></span>
+  </div>
+
+  <h1>Offline vs online eval</h1>
+  <p class="lede">Offline eval gives you the confidence to deploy. Online eval tells you the truth about whether you should have. Today you connect the two into a single safe pipeline, learn the RAG metrics worth reporting, and build the rollout ladder that lets you ship a change without betting the product on it.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Draw the line between offline and online evaluation and say what each can and cannot catch.</li>
+      <li>Name the core RAG metrics, say which one you trust most, and apply the five-metric rule.</li>
+      <li>Explain shadow mode and what it catches that offline eval structurally cannot.</li>
+      <li>Run a safe rollout: shadow to canary to full, with guardrail metrics and a kill switch.</li>
+      <li>Wire a prompt CI/CD gate that blocks a merge on a measured regression.</li>
+    </ul>
+  </div>
+
+  <h2>Two evaluations, two jobs</h2>
+  <div class="prose">
+    <p>You met the distinction on Day 31. Now we operationalize it. The two are not competitors, they are consecutive stages of getting a change safely into production, each answering a question the other cannot.</p>
+  </div>
+
+  <table>
+    <tr><th></th><th>Offline</th><th>Online</th></tr>
+    <tr><td><b>Runs against</b></td><td>A fixed golden / replay set you control.</td><td>Live real-user traffic.</td></tr>
+    <tr><td><b>Ground truth</b></td><td>Known (ideal answers / chunks).</td><td>Usually none, use implicit signals.</td></tr>
+    <tr><td><b>Signal</b></td><td>Metric vs expected (faithfulness, recall@k).</td><td>Thumbs-down, escalation, task success, retries.</td></tr>
+    <tr><td><b>Answers</b></td><td>"Is the new version better on cases I curated?"</td><td>"Is it actually working for real people?"</td></tr>
+    <tr><td><b>When</b></td><td>Before deploy (the gate).</td><td>After deploy (the truth).</td></tr>
+    <tr><td><b>Blind spot</b></td><td>Only sees the cases in the dataset.</td><td>Noisy, lagging, arrives only post-ship.</td></tr>
+  </table>
+
+  <div class="prose">
+    <p>The senior framing in one line: <strong>offline is repeatable but blind to the real distribution; online is real but noisy and late.</strong> You use offline to decide whether a change is even allowed near production, then online to find out whether it actually helped the humans it was for. Skip offline and you ship regressions to users. Skip online and you never learn that your curated set was lying to you. The whole rest of this lesson is the machinery that connects them safely.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"Offline evaluation is my pre-deploy gate: a fixed dataset with known answers, repeatable, where a change must beat the baseline without regressing guardrails. Online evaluation is the post-deploy truth: real traffic, no labels, so I lean on implicit signals like thumbs-down, escalation, and task success. Offline gives confidence to ship, online tells me whether I should have, and shadow mode plus a canary is how I move between them without betting the product on a single release."</p>
+  </div>
+
+  <h2>RAG metrics worth reporting, and the one you trust most</h2>
+  <div class="prose">
+    <p>When the system is RAG, "is it good" decomposes into specific, nameable metrics. The ones an interviewer expects you to reach for, mostly scored by an LLM-as-judge in the RAGAS style:</p>
+    <ul>
+      <li><strong>Faithfulness</strong>, is every claim in the answer supported by the retrieved context? This is the one you <strong>trust most</strong>, because it directly catches hallucination, the highest-stakes failure in a grounded system. An answer can be relevant and fluent and still invent a fact; faithfulness is the metric that flags it. If you report only one number, report this.</li>
+      <li><strong>Answer relevancy</strong>, does the answer actually address the question that was asked (not a related but different one)?</li>
+      <li><strong>Contextual precision</strong>, of the chunks you retrieved, how many were actually relevant? Low precision means you are stuffing the context with noise.</li>
+      <li><strong>Contextual recall</strong>, of the chunks you <em>needed</em>, how many did you retrieve? Low recall means the answer's evidence was never even in front of the generator. This is the failure that <code>ideal_chunks</code> from yesterday lets you measure directly.</li>
+    </ul>
+    <p>Precision and recall split the retrieval story cleanly: recall asks "did we find the right passage at all" (the more fundamental question), precision asks "did we avoid burying it in junk." Together with faithfulness and relevancy on the generation side, they tell you which stage to fix.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">The five-metric rule</span>
+    <p>Track a <strong>small, fixed set of metrics, roughly five</strong>, and report them every time. More than that and no one reads the dashboard, regressions hide in the clutter, and you cannot tell which number actually moved the product. Pick the handful that map to your real failure modes (for RAG: faithfulness, answer relevancy, contextual precision, contextual recall, plus one operational metric like latency or cost) and hold the line. A focused five you watch religiously beats twenty you glance at.</p>
+  </div>
+
+  <h2>Shadow mode: testing on reality without risking it</h2>
+  <div class="prose">
+    <p>Offline eval has a structural blind spot it can never fix: it only knows the inputs you put in the dataset. The real world sends inputs you did not anticipate, at real concurrency, with real tool and retrieval latencies. <strong>Shadow mode</strong> closes that gap without exposing a single user to the new version.</p>
+    <p>In shadow mode you run the new (candidate) version <em>alongside</em> the current (production) version on the <strong>same real traffic</strong>, but you only serve the production version's response to the user. The candidate's output is computed and logged, never shown. Now you can compare the two on actual production inputs, and crucially you catch the things offline structurally misses:</p>
+    <ul>
+      <li><strong>The real input distribution</strong>, the messy, unexpected, out-of-dataset queries your golden set never imagined.</li>
+      <li><strong>Real latency and failures</strong>, the candidate's actual response times under real load, real tool timeouts, real rate-limit behavior, none of which a fixed offline run exercises.</li>
+      <li><strong>Real concurrency and scale effects</strong>, problems that only appear at production volume.</li>
+    </ul>
+    <p>Shadow mode is the safest possible way to evaluate on reality: full production fidelity, zero user risk, because nobody ever sees the candidate. The cost is double inference (you run both), which is exactly why it is a temporary validation phase, not a permanent state.</p>
+  </div>
+
+  <h2>The rollout ladder: shadow to canary to full</h2>
+  <div class="prose">
+    <p>You never flip a change to 100 percent of users in one move. You climb a ladder, increasing exposure only as evidence accumulates, with a kill switch at every rung:</p>
+  </div>
+
+  <div class="diagram">  SAFE ROLLOUT LADDER  (climb only if guardrails hold; roll back instantly if not)
+
+   OFFLINE GATE        SHADOW              CANARY                 FULL
+   ───────────         ──────              ──────                 ────
+   golden set,         new version runs    serve new to a small   serve new to
+   metric must         on real traffic,    slice of real users    100% of users
+   beat baseline       output logged,      (1% → 5% → 25%),       once canary
+   (no guardrail       NOT served.         watch guardrails +     metrics match
+   regression)         catches real        per-user A/B vs        or beat control
+        │              distribution,       control.                    │
+        │              latency, failures.        │                     │
+        ▼                   │                     ▼                     ▼
+   [ pass? ] ──no──►revert  ▼              [ guardrails ok? ]      monitor; keep
+        │yes           [ matches? ]──no──► [   no → ROLL BACK  ]   rollback ready
+        └──────────────────►│yes───────────────►│yes──────────────────►■
+                       kill switch live at every rung</div>
+
+  <div class="prose">
+    <p>The rungs:</p>
+    <ul>
+      <li><strong>Offline gate</strong>, the change must beat the baseline on your golden set and not regress any guardrail metric. Fails here, it never deploys.</li>
+      <li><strong>Shadow</strong>, validate on real traffic with no user risk (above). Outputs do not match expectations or latency blows up, fix before exposing anyone.</li>
+      <li><strong>Canary</strong>, route a small, growing fraction of real users to the new version (e.g. 1, then 5, then 25 percent), while everyone else stays on the control. This is a live, <strong>per-user A/B test</strong>: assign each user to control or candidate, and compare. You watch <strong>guardrail metrics</strong>, the metrics that must <em>not</em> get worse no matter what (error rate, refusal rate, p95 latency, cost per request, faithfulness floor). A win on your target metric does not justify a regression on a guardrail; if any guardrail trips, you roll back immediately, even if the headline number improved.</li>
+      <li><strong>Full</strong>, only when canary metrics match or beat control do you go to 100 percent, and you keep the rollback path warm.</li>
+    </ul>
+    <p>This ladder is why experienced teams ship constantly without constant outages: every change is reversible at every step, and exposure is always proportional to evidence.</p>
+  </div>
+
+  <h2>The prompt CI/CD gate</h2>
+  <div class="prose">
+    <p>Here is the practice that makes the offline gate automatic and non-negotiable: treat your prompts and eval set like code, and <strong>run the golden set in continuous integration on every change</strong>. A pull request that touches a prompt, a chunker, a model choice, or a retrieval setting triggers the eval harness; the merge is <strong>blocked if any tracked metric regresses past a threshold</strong>.</p>
+    <p>This is the same idea as a unit-test gate, applied to a probabilistic system. It converts "please remember to check the eval before merging" (which no one does reliably) into a machine-enforced wall. The effect is profound: regressions are caught at the pull request, by the author, before review, instead of in production by a user. A few practicalities, the eval run costs real money and time (judge calls), so you size the CI golden set to be representative but not enormous, allow a small tolerance band so sampling noise does not block every merge, and reserve the full large set and online stages for the actual release. The CI gate is your cheapest, earliest line of defense.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Say this in an interview</span>
+    <p>"I gate prompt and retrieval changes in CI: a pull request runs the golden set through the eval harness and the merge is blocked if any of my five tracked metrics regresses beyond a tolerance band. That catches regressions at the PR by the author, not in production by a user. The full set and the shadow-canary-full rollout handle the actual release."</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: ship a reranker safely</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>You want to add a cross-encoder reranker to retrieval. Watch it climb the ladder.</p>
+    <p><strong>Offline gate (CI).</strong> Run the golden set. Contextual precision rises from 0.61 to 0.78, faithfulness 4.4 to 4.6, recall flat, latency per query up 90ms. The CI gate's guardrail is "p95 latency must not exceed 1.5s"; you are still under, and quality improved, so the gate passes and the PR can merge.</p>
+    <p><strong>Shadow.</strong> Run the reranker on a day of real traffic without serving it. You discover that on a class of very long queries the reranker adds 600ms, far worse than the offline 90ms, because real queries are longer and messier than your golden set. Offline never saw this. You add a length cap to the rerank input, re-shadow, latency is back in budget.</p>
+    <p><strong>Canary.</strong> Route 5 percent of users to the reranker, per-user A/B against the control. Guardrails (error rate, refusal rate, p95 latency, cost) all hold; thumbs-down rate drops slightly. Ramp to 25 percent, still good.</p>
+    <p><strong>Full.</strong> Go to 100 percent, keep the feature flag so you can disable the reranker instantly if anything drifts.</p>
+  </div>
+  <div class="prose">
+    <p>The decisive moment was shadow catching the long-query latency that offline structurally could not. That is the whole reason the ladder exists: each rung catches a failure the previous one cannot see, and none of them ever bet the full user base on an unproven change.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Say each answer out loud in full sentences, as if to an interviewer. Then open the solution and compare. The gap is your lesson.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>Your offline eval shows a new prompt is clearly better, so you push it straight to all users. Why is this reckless even with a strong offline win, and what minimum staged rollout would you insist on instead?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>An offline win is necessary but never sufficient: the golden set only contains inputs you imagined, and it does not exercise real latency, real concurrency, real tool failures, or the real input distribution. A change that wins offline can still regress on out-of-dataset queries, blow a latency budget under load, or trip a guardrail you were not scoring. Pushing to 100 percent makes the entire user base the test, with no reversibility. The minimum staged rollout: keep the offline gate as the entry condition, then run <strong>shadow mode</strong> on real traffic (no user risk) to validate distribution and latency, then a <strong>canary</strong> on a small growing slice with per-user A/B and guardrail metrics (error rate, refusal rate, p95 latency, cost), rolling back instantly if any guardrail trips, and only then go full, keeping a kill switch. Exposure proportional to evidence, reversible at every rung.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>A model change raises your headline "helpfulness" score by 8 percent in the canary, but the refusal rate also climbs and p95 latency creeps up. The product manager wants to ship because helpfulness is up. What is your call and how do you frame it?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Do not ship as-is. Helpfulness is the target metric, but refusal rate and p95 latency are <strong>guardrail metrics</strong>, things that must not get worse regardless of the target. A win on the target does not buy a regression on a guardrail, because the guardrail encodes a floor on user experience (latency) and trust/safety (refusals) that the headline number does not capture. Frame it to the PM concretely: "We gained 8 points of helpfulness but at the cost of more users being refused and slower responses, both of which directly hurt the experience and may show up as churn the helpfulness metric will not see." The path forward is to keep the canary running while you diagnose why refusals and latency rose, fix those, and re-run, then ship when the target improves <em>without</em> regressing the guardrails. Guardrails exist precisely to stop a tempting headline number from masking real harm.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>RAG answers in production are wrong on a recurring topic. Faithfulness scores high, answer relevancy is fine. Which metric do you check next, what would it tell you, and why does this prove the value of separating retrieval metrics from generation metrics?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Check <strong>contextual recall</strong>. High faithfulness means the answer is faithful to whatever context it was given, and good relevancy means it is addressing the right question, so the generator is doing its job; the answers are still wrong, which points upstream to retrieval. Low contextual recall would confirm it: the chunks the answer actually needed were never retrieved, so the generator faithfully produced a wrong answer from incomplete evidence (it cannot cite what it never saw). You would also glance at contextual precision (is the right chunk buried under noise). This is exactly why you separate retrieval metrics (precision, recall) from generation metrics (faithfulness, relevancy): without the split you would see "faithful but wrong" and have no idea whether to fix the retriever or the generator. With <code>ideal_chunks</code> and recall, the diagnosis is immediate, fix retrieval (chunking, top-k, reranking, hybrid search), not the prompt.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's Evaluation &amp; Observability slice and common 2026 screens. Drill the one-line keys, then expand each into a 90-second answer with Claude using protocol prompt #2.</p>
+  <ul class="q-list">
+    <li>Offline versus online evaluation, when do you use each?
+      <div class="a">Key: offline = fixed dataset vs expected, repeatable pre-deploy gate; online = live signals (thumbs-down, escalation, task success) on real traffic post-deploy. Offline gives confidence, online gives truth. Use both.</div></li>
+    <li>What RAG metrics do you report and which do you trust most?
+      <div class="a">Key: faithfulness (trust most, catches hallucination), answer relevancy, contextual precision, contextual recall. Recall asks "did we find it at all", precision asks "did we avoid noise."</div></li>
+    <li>What is shadow mode catching that offline eval misses?
+      <div class="a">Key: the real input distribution, real tool latency and failures, real concurrency and rate limits, all on production traffic with zero user risk because the candidate output is logged, not served.</div></li>
+    <li>How do you roll out a model or prompt change safely?
+      <div class="a">Key: offline gate to shadow to canary (1/5/25% per-user A/B) to full, watch guardrail metrics at every rung, roll back instantly if a guardrail trips, keep a kill switch. Exposure proportional to evidence.</div></li>
+    <li>What is a guardrail metric and how is it different from a target metric?
+      <div class="a">Key: target = the metric you are trying to improve; guardrail = a metric that must not get worse regardless (error rate, refusal rate, p95 latency, cost, faithfulness floor). A target win never justifies a guardrail regression.</div></li>
+    <li>How do you stop prompt changes from silently regressing quality?
+      <div class="a">Key: a prompt CI/CD gate, every PR touching a prompt/chunker/model runs the golden set and the merge is blocked if a tracked metric regresses past a tolerance band. Catches it at the PR, not in production.</div></li>
+    <li>How do you prove a retrieval change is actually better?
+      <div class="a">Key: offline golden set (recall@k, precision, faithfulness) to shadow / interleaving on real traffic to online per-user A/B with guardrail metrics. One stage alone is not proof.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (15&ndash;25 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Take the golden set you built yesterday and write a tiny offline harness in Python: load the items, for two prompt variants run each through your generator (Anthropic <a href="https://docs.claude.com/en/docs/build-with-claude/overview">API</a>), score them with your faithfulness judge from Day 32, and print mean faithfulness per variant plus a per-item table so you can see which cases moved. Then add one <strong>guardrail check</strong>: assert that no answer exceeds a length cap or omits a required citation, and have the script exit non-zero if a guardrail fails, that is the seed of a CI gate. If you use GitHub, sketch (no need to fully wire) how this would run as a workflow that blocks the merge on a regression. For how a real system structures faithfulness and context-recall metrics, skim the RAGAS metrics docs (<a href="https://docs.ragas.io/">docs.ragas.io</a>) and LangSmith's evaluation docs (<a href="https://docs.smith.langchain.com/">docs.smith.langchain.com</a>).</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>This lesson is the production wrapper around your MaiQ evaluation work. Your 11+ retrieval and chunking experiments lived on the offline side, a fixed set, a metric, one variable at a time, which is how you got the 37 percent cost cut at 2 percent quality drop you can defend. The natural interview follow-up is "and how did you ship those changes safely?", which is where the offline-to-online ladder earns you points: an offline gate to qualify the change, then watching real signals as it rolled out, with guardrails so a cost win could never quietly degrade answer quality past a floor. The recall-versus-faithfulness split maps straight onto your hybrid BM25-plus-dense retrieval into pgvector, retrieval metrics told you whether the right chunk was being found, generation metrics told you whether the answer used it honestly, and separating them is how you knew which half to tune. You also have the perfect shadow-mode instinct from Vay and Einbliq: statistically evaluating a system's behavior on real data before trusting it is exactly the muscle this ladder formalizes.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>Offline eval is the repeatable pre-deploy gate; online eval is the noisy post-deploy truth, and you need both. For RAG, report a focused five, faithfulness (trust most), answer relevancy, contextual precision and recall, plus an operational metric. Shadow mode tests the candidate on real traffic with zero user risk and catches the distribution and latency problems offline cannot. Ship up the ladder, offline gate to shadow to canary to full, watching guardrail metrics and keeping a kill switch at every rung. Automate the gate with prompt CI so regressions die at the pull request. That pipeline is how senior teams ship constantly without shipping outages.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d34">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: observability and tracing, the span tree per request, what to log and what never to, and SLOs for an LLM endpoint.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d33-eval-datasets.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 33 &middot; Building eval datasets</div></a>
+    <a data-nav="next" class="next" href="d35-observability-tracing.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 35 &middot; Observability &amp; tracing</div></a>
+  </div>
+
+  <div class="foot">Module 5 &middot; Evaluation &amp; Observability &middot; Day 34 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

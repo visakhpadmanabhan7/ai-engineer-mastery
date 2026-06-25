@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 5 · Capabilities &amp; limits</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 1 &middot; LLM Foundations</span>
+    <span class="pill">Day 5</span>
+    <span class="pill">50 min</span>
+    <span class="diff" title="Difficulty: foundational"><i class="on"></i><i></i><i></i></span>
+  </div>
+
+  <h1>Capabilities &amp; limits</h1>
+  <p class="lede">Days 1 to 4 built the mechanism. Today you turn it into judgment: what LLMs genuinely do well, where they reliably fail, and a clear framework for deciding what to delegate to a model versus a tool, a rule, or a traditional ML system. Knowing the limits is what separates an AI engineer from a demo builder.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Explain in-context learning and emergent abilities, and what they do and do not imply.</li>
+      <li>Hold a clear-eyed position on "reasoning" versus pattern-matching.</li>
+      <li>Name the real failure modes and trace each back to the mechanism.</li>
+      <li>Decide when a foundation model wins and when traditional ML wins.</li>
+      <li>Apply a "delegate to an LLM or not" framework to a new problem.</li>
+    </ul>
+  </div>
+
+  <h2>1 &middot; In-context learning: the capability that changed everything</h2>
+  <div class="prose">
+    <p>The defining behavior of large models is <strong>in-context learning</strong>: you can change what the model does <em>at inference time</em>, by what you put in the prompt, with no weight updates at all. Show it two or three examples of a task ("few-shot") and it picks up the pattern; describe a format and it adopts it; give it a persona and it follows it. The weights are frozen, yet behavior adapts. That is why prompting has so much leverage, and it is why a single general model can do thousands of tasks it was never specifically trained for.</p>
+    <p>This is the hinge of modern AI engineering. In classical ML, changing behavior means collecting labels and retraining. With in-context learning, changing behavior often means editing a prompt or supplying different context, which is a development cycle measured in minutes, not weeks. The whole discipline of context engineering (Module 2) exists because this channel is so powerful.</p>
+  </div>
+
+  <h2>2 &middot; Emergent abilities (and the honest caveat)</h2>
+  <div class="prose">
+    <p><strong>Emergent abilities</strong> are capabilities that are weak-to-absent in smaller models and appear as scale increases, multi-step reasoning, following complex instructions, rudimentary tool use, and so on, often without being explicitly trained for. Scale (more parameters, more data, more compute) buys qualitatively new behavior, not just incremental accuracy. This is genuinely remarkable and underlies why the field moved so fast.</p>
+    <p>The honest caveat, which marks a thoughtful engineer: some "emergence" is partly an artifact of how it is measured (sharp metrics can make a smooth underlying improvement look like a sudden jump), and "it emerged" is not a guarantee of reliability. An ability that <em>appears</em> at scale can still be brittle, inconsistent, and dependent on phrasing. So treat emergent abilities as real and useful, but never as a license to assume the model will do the hard thing dependably. You still have to measure it (Module 5).</p>
+  </div>
+
+  <h2>3 &middot; Reasoning vs pattern-matching: the balanced view</h2>
+  <div class="prose">
+    <p>Does the model "reason"? The defensible answer avoids both extremes. It is not <em>just</em> a lookup table: it generalizes to genuinely novel inputs, composes ideas, and solves problems absent from its training data, which is more than memorization. But its core operation remains next-token prediction over learned statistical structure, so its "reasoning" is fundamentally pattern completion that <em>resembles</em> reasoning, and it can be remarkably capable on familiar shapes of problem while failing on superficial variations that a human reasoner would handle trivially.</p>
+    <p>Two practical consequences. First, techniques like chain-of-thought (Module 2) help because writing out intermediate steps gives the model more tokens to condition on, which often improves multi-step results, but it is producing a plausible reasoning <em>trace</em>, not executing a proof, so a confident, well-formatted explanation can still reach a wrong conclusion. Second, robustness is suspect: small, meaning-preserving changes to a prompt can change the answer (prompt sensitivity, below). The senior stance is "capable and useful, but verify; do not anthropomorphize the competence."</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"LLMs do more than memorize, they generalize and compose, but the engine is still statistical next-token prediction, so the behavior is pattern completion that resembles reasoning. It is powerful on familiar problem shapes and brittle on superficial variations, which is exactly why I design for verification rather than trust." That is a balanced, senior answer that avoids both hype and dismissal.</p>
+  </div>
+
+  <h2>4 &middot; The real failure modes (each traces to the mechanism)</h2>
+  <div class="prose">
+    <p>These are the failures you will actually hit in production. Notice that none are mysterious, each follows directly from Days 1 to 4.</p>
+    <ul>
+      <li><strong>Hallucination.</strong> The objective rewards <em>plausible</em> continuations, and knowledge is lossy parametric memory, so the model will confidently produce fluent, well-formed falsehoods, fake citations, invented APIs, wrong specifics. High confidence is not high accuracy. Mitigate with grounding (RAG) and checking (eval).</li>
+      <li><strong>Arithmetic and exact symbol manipulation.</strong> Tokenization fractures digits and exact strings (Day 2), so reliable multi-digit math and character-exact operations are genuinely hard. Mitigate by giving the model a tool (a calculator, code execution).</li>
+      <li><strong>Fresh facts.</strong> Weights freeze at the knowledge cutoff (Day 1), so anything after it, or anything private, is simply absent. Mitigate by supplying current facts via context, retrieval, or tools.</li>
+      <li><strong>Long-horizon planning.</strong> The model is strong at the next step but accumulates error over long autonomous sequences, and has no built-in persistent state across calls (Day 4). Mitigate by decomposing into checkable steps and adding structure (agents, Module 4) rather than one giant open-ended ask.</li>
+      <li><strong>Prompt sensitivity.</strong> Because behavior is statistical, reordering, rephrasing, or trivial formatting changes can shift outputs. Mitigate with tested prompts, low temperature for deterministic tasks, and evaluation that catches regressions.</li>
+    </ul>
+    <p>The pattern across all five: <em>do not fight the mechanism, route around it.</em> When a task lands on a known failure mode, the fix is almost never "prompt harder," it is grounding, a tool, decomposition, or moving the work out of the model entirely.</p>
+  </div>
+
+  <h2>5 &middot; Foundation models vs traditional ML</h2>
+  <div class="prose">
+    <p>A foundation model is not always the answer, and saying so is strong senior signal. The choice turns on the shape of the problem.</p>
+  </div>
+
+  <table>
+    <tr><th>Dimension</th><th>Foundation model (LLM) wins</th><th>Traditional ML wins</th></tr>
+    <tr><td>Input</td><td>Language-rich, unstructured, ambiguous text</td><td>Structured/tabular features, numeric signals</td></tr>
+    <tr><td>Task breadth</td><td>Many tasks, changing requirements, zero/few-shot</td><td>One narrow, well-defined task</td></tr>
+    <tr><td>Data</td><td>Little or no labeled data; iterate via prompts</td><td>Plenty of labeled examples to train on</td></tr>
+    <tr><td>Latency &amp; cost at scale</td><td>Tolerant of higher per-call latency/cost</td><td>Needs millisecond latency and cheap-at-scale inference</td></tr>
+    <tr><td>Determinism / regulation</td><td>Some variation acceptable</td><td>Strict reproducibility, auditability, explainability</td></tr>
+    <tr><td>Iteration speed</td><td>Fast: edit a prompt, ship</td><td>Slow: relabel and retrain to change behavior</td></tr>
+  </table>
+
+  <div class="prose">
+    <p>Crisp version: reach for a <strong>foundation model</strong> when the input is language, the task is broad or shifting, labeled data is scarce, and fast iteration matters more than the last millisecond of latency. Reach for <strong>traditional ML</strong> when the task is narrow and well-labeled, you need low-latency, cheap, reproducible predictions at scale, or regulation demands an explainable model. And often the best system uses <em>both</em>: a cheap classifier or retriever does the heavy filtering, and an LLM handles the language-heavy, ambiguous step. This connects to the role distinction too: ML engineering trains custom models from data on a slow, data-centric cycle, while AI engineering builds applications on foundation models via API on a fast, prompt-centric cycle; both are real jobs and they increasingly overlap.</p>
+  </div>
+
+  <h2>6 &middot; A framework: delegate to an LLM, or not?</h2>
+  <div class="prose">
+    <p>Put it together into a decision you can run on any new problem. Ask, in order:</p>
+    <ul>
+      <li><strong>Is the task language-shaped?</strong> (understanding, generating, transforming, classifying, or conversing over natural language). If no, an LLM is probably the wrong primary tool.</li>
+      <li><strong>Does it land on a known failure mode?</strong> If it needs exact arithmetic, fresh or private facts, or long autonomous planning, do not ask the model to do that part raw, give it a tool, retrieval, or structure.</li>
+      <li><strong>Is "good enough with verification" acceptable, and can you verify?</strong> LLM output is probabilistic, so delegate where you can check the result (a schema, a test, a human gate, an eval) and where an occasional miss is recoverable. Do not delegate an unverifiable, high-stakes, one-shot decision to a raw model.</li>
+      <li><strong>Is the value worth the cost and latency?</strong> Per-call cost and latency are real (Days 2 and 4); a tiny, high-volume, deterministic decision is often cheaper and better as code or a small model.</li>
+    </ul>
+    <p>The shape of a good AI system falls out of this: an LLM for the genuinely language-and-ambiguity-heavy steps, wrapped in grounding (so facts are supplied), tools (so exactness is delegated), structure (so long tasks are decomposed and checkable), and evaluation (so you measure rather than hope). Everything in this path from here on is an elaboration of that sentence.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Concept</span>
+    <p>Delegate to an LLM the language-shaped, ambiguity-tolerant, verifiable parts of a problem. Route the exact, fresh-fact, long-horizon, or high-stakes-unverifiable parts to tools, retrieval, structure, or traditional ML. The art is not "use the LLM," it is drawing that boundary well.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: design the boundary for an invoice system</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>Requirement: from a folder of messy PDF invoices, extract vendor, date, line items, and total, then flag invoices that violate company spend policy and total them per department. Where does the LLM belong, and where does it not?</p>
+  </div>
+  <div class="diagram">  TASK                              BEST TOOL            WHY
+  ─────────────────────────────────────────────────────────────────────
+  read messy PDF → fields           LLM (extraction)     language-shaped,
+                                    + schema validation   tolerates variety;
+                                                          verify with a schema
+  recompute / sum the totals        code (not the LLM)   exact arithmetic →
+                                                          tokenization fails it
+  look up current policy rules       retrieval / DB       fresh, private facts
+                                                          → not in the weights
+  decide "violates policy?"          LLM + rules          judgment on language,
+                                    (verifiable gate)     but checked, not raw
+  per-department totals              code / SQL           deterministic aggregation
+  high-value invoice approval        human gate           high-stakes, not raw LLM</div>
+  <div class="prose">
+    <p>The LLM does what it is uniquely good at, turning unstructured, varied documents into structured fields and making a language-level policy judgment, while code does the arithmetic and aggregation, retrieval supplies the current rules, and a human approves the high-stakes cases. That division is the entire job. A naive build that asks one big prompt to "read these invoices, apply the policy, and give me the department totals" will hallucinate fields, miscompute sums, and use stale rules, three failure modes from section 4, all at once.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Say each answer out loud in full sentences, as if to an interviewer. Then open the solution and compare. The gap is your lesson.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>A product manager wants to replace your team's small, fast fraud-detection classifier (millions of transactions a day, sub-10ms budget, audited) with "just ask an LLM, it is smarter." Make the case for keeping traditional ML here.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>This task sits squarely where traditional ML wins. The input is structured/tabular transaction features, not language, so the LLM has no special advantage. The latency budget (sub-10ms at millions of calls a day) and the cost-at-scale requirement rule out a heavyweight per-call model; a small classifier is orders of magnitude cheaper and faster. There is abundant labeled data (known fraud outcomes) to train on, which is exactly the regime classical ML is built for. And the audited, regulated context demands reproducibility and explainability that a probabilistic LLM does not provide. "Smarter" is the wrong axis: the LLM is better at language and ambiguity, not at cheap, deterministic, explainable scoring of tabular data. The strong synthesis: keep the classifier as the workhorse, and if there is a genuinely language-heavy slice (say, reading free-text dispute notes), add an LLM only for that step, behind verification.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>An LLM confidently tells a user that a function <code>pandas.read_excel_fast()</code> exists, with plausible arguments. It does not exist. Name the failure mode, explain it mechanistically, and give two mitigations.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>This is hallucination. Mechanistically, the model generates the most <em>plausible</em> next tokens given the context, and its knowledge is lossy parametric memory, so a function name that <em>looks</em> like it should exist (it pattern-matches the shape of real pandas APIs) gets high probability even though no such fact was retrieved, because the objective rewards plausibility, not truth, and confidence is unrelated to correctness. Two mitigations: first, ground it, give the model the actual library documentation or signatures in context (RAG) so it answers from real text rather than parametric guesswork; second, verify, run or type-check the generated code, or check the symbol against the real API, so a hallucinated call fails fast and visibly instead of reaching the user. A third, if relevant: keep temperature low for this kind of factual/code task to reduce drift into invented tokens.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>You are asked to build an agent that autonomously plans and executes a 30-step data migration end to end with no human checkpoints. What concerns do you raise from this lesson, and how do you reshape the design?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>The red flag is long-horizon planning combined with no verification on a high-stakes, hard-to-reverse task. The model is strong at the next step but accumulates error over long autonomous sequences and has no built-in persistent state, so a single wrong step early can cascade, and a data migration is exactly the kind of irreversible action where an occasional silent failure is unacceptable. Reshape it: decompose the 30 steps into small, individually checkable units with explicit success criteria rather than one open-ended plan; make destructive or irreversible actions idempotent and gated behind human approval (Module 4); add observability so you can see the trajectory, not just the final state; and prefer a structured plan-execute pattern with re-planning over a single giant autonomous run. In short, keep the LLM for the language-and-judgment parts, but wrap the long, risky, exact work in structure, tools, and human gates so the system is verifiable and recoverable rather than trusting a 30-step unsupervised chain.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's Foundations slice and common 2026 screens. Drill the one-line keys, then expand each into a 90-second answer with Claude using protocol prompt #2.</p>
+  <ul class="q-list">
+    <li>Foundation models vs traditional ML, when does each win?
+      <div class="a">Key: FM for language-rich, ambiguous, multi-task, low-label, fast-iteration work; traditional ML for narrow, labeled, low-latency, regulated, cheap-at-scale prediction.</div></li>
+    <li>How is AI engineering different from ML engineering?
+      <div class="a">Key: ML trains custom models from data (data-centric, slow cycle); AI engineering builds apps on foundation models via API (prompt-centric, fast cycle).</div></li>
+    <li>What is in-context learning and why does it matter?
+      <div class="a">Key: behavior adapts at inference from the prompt with no weight updates; it is why prompting has leverage and one model serves many tasks.</div></li>
+    <li>Do LLMs actually reason, or just pattern-match?
+      <div class="a">Key: more than memorization (they generalize and compose) but the engine is statistical next-token prediction, so it is pattern completion resembling reasoning; capable yet brittle, so verify.</div></li>
+    <li>What are emergent abilities, and what is the caveat?
+      <div class="a">Key: capabilities that appear with scale without explicit training; caveat is that some are measurement artifacts and emergence does not guarantee reliability.</div></li>
+    <li>Name the main LLM failure modes and tie each to the mechanism.
+      <div class="a">Key: hallucination (plausibility objective + lossy memory), bad arithmetic (tokenized digits), stale facts (knowledge cutoff), weak long-horizon planning (error accumulation), prompt sensitivity (statistical behavior).</div></li>
+    <li>How do you decide what to delegate to an LLM versus not?
+      <div class="a">Key: delegate language-shaped, ambiguity-tolerant, verifiable parts; route exact, fresh-fact, long-horizon, or high-stakes-unverifiable parts to tools, retrieval, structure, or traditional ML.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (15&ndash;20 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Provoke the failure modes deliberately so you internalize them. Using the Claude web app or the <a href="https://docs.claude.com/en/api/messages">Messages API</a>: (1) ask for "five academic papers with authors and years" on a niche topic and check whether any citations are invented (hallucination); (2) ask it to multiply two 6-digit numbers and verify against a calculator (arithmetic via tokenization); (3) ask about an event after its knowledge cutoff and watch it either refuse or confabulate (fresh facts). Then take one of the three and design the fix, give it the real source, a calculator tool, or a retrieved fact, and confirm the failure disappears. You just turned three abstract limits into reflexes.</p>
+    <p class="muted" style="font-size:13.5px">Further reading: skim Anthropic's guidance on reducing hallucinations in the <a href="https://docs.claude.com/en/docs/build-with-claude/overview">build-with-Claude docs</a>, and note how every mitigation is grounding, tools, or verification, exactly section 4. See <a href="../../tools.html">Tools &amp; Claude</a> for access.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>This lesson is essentially the design philosophy behind your work on MaiQ. Your retrieval and grounding exist because of the fresh-facts and hallucination limits, you supply the model with the right passages rather than trusting parametric memory. Your LLM-as-judge evaluation exists because of the "capable but verify" stance, you measure quality instead of assuming it. And the Skill Store reflects the delegate-with-structure principle: users compose agents from tools, so exact and external work is routed to tools while the model handles the language and orchestration. Your career arc itself, from data science at Vay and Einbliq into application-level AI engineering on MaiQ, is the foundation-model-versus-traditional-ML distinction lived out. When an interviewer asks "what are LLMs bad at, and how do you handle it," you can list the failure modes from the mechanism and then ground each in a concrete choice you made: grounding for hallucination, tools for exactness, evaluation for verification.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>In-context learning lets behavior adapt from the prompt with no retraining, which is the leverage behind modern AI engineering, and emergent abilities are real but not a guarantee of reliability. LLMs do more than memorize yet remain statistical pattern-completers, so the honest stance is capable-but-verify. The real failure modes, hallucination, arithmetic, fresh facts, long-horizon planning, prompt sensitivity, each trace to the mechanism, and each is fixed by routing around it with grounding, tools, structure, or traditional ML rather than prompting harder. Foundation models win on language-rich, ambiguous, fast-iterating work; traditional ML wins on narrow, labeled, low-latency, regulated tasks; great systems combine both. The craft is drawing that delegation boundary well.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d05">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: a hands-on lab, inspect a real model end to end (temperature, tokenizer, embeddings) and write up what you observe.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d04-context-windows-kv-cache.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 4 &middot; Context windows &amp; the KV cache</div></a>
+    <a data-nav="next" class="next" href="d06-foundations-lab.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 6 &middot; Lab &mdash; inspect a real model</div></a>
+  </div>
+
+  <div class="foot">Module 1 &middot; LLM Foundations &middot; Day 5 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

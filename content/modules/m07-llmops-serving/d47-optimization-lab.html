@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 47 · Lab — cut cost &amp; latency</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 7 &middot; LLMOps &amp; Serving</span>
+    <span class="pill">Day 47</span>
+    <span class="pill">90 min</span>
+    <span class="diff" title="Difficulty: advanced"><i class="on"></i><i class="on"></i><i class="on"></i></span>
+  </div>
+
+  <h1>Lab &mdash; cut cost &amp; latency</h1>
+  <p class="lede">Today you stop reading and start optimizing. You take a deliberately naive multi-call feature, apply the four levers from this module, and measure the before and after. By the end you will have a repeatable harness that proves a cost and latency win with numbers, exactly the artifact a senior interview wants you to describe.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Instrument an LLM feature with per-call token and cost accounting.</li>
+      <li>Apply prompt caching to a static prefix and measure the saving.</li>
+      <li>Add a semantic cache for repeat queries and reason about its risks.</li>
+      <li>Route easy turns to a smaller model and parallelize independent calls.</li>
+      <li>Report a clean before/after table of cost, latency, and any quality delta.</li>
+    </ul>
+  </div>
+
+  <h2>1 &middot; The naive feature (the "before")</h2>
+  <div class="prose">
+    <p>Our target is a small "document insights" feature. For each user question it makes three sequential calls against a large static reference document: classify the question's difficulty, draft an answer, then polish the wording. It is naive in five ways you will fix: the big reference doc is resent uncached every call, repeat questions are recomputed from scratch, every call uses the expensive model, the three calls run serially even though two are independent, and nothing is measured. Here is the instrumented baseline.</p>
+  </div>
+
+  <pre><code><span class="tok-k">import</span> asyncio, time, hashlib
+<span class="tok-k">from</span> dataclasses <span class="tok-k">import</span> dataclass, field
+<span class="tok-k">from</span> anthropic <span class="tok-k">import</span> AsyncAnthropic
+
+client = AsyncAnthropic()  <span class="tok-c"># reads ANTHROPIC_API_KEY from env</span>
+
+BIG = AsyncAnthropic  <span class="tok-c"># placeholder import guard; real code uses the client above</span>
+REFERENCE_DOC = open(<span class="tok-s">"reference.md"</span>).read()   <span class="tok-c"># a few thousand tokens, static</span>
+
+<span class="tok-c"># --- price sheet (per token); update to the live numbers for your model ---</span>
+PRICES = {
+  <span class="tok-s">"big"</span>:   {<span class="tok-s">"in"</span>: <span class="tok-n">5</span>/<span class="tok-n">1e6</span>,  <span class="tok-s">"out"</span>: <span class="tok-n">15</span>/<span class="tok-n">1e6</span>, <span class="tok-s">"cached_in"</span>: <span class="tok-n">0.5</span>/<span class="tok-n">1e6</span>},
+  <span class="tok-s">"small"</span>: {<span class="tok-s">"in"</span>: <span class="tok-n">0.8</span>/<span class="tok-n">1e6</span>, <span class="tok-s">"out"</span>: <span class="tok-n">4</span>/<span class="tok-n">1e6</span>,  <span class="tok-s">"cached_in"</span>: <span class="tok-n">0.08</span>/<span class="tok-n">1e6</span>},
+}
+MODELS = {<span class="tok-s">"big"</span>: <span class="tok-s">"claude-big-model"</span>, <span class="tok-s">"small"</span>: <span class="tok-s">"claude-small-model"</span>}  <span class="tok-c"># put real ids here</span>
+
+<span class="tok-f">@dataclass</span>
+<span class="tok-k">class</span> <span class="tok-f">Meter</span>:
+    cost: float = <span class="tok-n">0.0</span>
+    calls: int = <span class="tok-n">0</span>
+    def add(self, usage, tier=<span class="tok-s">"big"</span>):
+        p = PRICES[tier]
+        plain_in  = usage.input_tokens - getattr(usage, <span class="tok-s">"cache_read_input_tokens"</span>, <span class="tok-n">0</span>)
+        cached_in = getattr(usage, <span class="tok-s">"cache_read_input_tokens"</span>, <span class="tok-n">0</span>)
+        self.cost += plain_in*p[<span class="tok-s">"in"</span>] + cached_in*p[<span class="tok-s">"cached_in"</span>] + usage.output_tokens*p[<span class="tok-s">"out"</span>]
+        self.calls += <span class="tok-n">1</span>
+
+<span class="tok-k">async</span> <span class="tok-k">def</span> <span class="tok-f">ask_naive</span>(question, meter):
+    <span class="tok-c"># big doc resent uncached, expensive model, three SERIAL calls</span>
+    sys = [{<span class="tok-s">"type"</span>: <span class="tok-s">"text"</span>, <span class="tok-s">"text"</span>: <span class="tok-s">"You analyze the document."</span>},
+           {<span class="tok-s">"type"</span>: <span class="tok-s">"text"</span>, <span class="tok-s">"text"</span>: REFERENCE_DOC}]
+    diff   = <span class="tok-k">await</span> _call(MODELS[<span class="tok-s">"big"</span>], sys, f<span class="tok-s">"Rate difficulty (easy/hard): {question}"</span>, meter)
+    draft  = <span class="tok-k">await</span> _call(MODELS[<span class="tok-s">"big"</span>], sys, f<span class="tok-s">"Answer: {question}"</span>, meter)
+    polish = <span class="tok-k">await</span> _call(MODELS[<span class="tok-s">"big"</span>], sys, f<span class="tok-s">"Polish this answer: {draft}"</span>, meter)
+    <span class="tok-k">return</span> polish
+
+<span class="tok-k">async</span> <span class="tok-k">def</span> <span class="tok-f">_call</span>(model, system, user, meter, tier=<span class="tok-s">"big"</span>):
+    r = <span class="tok-k">await</span> client.messages.create(
+        model=model, max_tokens=<span class="tok-n">400</span>, system=system,
+        messages=[{<span class="tok-s">"role"</span>: <span class="tok-s">"user"</span>, <span class="tok-s">"content"</span>: user}])
+    meter.add(r.usage, tier)
+    <span class="tok-k">return</span> r.content[<span class="tok-n">0</span>].text</code></pre>
+
+  <div class="prose">
+    <p>Run a small workload (say 20 questions, some repeated) through <code>ask_naive</code>, timing the wall clock and reading <code>meter.cost</code>. That number and that latency are your baseline. Everything below is measured against it. <em>Note: the model ids and exact prices above are placeholders, fill in your provider's live values before running, per the accuracy rule from the brief.</em></p>
+  </div>
+
+  <h2>2 &middot; The four levers</h2>
+  <div class="prose">
+    <p>You will apply them in increasing order of effort, measuring after each so you can attribute the win:</p>
+    <ul>
+      <li><strong>Lever A &mdash; prompt caching</strong> the static reference doc, so it is billed at a fraction after the first call instead of full price three times per question.</li>
+      <li><strong>Lever B &mdash; semantic cache</strong> for repeat questions, so a near-duplicate skips all three calls entirely.</li>
+      <li><strong>Lever C &mdash; model routing</strong>, sending the easy turns (difficulty rating, polish) to a smaller model and reserving the big model for the hard drafting.</li>
+      <li><strong>Lever D &mdash; parallelization</strong>, running the independent calls concurrently with <code>asyncio</code> so latency is the max of them, not the sum.</li>
+    </ul>
+  </div>
+
+  <div class="diagram">  BEFORE                                AFTER
+  ─────────────────────────             ─────────────────────────────
+  doc resent full ×3/question           prompt-cached prefix (~10% billed)
+  every repeat recomputed               semantic cache short-circuits repeats
+  big model on all 3 calls              small model on classify + polish
+  classify → draft → polish (serial)    classify ∥ (draft → polish)  concurrent
+  nothing measured                      token + cost meter, before/after table</div>
+
+  <hr class="section-rule">
+
+  <h2>Build checkpoints &mdash; implement, then reveal</h2>
+  <p class="muted">Do each checkpoint yourself first, run it, read the new cost and latency, then open the solution and compare. The measured delta is the lesson.</p>
+
+  <div class="callout practice">
+    <span class="label">Checkpoint A &mdash; prompt caching</span>
+    <p>Add a <code>cache_control</code> breakpoint so the big static <code>REFERENCE_DOC</code> is cached. Re-run the workload and report the new cost. Why does the saving show up on the second call onward, not the first?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Mark the reference block as cacheable and keep it first (static-first, Day 44):</p>
+    <pre><code>sys = [{<span class="tok-s">"type"</span>: <span class="tok-s">"text"</span>, <span class="tok-s">"text"</span>: <span class="tok-s">"You analyze the document."</span>},
+       {<span class="tok-s">"type"</span>: <span class="tok-s">"text"</span>, <span class="tok-s">"text"</span>: REFERENCE_DOC,
+        <span class="tok-s">"cache_control"</span>: {<span class="tok-s">"type"</span>: <span class="tok-s">"ephemeral"</span>}}]   <span class="tok-c"># &lt;- breakpoint after the static doc</span></code></pre>
+    <p>The first call writes the cache (a one-time write cost, slightly higher than a normal call); every call after, within the ~5 min TTL, reads the doc from cache and is billed roughly 10% on those tokens. Because the three calls per question all share the same prefix, calls two and three of the very first question already hit the cache, and all later questions do too. The <code>Meter</code> already separates <code>cache_read_input_tokens</code>, so the reported cost drops without any other change. This is usually the single biggest line-item win, because the reference doc was the largest input by far.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Checkpoint B &mdash; semantic cache</span>
+    <p>Add a semantic cache so a question that means the same as a recent one returns the cached final answer and skips all three calls. Implement a simple version and state where you would <em>refuse</em> to use it.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Embed the question, compare to recent (embedding, answer) pairs, and return the stored answer above a conservative threshold:</p>
+    <pre><code><span class="tok-k">class</span> <span class="tok-f">SemanticCache</span>:
+    <span class="tok-k">def</span> <span class="tok-f">__init__</span>(self, threshold=<span class="tok-n">0.92</span>):
+        self.items = []          <span class="tok-c"># (vector, answer)</span>
+        self.t = threshold
+    <span class="tok-k">async</span> <span class="tok-k">def</span> <span class="tok-f">get</span>(self, q_vec):
+        <span class="tok-k">for</span> vec, ans <span class="tok-k">in</span> self.items:
+            <span class="tok-k">if</span> _cosine(q_vec, vec) &gt;= self.t:
+                <span class="tok-k">return</span> ans            <span class="tok-c"># HIT: skip all LLM calls</span>
+        <span class="tok-k">return</span> None
+    <span class="tok-k">def</span> <span class="tok-f">put</span>(self, q_vec, ans): self.items.append((q_vec, ans))</code></pre>
+    <p>Wrap the feature: on a hit, return immediately and record zero LLM cost for that request; on a miss, run the (now cached + routed) pipeline and <code>put</code> the result. <strong>Refuse to use it</strong> for personalized, time-sensitive, or high-stakes queries (Day 44): two users' "summarize my document" embed alike but must not share an answer, and "what changed today" goes stale instantly. Gate those intents to bypass the cache, or include the user/tenant in the key. The cost win here is the largest <em>per repeat</em> (the whole request is free) but only materializes if your workload actually has repeats, so report hit rate alongside cost.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Checkpoint C &mdash; model routing</span>
+    <p>Route the difficulty-rating and polishing calls to the small model, keeping the big model only for the actual answer drafting. Re-measure. What is the quality risk and how do you check it?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Pass the tier through and pick the model + price per call:</p>
+    <pre><code>diff   = <span class="tok-k">await</span> _call(MODELS[<span class="tok-s">"small"</span>], sys, f<span class="tok-s">"Rate difficulty: {q}"</span>, meter, tier=<span class="tok-s">"small"</span>)
+draft  = <span class="tok-k">await</span> _call(MODELS[<span class="tok-s">"big"</span>],   sys, f<span class="tok-s">"Answer: {q}"</span>,            meter, tier=<span class="tok-s">"big"</span>)
+polish = <span class="tok-k">await</span> _call(MODELS[<span class="tok-s">"small"</span>], sys, f<span class="tok-s">"Polish: {draft}"</span>,        meter, tier=<span class="tok-s">"small"</span>)</code></pre>
+    <p>Classification and rewriting are easy, format-bound tasks the small model handles well, and it can be 5-10x cheaper per token, so moving two of three calls off the big model is a large cost cut with little quality exposure. The risk is that the small model underperforms on the task you moved; you check it the same way you check any model change, with an eval (Module 5): run your golden set through both routings and confirm the routed version's answer quality stays within bounds. If difficulty is rated <em>hard</em>, you could also route the draft (and even keep polish on the big model) accordingly, routing is a policy you tune against measured quality, not a guess.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Checkpoint D &mdash; parallelize</span>
+    <p>The difficulty rating does not depend on the draft, so it should not block it. Restructure so independent calls run concurrently and report the latency change. Why does this change latency but not cost?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Run the independent calls together with <code>asyncio.gather</code>; only chain what is truly dependent (polish needs the draft):</p>
+    <pre><code><span class="tok-c"># difficulty rating and drafting are independent → run concurrently</span>
+diff, draft = <span class="tok-k">await</span> asyncio.gather(
+    _call(MODELS[<span class="tok-s">"small"</span>], sys, f<span class="tok-s">"Rate difficulty: {q}"</span>, meter, <span class="tok-s">"small"</span>),
+    _call(MODELS[<span class="tok-s">"big"</span>],   sys, f<span class="tok-s">"Answer: {q}"</span>,          meter, <span class="tok-s">"big"</span>),
+)
+polish = <span class="tok-k">await</span> _call(MODELS[<span class="tok-s">"small"</span>], sys, f<span class="tok-s">"Polish: {draft}"</span>, meter, <span class="tok-s">"small"</span>)  <span class="tok-c"># depends on draft</span></code></pre>
+    <p>Latency for the two independent calls becomes the <em>max</em> of them instead of the <em>sum</em>, so wall-clock drops. Cost is unchanged because you still make the same number of calls on the same models with the same tokens, you only changed <em>when</em> they run, not <em>whether</em> they run. This is the key distinction: parallelization is a latency lever, caching and routing are cost levers. Combining all four gives the best of both.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>The "after": report the table</h2>
+  <div class="callout example">
+    <span class="label">Worked result shape</span>
+    <p>Run the same 20-question workload (with repeats) through the optimized pipeline and fill in a table like this. Your exact numbers depend on your doc size, repeat rate, and live prices, the shape is what matters.</p>
+  </div>
+  <div class="diagram">  variant                         cost/run   p50 latency   quality
+  ──────────────────────────────────────────────────────────────────
+  naive (baseline)                1.00×      1.00×         ref
+  + prompt caching (A)            ~0.55×     ~0.95×        =
+  + semantic cache (B)            ~0.40×     ~0.55×*       =    *on repeats
+  + model routing (C)             ~0.22×     ~0.50×        ≈ (verify on golden set)
+  + parallelize (D)               ~0.22×     ~0.35×        ≈
+  ──────────────────────────────────────────────────────────────────
+  net: large cost cut + lower latency, quality held within bounds</div>
+  <div class="prose">
+    <p>Read the table the way an interviewer wants: each lever is attributed (you measured after each), cost and latency are separated (caching/routing cut cost, semantic-cache/parallelize cut latency), and quality is explicitly checked, not assumed. The illustrative multipliers above are not a promise; the discipline of measuring each step <em>is</em> the deliverable. This is exactly how a real "cut inference cost" project reads when you present it.</p>
+  </div>
+
+  <h2>Why this matters for you as an AI engineer</h2>
+  <div class="callout key">
+    <span class="label">This lab is your interview story, generalized</span>
+    <p>The four levers and the before/after harness are the reusable engine behind any "we cut cost and latency" claim. The signal that lands in interviews is not the percentage, it is that you instrumented first, attributed each change to a lever, separated cost from latency, and verified quality with an eval before shipping. Build this harness once and you can apply it to any feature, and you can describe it crisply when asked "tell me about an optimization you owned."</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Module 7 review &mdash; questions across all six days</h2>
+  <p class="muted">A consolidated drill across the module. Say the one-line key, then expand the ones you stumble on with Claude.</p>
+  <ul class="q-list">
+    <li>Why are output tokens more expensive than input tokens?
+      <div class="a">Key: input prefills in one parallel pass (cheap/token); output decodes serially, one pass per token, so it is priced 2-4x higher.</div></li>
+    <li>What are TTFT and TPS, and which does a long prompt hurt?
+      <div class="a">Key: TTFT = prefill latency (a long prompt hurts this); TPS = decode speed; total ≈ TTFT + output/TPS.</div></li>
+    <li>Order the inference-optimization ladder.
+      <div class="a">Key: prompt caching → KV caching → continuous batching → quantization → speculative decoding; cheapest/safest first.</div></li>
+    <li>Why is KV-cache memory the limit on concurrency and context length?
+      <div class="a">Key: the cache scales with sequence length × batch and lives in VRAM, so memory, not compute, caps how much you serve at once.</div></li>
+    <li>What does continuous batching buy and does it change outputs?
+      <div class="a">Key: 2-4x throughput by keeping the GPU saturated (token-level add/evict); outputs unchanged, it is a scheduling change.</div></li>
+    <li>Name the five cache layers.
+      <div class="a">Key: prompt, semantic, tool-result, embedding, retrieval, each catching a different unit of repeated work.</div></li>
+    <li>How do you do Anthropic prompt caching correctly, and where is semantic caching dangerous?
+      <div class="a">Key: static-first byte-identical prefix + breakpoint, cached input ~10%, ~5 min TTL; semantic cache is dangerous for personalized/time-sensitive/high-stakes intents.</div></li>
+    <li>What is the strongest agent safety control and why?
+      <div class="a">Key: the read/write split with an approval gate, it contains even a hijacked model to a declined draft because it depends on irreversibility, not detection.</div></li>
+    <li>How do you ship a prompt change safely?
+      <div class="a">Key: prompts as versioned code → golden-set CI gate that blocks regressions (incl. cost/format) → canary with auto-rollback; tag every call for attribution.</div></li>
+    <li>How do you handle a 429, and what is a circuit breaker?
+      <div class="a">Key: respect Retry-After, backoff + jitter, cap attempts, retry only idempotent calls; breaker is Closed → Open → Half-open to fail fast during outages.</div></li>
+    <li>What are the four application-side levers to cut cost and latency?
+      <div class="a">Key: prompt caching + model routing (cost), semantic cache + parallelization (latency); measure each and verify quality.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (extend the lab)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Take your finished harness and add the reliability layer from Day 46: wrap <code>_call</code> with a timeout and a 429-aware retry (backoff + jitter, respect <code>Retry-After</code>), and add a fallback that drops to the small model if the big one fails. Then write the before/after table to a file and commit it next to the code. For real token counts and caching behavior, lean on Anthropic's <a href="https://docs.claude.com/en/docs/build-with-claude/prompt-caching">prompt caching</a> and <a href="https://docs.claude.com/en/docs/build-with-claude/token-counting">token counting</a> docs. Stretch goal: add a tiny golden set of 8 questions and assert the routed pipeline's quality stays within bounds, turning the lab into a CI-gated optimization.</p>
+    <p class="muted" style="font-size:13.5px">No API access today? Implement the <code>Meter</code>, <code>SemanticCache</code>, and the parallel structure against a stub that returns fixed text + fake usage, the architecture is the learning. See <a href="../../tools.html">Tools &amp; Claude</a>.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>This lab is the generalized version of what you actually did on MaiQ. Your 37% inference-cost reduction came from 11+ retrieval and chunking experiments measured against a 2% retrieval-quality drop with your LLM-as-judge framework, which is precisely the instrument-then-attribute discipline this harness teaches. When you describe the project, use this lab's structure: "I built a measurement harness with per-call token and cost accounting, then moved one lever at a time, retrieval-side trims plus caching and routing, and gated each change on quality with an LLM-as-judge eval, landing a 37% cut before quality slipped past 2%." That is a senior-grade optimization narrative: levers, measurement, and a quality bound, not a lucky number.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>You turned a naive three-call feature into an optimized one by applying four levers and measuring each: prompt caching and model routing cut cost, semantic caching and parallelization cut latency. The deliverable is the harness and the before/after table, instrument first, attribute every change to a lever, separate cost from latency, and verify quality with an eval before shipping. Semantic caching is the biggest per-repeat win and the riskiest, so it stays gated away from personalized and time-sensitive intents. This is the reusable engine behind every "we cut cost and latency" story, including your own.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d47">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Next module: System Design Fundamentals, starting with the interview framework that structures any design question.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d46-deployment-cicd.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 46 &middot; Deployment &amp; CI/CD</div></a>
+    <a data-nav="next" class="next" href="../m08-system-design-fundamentals/d48-sd-interview-framework.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 48 &middot; System design interview framework</div></a>
+  </div>
+
+  <div class="foot">Module 7 &middot; LLMOps &amp; Serving &middot; Day 47 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

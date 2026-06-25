@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 18 · Rerankers &amp; two-stage retrieval</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 3 &middot; RAG &amp; Retrieval</span>
+    <span class="pill">Day 18</span>
+    <span class="pill">50 min</span>
+    <span class="diff" title="Difficulty: intermediate"><i class="on"></i><i class="on"></i><i></i></span>
+  </div>
+
+  <h1>Rerankers &amp; two-stage retrieval</h1>
+  <p class="lede">Your first-stage retriever is built for recall on a budget, not precision. Today you bolt on a second stage that rereads the shortlist properly, the single highest-leverage quality fix in most RAG systems, and you learn exactly when it is not worth the latency.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Explain the retrieve-then-rerank funnel and why two cheap-then-expensive stages beat one.</li>
+      <li>Distinguish bi-encoder, cross-encoder, and late-interaction (ColBERT) on the accuracy/cost axis.</li>
+      <li>Pick between Cohere Rerank, a BGE/sentence-transformers cross-encoder, and skipping reranking entirely.</li>
+      <li>Set first-stage top-k and final top-k deliberately, with a latency budget in mind.</li>
+      <li>Add MMR for diversity when your top results are near-duplicates.</li>
+    </ul>
+  </div>
+
+  <h2>1 &middot; Why one stage is not enough</h2>
+  <div class="prose">
+    <p>Recall the cost shape from Day 16. A bi-encoder (dense retrieval) embeds every chunk <em>once</em> at ingest, then a query is one embedding plus an approximate-nearest-neighbor lookup. That is what makes it scale to millions of chunks: the expensive work is precomputed and the query never sees the chunk text and the query text <em>together</em>. The price you pay is precision. The encoder compressed each chunk into a single fixed vector before it ever knew what you would ask, so it cannot notice that a chunk mentions your exact entity, answers your exact sub-question, or merely shares a topic.</p>
+    <p>A reranker fixes precisely that. It is a slower, more accurate model that scores each <em>(query, chunk)</em> pair jointly, with full cross-attention between the two texts. You cannot afford to run it over a million chunks. You <em>can</em> afford to run it over the 50 to 100 candidates the cheap stage already shortlisted. That is the whole trick: <strong>let a cheap model cast a wide net for recall, then let an expensive model rank the catch for precision.</strong></p>
+  </div>
+
+  <div class="diagram">  query: "what changed in the v3 billing webhook payload?"
+
+  ┌─────────────────────────────────────────────────────────────┐
+  │  ~1,000,000 chunks in the index                              │
+  └───────────────────────────┬─────────────────────────────────┘
+                              │  STAGE 1  (cheap, high recall)
+                              │  BM25 + dense, fused (RRF)   ~10-30 ms
+                              ▼
+                   top 50-100 candidates        ← optimize for "is it in here?"
+                              │  STAGE 2  (expensive, high precision)
+                              │  cross-encoder rereads each pair  ~50-300 ms
+                              ▼
+                   reranked, keep top 5-8        ← optimize for "is it on top?"
+                              │
+                              ▼
+                   [ LLM generation, grounded ]</div>
+
+  <div class="prose">
+    <p>Two knobs define the funnel. The <strong>first-stage k</strong> (how many candidates you fetch, e.g. 50 or 100) sets your recall ceiling: the reranker can only reorder what the first stage handed it, so if the right chunk was at rank 120 it is gone forever. The <strong>final k</strong> (how many you keep after reranking, e.g. 5 or 8) sets how much context the generator sees. Widen the first stage to raise the recall ceiling; tighten the final cut to keep the prompt focused and cheap.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"Reranking is a precision stage that rescores the first-stage shortlist with a cross-encoder that reads the query and each candidate jointly. The first stage is tuned for recall at scale, the reranker for ordering quality on a small N. It is the highest-ROI quality lever in RAG because most bad answers come from a relevant chunk sitting just below the cutoff, and reranking pulls it up."</p>
+  </div>
+
+  <h2>2 &middot; Three architectures: bi-encoder, cross-encoder, late-interaction</h2>
+  <div class="prose">
+    <p>All three turn text into something comparable, but <em>when</em> they let the query and document interact is the entire story, and it dictates cost.</p>
+  </div>
+
+  <table>
+    <tr><th>Architecture</th><th>How it scores</th><th>Cost &amp; role</th></tr>
+    <tr><td><b>Bi-encoder</b><br><span class="muted">dense retrieval</span></td><td>Encode query and chunk <em>separately</em> into one vector each; compare with cosine/dot. No interaction until the very end.</td><td>Chunks embedded once at ingest. Query = 1 forward pass + ANN. <b>The retriever.</b> Scales to millions.</td></tr>
+    <tr><td><b>Cross-encoder</b><br><span class="muted">the reranker</span></td><td>Concatenate <code>[query] [SEP] [chunk]</code> into one input; full self-attention across both; output a single relevance score.</td><td>One forward pass <em>per pair</em>, nothing precomputable. Most accurate, slow. <b>Rerank small N only.</b></td></tr>
+    <tr><td><b>Late interaction</b><br><span class="muted">ColBERT</span></td><td>Encode every <em>token</em> to a vector; score = sum over query tokens of their best match against any chunk token (MaxSim).</td><td>Token vectors precomputable, interaction deferred to query time. Middle ground: more accurate than bi-encoder, cheaper than cross-encoder, but storage-heavy.</td></tr>
+  </table>
+
+  <div class="diagram">  BI-ENCODER (retrieve)        CROSS-ENCODER (rerank)        COLBERT (late interaction)
+
+  q ─► [enc] ─► ●              q ─┐                          q ─► [enc] ─► ●●●●  (per token)
+                  cos          [q SEP d] ─► [enc] ─► score                 \  \  \  MaxSim
+  d ─► [enc] ─► ●              d ─┘                          d ─► [enc] ─► ●●●●●●●
+
+  interact: at the end         interact: everywhere          interact: token-to-token, late
+  cost:     cheapest           cost:     most expensive       cost:     in between</div>
+
+  <div class="prose">
+    <p>Why is the cross-encoder so much better? Because attention runs <em>across</em> the query and the chunk together (Day 1's mechanism), the model can directly check "does this chunk answer <em>this</em> question," not just "is this chunk in roughly the same topic." That joint read is exactly the signal a single precomputed vector throws away. Why is it so much slower? For the same reason: nothing can be precomputed, because the score depends on the pair, so you pay a full forward pass for every candidate, every query.</p>
+    <p>Late interaction (ColBERT) is the clever middle: it keeps per-token vectors so most of the encoding is precomputed like a bi-encoder, but defers the fine-grained matching to query time so it recovers much of the cross-encoder's precision. The cost is storage, you store many vectors per chunk instead of one, which is why most teams reach for a cross-encoder reranker first and only consider late interaction when reranking latency itself becomes the bottleneck.</p>
+  </div>
+
+  <h2>3 &middot; What to actually use</h2>
+  <div class="prose">
+    <p>You will not train a reranker. You will call one. Three realistic options, in rough order of "just make it work" to "own the box":</p>
+    <ul>
+      <li><strong>Cohere Rerank</strong> (managed API). Send the query plus your candidate texts, get back scored, reordered indices. No model to host, strong out of the box, multilingual. The trade-off is a network hop and per-call cost. Best when you want quality fast and do not want to run a GPU.</li>
+      <li><strong>BGE reranker</strong> (e.g. <code>BAAI/bge-reranker-v2-m3</code>) or other open cross-encoders, self-hosted. Strong, multilingual, free to run, but you own the serving and the latency. Best when data cannot leave your boundary or volume makes per-call pricing hurt.</li>
+      <li><strong>A local sentence-transformers cross-encoder</strong> (e.g. <code>cross-encoder/ms-marco-MiniLM-L-6-v2</code>). Small, CPU-runnable, a few lines of code. Lower ceiling than BGE/Cohere but a great default for prototypes and latency-sensitive paths.</li>
+    </ul>
+    <p>The code shape is identical across all three: produce candidates, score each against the query, sort, truncate.</p>
+  </div>
+
+  <pre><code><span class="tok-c"># Stage 1 already gave you ~50 candidates (BM25 + dense, fused).</span>
+<span class="tok-k">from</span> sentence_transformers <span class="tok-k">import</span> CrossEncoder
+
+reranker = CrossEncoder(<span class="tok-s">"cross-encoder/ms-marco-MiniLM-L-6-v2"</span>)
+
+<span class="tok-k">def</span> <span class="tok-f">rerank</span>(query, candidates, top_k=<span class="tok-n">8</span>):
+    <span class="tok-c"># candidates: list of {"id":..., "text":...} from stage 1</span>
+    pairs  = [(query, c[<span class="tok-s">"text"</span>]) <span class="tok-k">for</span> c <span class="tok-k">in</span> candidates]
+    scores = reranker.predict(pairs)            <span class="tok-c"># one joint pass per pair</span>
+    ranked = <span class="tok-f">sorted</span>(<span class="tok-f">zip</span>(candidates, scores),
+                    key=<span class="tok-k">lambda</span> cs: cs[<span class="tok-n">1</span>], reverse=<span class="tok-k">True</span>)
+    <span class="tok-k">return</span> [c <span class="tok-k">for</span> c, _ <span class="tok-k">in</span> ranked[:top_k]]   <span class="tok-c"># precision cut for the prompt</span></code></pre>
+
+  <div class="prose">
+    <p>Note the score is a raw relevance logit, not a probability and not comparable across queries. Use it to <em>order</em> and to <em>threshold</em> (drop anything below a tuned cutoff so a query with no good match returns nothing rather than its least-bad chunk), but never present it as a calibrated confidence.</p>
+  </div>
+
+  <h2>4 &middot; When NOT to rerank</h2>
+  <div class="prose">
+    <p>Reranking adds a model call to every query, on the order of tens to a few hundred milliseconds depending on N, the model size, and whether it is local or a network hop. That is often the largest single chunk of your retrieval latency. Skip or scale it back when:</p>
+    <ul>
+      <li><strong>Latency is critical</strong> (autocomplete, typeahead, sub-100 ms budgets). Either drop reranking or rerank a smaller N (e.g. 20, not 100) with a tiny local model.</li>
+      <li><strong>The first stage already nails it.</strong> If your golden-set recall@5 is already very high (small, clean, well-chunked corpus, or mostly exact-match lookups where BM25 dominates), the reranker has little to fix. Measure before you add it.</li>
+      <li><strong>Candidates are near-identical.</strong> A reranker orders by relevance, not novelty, so it will happily stack five paraphrases of the same paragraph on top. That is a diversity problem, solved next, not a reason to rerank harder.</li>
+    </ul>
+    <p>The senior move is conditional: rerank by default, but expose a path that shortens or drops it when a latency SLO or a measured "first stage is already good enough" tells you to. Reranking is a lever, not a law.</p>
+  </div>
+
+  <h2>5 &middot; MMR: when relevance is not enough</h2>
+  <div class="prose">
+    <p>Top-by-relevance has a blind spot: redundancy. If your eight best chunks all say the same thing, you have wasted seven slots and starved the generator of the second fact it needed. <strong>Maximal Marginal Relevance (MMR)</strong> re-selects the final set to balance relevance against novelty. It picks chunks one at a time, each time scoring a candidate by how relevant it is to the query <em>minus</em> how similar it is to what you have already chosen:</p>
+  </div>
+
+  <div class="diagram">  MMR score(c) = λ · rel(c, query)  −  (1 − λ) · max_sim(c, already_selected)
+
+       λ = 1.0  →  pure relevance     (allows duplicates)
+       λ ≈ 0.7  →  relevance-leaning, light diversity   ← common default
+       λ = 0.0  →  pure novelty        (ignores the query, do not do this)
+
+  greedy loop:
+     selected = [ top-1 by relevance ]
+     while len(selected) < k:
+         pick the candidate with the highest MMR score → append → repeat</div>
+
+  <div class="prose">
+    <p>Apply MMR <em>after</em> reranking, on the reranked shortlist, as the final selection step. <code>rel</code> can be the reranker score; <code>max_sim</code> is the cosine similarity between candidate embeddings (you already have them from stage 1). Keep <code>λ</code> around 0.7 so relevance still dominates and diversity only breaks ties between near-duplicates. MMR earns its place for broad or multi-faceted questions ("summarize everything we changed in v3") and for corpora with heavy duplication; for a narrow factual lookup it is unnecessary and a high <code>λ</code> (or skipping it) is fine.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: trace the funnel on one query</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>Query: <code>does the v3 billing webhook still send the legacy `amount_cents` field?</code> Corpus: 40k chunks of product docs and changelogs.</p>
+    <p><strong>Stage 1</strong> fetches 50 candidates via BM25 + dense fused with RRF. BM25 nails the literal token <code>amount_cents</code> (Day 15's lesson: lexical beats dense on exact identifiers); dense pulls in semantically related "deprecated field" passages. The correct chunk, a v3 changelog line, lands at rank 11, below ten topically-similar but unhelpful "webhook overview" chunks.</p>
+  </div>
+  <div class="diagram">  rank  stage-1 (fused)                          reranker score   final
+   1    "Webhooks overview"                          2.1
+   2    "Configuring webhook endpoints"              1.4
+   …                                                              ↓ rescored ↓
+  11    "v3 changelog: amount_cents REMOVED…"       9.6   ──────► 1   ★ answer
+   3    "Webhook security & signatures"              0.2            2
+   7    "Legacy v2 amount_cents semantics"           6.8            … kept
+  …
+  → final top-5 after rerank + MMR (λ=0.7): the v3 removal line is #1,
+    the v2 semantics line is kept (different fact), the three near-duplicate
+    "overview" chunks are dropped by MMR for redundancy.</div>
+  <div class="prose">
+    <p>The first stage did its job, the answer was <em>in the 50</em>, but it was buried. The cross-encoder, reading the query and the changelog chunk together, recognized the direct answer and lifted it to the top. MMR then prevented three paraphrased "overview" chunks from crowding out the genuinely different "v2 semantics" chunk. Same retriever, same generator: the reranker plus diversity step is what turned a wrong answer into a cited, correct one.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Say each answer out loud in full sentences, as if to an interviewer. Then open the solution and compare. The gap is your lesson.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>A teammate proposes "let's just use the cross-encoder for retrieval directly and skip the bi-encoder, it's more accurate." Explain in two sentences why this does not work at scale, and what the cross-encoder is actually for.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>A cross-encoder scores a <em>(query, chunk)</em> pair with one forward pass and nothing is precomputable, so retrieving directly would mean running the model over every chunk in the index on every query, which is millions of forward passes per request and completely infeasible. Its role is the second stage: it rereads only the 50 to 100 candidates a cheap bi-encoder (plus BM25) already shortlisted, where its joint query-document attention buys precision at a small, affordable N. The bi-encoder exists precisely because it precomputes chunk embeddings at ingest and turns the query into one cheap lookup.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>You add a reranker and offline recall@5 on your golden set barely moves, but answers still feel repetitive and shallow. What is the likely diagnosis, and which knob do you reach for?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>If recall@5 was already high, the right chunks were being retrieved, so the reranker had little to fix on the "is it in here" axis, that is why the metric did not move. Repetitive, shallow answers point to a <em>diversity</em> problem: the top chunks are near-duplicates, so the generator sees the same fact five times and misses complementary facts. Reach for MMR on the reranked shortlist with <code>λ</code> around 0.7 so you keep relevance dominant while dropping redundant chunks, and consider whether parent-child chunking (Day 14) is fragmenting one document into many similar pieces.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>Your product has two surfaces: a customer-facing autocomplete with a 60 ms latency budget, and a "deep answer" assistant where users wait a second or two. Design the reranking strategy for each, and justify the difference.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>For autocomplete, drop the cross-encoder or shrink it hard: a full rerank of 100 candidates will blow a 60 ms budget, so either skip reranking and rely on a well-tuned fused first stage, or rerank a small N (e.g. 20) with a tiny local MiniLM cross-encoder and a strict timeout that falls back to the first-stage order. For the deep assistant, fetch a wider first stage (top 100), run a strong reranker (BGE or Cohere), keep top 8, and apply MMR, because the latency headroom lets you spend on precision and the questions are richer and more multi-faceted. The principle: reranking depth is a function of the latency SLO and the question complexity, not a fixed setting, and you decide it per surface after measuring.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's RAG &amp; Retrieval slice and common 2026 screens. Drill the one-line keys, then expand each into a 90-second answer with Claude using protocol prompt #2.</p>
+  <ul class="q-list">
+    <li>What is reranking and where does it sit in a RAG pipeline?
+      <div class="a">Key: rescore the top 50-100 with a cross-encoder (joint query, chunk); a precision booster between first-stage retrieval and generation.</div></li>
+    <li>Bi-encoder vs cross-encoder vs ColBERT, when does each win?
+      <div class="a">Key: bi-encoder scales retrieval (precompute chunk vectors), cross-encoder for small-N rerank (accurate, slow), late-interaction in the middle (per-token, storage-heavy).</div></li>
+    <li>Why can a cross-encoder be more accurate but unusable as the retriever?
+      <div class="a">Key: it scores per (query, chunk) pair with no precomputation, so retrieving directly = a forward pass over every chunk per query; only affordable on a small shortlist.</div></li>
+    <li>How do you choose first-stage k and final k?
+      <div class="a">Key: first-stage k sets the recall ceiling (reranker can only reorder what it gets), final k sets the generator's context size; widen the first, tighten the second.</div></li>
+    <li>When would you skip reranking?
+      <div class="a">Key: tight latency budgets, first-stage recall already high (measure it), or mostly exact-match lookups where BM25 dominates; rerank a smaller N as a compromise.</div></li>
+    <li>What is MMR and when do you use it?
+      <div class="a">Key: λ·rel − (1−λ)·max_sim, greedy re-selection that trades relevance for novelty; use it after rerank when top results are near-duplicates, λ≈0.7.</div></li>
+    <li>Is the reranker score a confidence you can show users?
+      <div class="a">Key: no, it is a raw relevance logit, not calibrated and not comparable across queries; use it to order and threshold, never as a displayed probability.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (15&ndash;20 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Take ~10 short text chunks (paste a few doc paragraphs) and one query. First rank them by simple keyword overlap or a quick dense similarity, that is your "stage 1." Then install <code>sentence-transformers</code> and rerank the same list with <code>CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")</code> using the snippet above. Print both orderings side by side and find the chunk that jumped. Skim the <a href="https://www.sbert.net/examples/applications/retrieve_rerank/README.html">sentence-transformers retrieve-and-rerank guide</a> and the <a href="https://docs.cohere.com/docs/rerank-overview">Cohere Rerank docs</a> to see the same two-stage shape in a managed API.</p>
+    <p class="muted" style="font-size:13.5px">Stretch: add the MMR loop on the reranked list with <code>λ=0.7</code> using cosine similarity between chunk embeddings, and watch a near-duplicate get pushed out of the final top-5.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>On MaiQ your first-stage retrieval is hybrid: BM25 plus dense embeddings fused with RRF, writing into pgvector through a FastAPI ingestion service. That is exactly the cheap, high-recall stage this lesson describes, which means a reranker is the natural precision layer to reason about on top of it. When an interviewer asks "how would you improve a RAG system's answer quality," you can frame it as a funnel decision: where the fused first stage already wins (exact identifiers, codes) versus where a cross-encoder rerank pulls a buried-but-relevant chunk to the top. And because your LLM-as-judge evaluation harness measured retrieval quality across 11+ experiments, you can speak to the discipline of <em>proving</em> a reranker helps before shipping it rather than adding latency on faith, the senior instinct this lesson is really teaching.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>Retrieval is a funnel: a cheap first stage tuned for recall, then an expensive reranker tuned for precision over a small shortlist. The cross-encoder wins because it reads query and chunk jointly, and loses on speed for the same reason, so you only run it on 50 to 100 candidates and keep the top 5 to 8. First-stage k sets your recall ceiling, final k sets the generator's budget. Skip or shrink reranking when latency is tight or the first stage already measures well, and reach for MMR when your top results are near-duplicates. Above all: measure that the reranker helps before you pay its latency.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d18">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: rewrite the question itself before you retrieve, decomposition, step-back, and HyDE.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d17-hybrid-search-fusion.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 17 &middot; Hybrid search &amp; fusion</div></a>
+    <a data-nav="next" class="next" href="d19-query-transformation.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 19 &middot; Query transformation</div></a>
+  </div>
+
+  <div class="foot">Module 3 &middot; RAG &amp; Retrieval &middot; Day 18 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

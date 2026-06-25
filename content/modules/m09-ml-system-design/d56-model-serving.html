@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 56 · Model serving: batch vs online</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 9 &middot; ML System Design</span>
+    <span class="pill">Day 56</span>
+    <span class="pill">50 min</span>
+    <span class="diff" title="Difficulty: intermediate"><i class="on"></i><i class="on"></i><i></i></span>
+  </div>
+
+  <h1>Model serving: batch vs online</h1>
+  <p class="lede">A trained model is worthless until it produces predictions where they are needed, fast enough and cheap enough. Today is the serving decision: precompute predictions in advance, compute them live per request, or score a stream, and how to roll a new model out without betting the business on it.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Decide between batch, online, and streaming inference from latency and freshness alone.</li>
+      <li>Break a request latency budget into its parts and name where the time actually goes.</li>
+      <li>List the four real levers for hitting a latency budget and when each applies.</li>
+      <li>Explain shadow and canary rollout and what each one catches that the other does not.</li>
+      <li>Describe what a model registry buys a team serving many models.</li>
+    </ul>
+  </div>
+
+  <h2>1 &middot; The core question: do you know the input ahead of time?</h2>
+  <div class="prose">
+    <p>Everything about serving collapses to one question: <strong>can you know the input before the user asks?</strong> If yes, you can precompute the prediction in advance and just look it up, that is <em>batch</em>. If no, the input only exists at request time, so you must compute the prediction then and there, that is <em>online</em>. Most serving design is figuring out which parts of your problem fall on which side of that line, and many systems do both.</p>
+  </div>
+
+  <div class="diagram">  Can you enumerate the inputs ahead of time?
+        │
+        ├── YES ──►  BATCH (precompute)
+        │            run the model offline over all known inputs,
+        │            store predictions in a fast KV store,
+        │            serving = a key lookup (sub-ms, cheap)
+        │            e.g. nightly "recommended for you" per user
+        │
+        ├── NO, but per request ──►  ONLINE (real-time)
+        │            input arrives in the request; run the model live
+        │            within a latency budget (e.g. p99 &lt; 200 ms)
+        │            e.g. fraud score on this transaction
+        │
+        └── continuous events ──►  STREAMING inference
+                     score each event as it flows through a pipeline
+                     (Kafka/Flink); near-real-time, not request-blocking
+                     e.g. anomaly score on each sensor reading</div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"I decide batch versus online by freshness and whether the input is knowable in advance. If I can enumerate the inputs and a few hours of staleness is fine, I precompute in a batch job and serve a key lookup, it is cheaper, simpler, and trivially scalable. If the input only exists at request time or must be fresh to the second, I serve online inside a latency budget. Plenty of systems combine them: precompute the expensive part, finish online."</p>
+  </div>
+
+  <h2>2 &middot; Batch inference: precompute when you can</h2>
+  <div class="prose">
+    <p>Batch is the underrated default. A scheduled job runs the model over every known input (every user, every product) on a cadence, daily, hourly, and writes the results into a low-latency store. At request time the application does no inference at all, it reads a precomputed prediction by key. Strengths: serving latency is just a KV lookup, you can use a big expensive model because you are not racing a request clock, it scales effortlessly, and it is easy to reason about. The cost is <strong>staleness</strong>, predictions are as old as the last batch run, so it only works when the input is enumerable and a few hours old is acceptable. Nightly recommendations, daily churn scores, and precomputed "people also bought" are textbook batch.</p>
+  </div>
+
+  <h2>3 &middot; Online inference: per-request, under a clock</h2>
+  <div class="prose">
+    <p>When the input is unknown until the request (this transaction, this query, this session state) or when freshness matters down to the second, you compute live. Now you have a <strong>latency budget</strong>: an end-to-end time the whole request must fit inside, often expressed as a p95 or p99 target (e.g. "p99 under 200 ms"). You design backward from that budget, because the user is waiting and a slow prediction is a failed one. The budget is not just model time; it is everything between the request arriving and the prediction leaving:</p>
+  </div>
+
+  <div class="diagram">  request in
+     ├─ feature fetch        (online store lookups)        ~  5 to 30 ms
+     ├─ feature compute      (on-demand features)          ~  1 to 10 ms
+     ├─ model inference      (forward pass)                ~ 10 to 80 ms
+     ├─ network / serialize  (hops, (de)serialization)     ~  5 to 20 ms
+     └─ post-process / rules                               ~  1 to 5 ms
+  ─────────────────────────────────────────────────────────────────
+   total must fit the budget, e.g. p99 ≤ 200 ms</div>
+
+  <div class="prose">
+    <p>The senior point: people assume the model forward pass dominates, but in real systems feature fetching and network hops are frequently the bigger slice. Measure before you optimize, you cannot hit a budget you have not decomposed.</p>
+  </div>
+
+  <h2>4 &middot; Hitting the latency budget: the four levers</h2>
+  <div class="prose">
+    <p>When online latency is too high, you have four real levers. Reach for them roughly in this order, cheapest first:</p>
+    <ul>
+      <li><strong>Cache predictions.</strong> If the same input recurs, cache the result. Even online systems often have a long tail of repeated queries; a cache hit is free latency. This is the single biggest lever when there is input repetition.</li>
+      <li><strong>Shrink the model.</strong> A smaller or distilled model, fewer features, or a simpler architecture trades a little accuracy for a lot of speed. Often the accuracy you lose is below the noise floor of the business metric.</li>
+      <li><strong>Better hardware / batching.</strong> A GPU, or dynamic micro-batching of concurrent requests, raises throughput; for deep models the right accelerator can be the difference. (LLM-specific serving optimizations like continuous batching and KV caching live in Module 7.)</li>
+      <li><strong>Precompute part of it.</strong> The hybrid move: do the expensive, input-independent work in a batch job (e.g. precompute candidate sets or embeddings) and only the cheap, input-specific part online. This is how most "real-time" systems are actually fast, they are mostly batch with a thin online layer.</li>
+    </ul>
+  </div>
+
+  <h2>5 &middot; Rolling out a new model: shadow and canary</h2>
+  <div class="prose">
+    <p>Never swap a production model in one move. A model that wins offline can still fail live (recall Day 54), so you de-risk the rollout in stages. Two techniques do different jobs and you often use them in sequence:</p>
+  </div>
+
+  <table>
+    <tr><th>Technique</th><th>What it does</th><th>What it catches</th><th>User impact</th></tr>
+    <tr><td><b>Shadow</b></td><td>New model runs on 100% of live traffic in parallel; its predictions are logged but <em>not served</em>. The old model still answers users.</td><td>Operational reality: real input distribution, real feature latency, real failures and concurrency, and how the new model would have scored, with zero user risk.</td><td>None (predictions discarded).</td></tr>
+    <tr><td><b>Canary</b></td><td>New model serves a small slice of real traffic (1&ndash;5%); watch its guardrail metrics, then ramp up if healthy.</td><td>Real <em>outcome</em> impact on a small blast radius; lets you catch a regression in the business metric before it hits everyone.</td><td>Small, contained.</td></tr>
+  </table>
+
+  <div class="prose">
+    <p>The clean sequence: <strong>shadow</strong> first to confirm the new model runs correctly and fast on real traffic without touching a single user, then <strong>canary</strong> to a few percent to confirm its predictions actually help, then ramp. If the canary's guardrail metrics dip, you roll back instantly because only a sliver of traffic was exposed. A proper online A/B test (Day 57) is the rigorous version of the canary step.</p>
+  </div>
+
+  <h2>6 &middot; Many models: the registry</h2>
+  <div class="prose">
+    <p>Once a team serves more than one model, or more than one version of a model, you need a <strong>model registry</strong>: a catalog of model artifacts with their version, training data reference, metrics, and stage (staging / production / archived). It is the control plane for serving: it answers "which version is live?", makes rollback a pointer change rather than a redeploy, and ties each deployed model back to the exact data and code that produced it (the reproducibility thread from Day 55). For multi-model serving (different models per tenant, per region, or per use case) the registry plus a serving layer that loads the right artifact on demand is what keeps it manageable.</p>
+    <p>And keep <strong>cost</strong> in the frame throughout. Batch is cheap because it amortizes a big model over many predictions offline; online inference on always-on GPUs is expensive because you pay for idle capacity to absorb peaks. The cheapest correct design is usually "precompute everything you can, serve online only what you must," which is why the batch-versus-online decision is as much a cost decision as a latency one.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: product recommendations, batch or online?</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>You are designing recommendations for an e-commerce homepage. Two slots: a "Recommended for you" rail and a "Because you just viewed X" rail.</p>
+    <p><strong>"Recommended for you"</strong> depends on a user's long-term history, which changes slowly and is fully knowable in advance. So <em>precompute it in a nightly batch job</em>: score all candidate items per user, store the top 50 per user in a KV store, and serve a key lookup. Sub-millisecond, cheap, and a day-old recommendation is perfectly fine here.</p>
+    <p><strong>"Because you just viewed X"</strong> depends on the item the user is looking at <em>right now</em>, which is unknown until the request. That input cannot be precomputed per session, so it is <em>online</em>: at request time, take the viewed item and rank related items live within a tight latency budget. The hybrid trick keeps it fast, precompute item-to-item similarities offline (the expensive part) so the online step is just a fast lookup-and-rank, not a full model run. Same product, two slots, two serving modes, chosen purely by whether the input is knowable ahead of time.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Say each answer out loud in full sentences, as if to an interviewer. Then open the solution and compare. The gap is your lesson.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>An interviewer says "design how we serve a model that predicts each user's lifetime value, used by the marketing team to pick who gets a promo email each morning." Batch or online? Defend it, and name the one thing that would flip your answer.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p><strong>Batch.</strong> The input (each user's history) is fully knowable in advance, the consumer is a once-a-day email job, and a prediction that is a few hours old is completely acceptable, so precompute LTV for all users in a nightly job, write to a table, and let marketing query it. This is cheaper (no always-on serving), simpler, and you can afford a heavy model. What flips it: if the requirement changes to "score LTV the instant a user signs up, to decide their onboarding flow in real time," the input now arrives at request time and needs second-level freshness, so that path becomes online inference inside a latency budget. The deciding factors are knowability of the input and required freshness, not the model.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>Your online recommendation endpoint has a p99 of 450 ms against a 200 ms budget. Profiling shows: feature fetch 250 ms, model inference 120 ms, network/serialize 80 ms. Where do you attack first, and what is the trap if you only "make the model faster"?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Attack <strong>feature fetch (250 ms)</strong> first, it is the largest slice and the common real-world culprit, not the model. Likely fixes: batch the online-store lookups into one round trip instead of many sequential ones, cache hot features, colocate the feature store with the serving service to cut network hops, and precompute on-demand features where possible. The trap in "just make the model faster": even if you shrink inference from 120 ms to 40 ms, you are at 250 + 40 + 80 = 370 ms, still nearly double the budget, because you optimized the smaller term. The lesson is to <em>decompose the budget and attack the biggest slice</em>; people reflexively optimize the model because that is the "ML" part, and miss that I/O dominates.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>You have a new fraud model that beats the old one offline. Walk through how you put it into production without risking a spike in either missed fraud or wrongly blocked customers. Where do shadow and canary each fit, and what would each one catch?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Step 1, <strong>shadow</strong>: run the new model on 100% of live transactions in parallel, log its scores but keep serving the old model's decisions. This catches operational problems (does it run within the latency budget on real traffic? does feature fetching hold up under real concurrency? does it crash on edge-case inputs?) and lets you compare its would-be decisions to the old model's <em>and</em> to the actual fraud labels as they arrive, all with zero customer impact. Step 2, <strong>canary</strong>: once shadow is clean, let the new model actually decide on 1&ndash;5% of traffic and watch guardrail metrics (fraud-caught rate and false-block / customer-friction rate). This catches real <em>outcome</em> regressions, e.g. it blocks too many legitimate customers, on a tiny blast radius you can instantly roll back. Step 3, ramp up while monitoring, ideally as a proper online A/B (Day 57) run to significance. Shadow proves it <em>works</em>; canary proves it <em>helps</em>; neither alone is enough.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's Module 9 slice. Drill the one-line keys, then expand each into a 90-second answer with Claude using protocol prompt #2.</p>
+  <ul class="q-list">
+    <li>Batch vs online inference, how do you decide?
+      <div class="a">Key: by latency tolerance, freshness, and whether the input is knowable in advance; precompute (batch) when inputs are enumerable and slight staleness is fine, serve online when input arrives per request or must be fresh.</div></li>
+    <li>What is a latency budget and what goes into it?
+      <div class="a">Key: an end-to-end p95/p99 target the whole request must fit; it includes feature fetch, on-demand feature compute, model inference, network/serialization, and post-processing, not just the forward pass.</div></li>
+    <li>How do you hit a tight latency budget for online inference?
+      <div class="a">Key: cache repeated predictions, shrink/distill the model or use fewer features, use better hardware / batching, and precompute the expensive input-independent part offline; attack the biggest slice (often I/O, not the model).</div></li>
+    <li>What is shadow mode and what does it catch that offline eval cannot?
+      <div class="a">Key: run the new model on real traffic in parallel, log but do not serve; catches the real input distribution, real feature latency, real failures and concurrency, with zero user risk.</div></li>
+    <li>What is a canary rollout and how does it differ from shadow?
+      <div class="a">Key: canary serves a small traffic slice (1&ndash;5%) and watches guardrail metrics to catch real outcome regressions on a contained blast radius; shadow proves it runs, canary proves it helps.</div></li>
+    <li>What is streaming inference and when is it the right shape?
+      <div class="a">Key: score each event as it flows through a pipeline (Kafka/Flink) in near real time without blocking a user request, e.g. anomaly scoring per sensor reading or per event.</div></li>
+    <li>What does a model registry give a team serving many models?
+      <div class="a">Key: a catalog of versioned artifacts with metrics, training-data references, and stage; makes "which version is live?" answerable, rollback a pointer change, and ties each model to reproducible data and code.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (15&ndash;20 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Make the batch-versus-online trade-off tangible. Train a trivial scikit-learn model (e.g. logistic regression on a toy dataset). (1) <strong>Batch path</strong>: write a script that predicts for every row, stores results in a dict keyed by id, and times a "serve" as a dict lookup, note the microseconds. (2) <strong>Online path</strong>: time a single live <code>model.predict</code> on one row, including any feature transform, note the milliseconds. Print both and the ratio. Then add a tiny <code>functools.lru_cache</code> in front of the online predict and call it twice on the same input to see the cache lever in action. You have now felt, in numbers, why "precompute when you can" wins on latency and cost. For the production framing, skim the scikit-learn model-persistence docs at <a href="https://scikit-learn.org/stable/model_persistence.html">scikit-learn.org/stable/model_persistence.html</a>.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>You already live the "precompute the expensive part, serve the cheap part online" pattern in MaiQ. Document ingestion is your <em>batch</em> path, your <strong>FastAPI ingestion service</strong> chunks and embeds documents ahead of time and writes vectors into <strong>pgvector</strong>, so that at query time you are not embedding the whole corpus, you only embed the one incoming question and do a fast similarity lookup. That is exactly the hybrid serving move: the heavy, input-independent work (embedding the corpus) is precomputed, and only the input-specific part (the query) runs online inside a latency budget. And your cost work is the serving-cost story made real, the <strong>11+ experiments</strong> that cut inference cost 37% for a 2% quality drop were precisely the "shrink the work to hit a budget" lever, traded off and measured. When asked about serving, you can speak to both the precompute/online split and the cost-versus-latency trade-off from direct experience.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>Serving collapses to one question: is the input knowable ahead of time? If yes, precompute in a batch job and serve a key lookup, cheap, scalable, slightly stale. If no, serve online inside a latency budget, and that budget is the whole request (feature fetch, inference, network), not just the model, so decompose it and attack the biggest slice (often I/O). The four latency levers are cache, shrink the model, better hardware/batching, and precompute part of it; most "real-time" systems are mostly batch with a thin online layer. Roll out new models with shadow (proves it runs on real traffic, zero user risk) then canary (proves it helps, small blast radius), and use a model registry to keep many versions reproducible and rollback a pointer change. Cost rides along the whole way: precompute everything you can, serve online only what you must.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d56">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: the model that decayed silently, drift, monitoring with delayed labels, and A/B testing a model change properly.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d55-feature-stores-pipelines.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 55 &middot; Feature stores &amp; training pipelines</div></a>
+    <a data-nav="next" class="next" href="d57-monitoring-drift.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 57 &middot; Monitoring, drift &amp; retraining</div></a>
+  </div>
+
+  <div class="foot">Module 9 &middot; ML System Design &middot; Day 56 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

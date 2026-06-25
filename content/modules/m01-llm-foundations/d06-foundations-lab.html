@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 6 · Lab &mdash; inspect a real model</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 1 &middot; LLM Foundations</span>
+    <span class="pill">Day 6</span>
+    <span class="pill">90 min</span>
+    <span class="pill teal">Lab</span>
+    <span class="diff" title="Difficulty: intermediate"><i class="on"></i><i class="on"></i><i></i></span>
+  </div>
+
+  <h1>Lab &mdash; inspect a real model</h1>
+  <p class="lede">Five days of mechanism. Today you make it physical. You will call a real model and watch temperature change its behavior, split text with a real tokenizer and price it, embed sentences and compute similarity by hand, then write up what you saw. Concepts you can only recite are fragile; concepts you have measured are yours.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you will have</span>
+    <ul class="objectives">
+      <li>Called the Claude API at temperature 0 versus 1 and observed determinism versus diversity firsthand.</li>
+      <li>Tokenized text, counted tokens, and converted a prompt into an actual dollar cost.</li>
+      <li>Embedded several sentences and computed cosine similarity in NumPy, confirming meaning is geometry.</li>
+      <li>Written a short reflection connecting each observation back to the Module 1 mechanism.</li>
+    </ul>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Lab format</span>
+    <p>This is a <strong>doing</strong> lesson, not a reading one. Each task below ends in a <em>"ship this"</em> checkpoint: a small, concrete artifact you should produce before moving on. Reference solution code sits in the collapsible blocks, but run yours first, the gap between your output and the solution is the actual learning. Budget about 90 minutes.</p>
+  </div>
+
+  <h2>Setup (5 min)</h2>
+  <div class="prose">
+    <p>You need Python 3.9+ and a few packages. An Anthropic API key is ideal for Tasks 1 and the embedding call; if you do not have one yet, each task has a no-key fallback so you can still complete the lab. Set up a clean environment:</p>
+  </div>
+  <pre><code><span class="tok-c"># a fresh virtual environment, then:</span>
+pip install anthropic tiktoken numpy sentence-transformers
+
+<span class="tok-c"># put your key in the environment (never hard-code it in a file):</span>
+<span class="tok-k">export</span> ANTHROPIC_API_KEY=<span class="tok-s">"sk-ant-..."</span></code></pre>
+  <div class="prose">
+    <p>Two of the packages need no key at all: <code>tiktoken</code> (a tokenizer) and <code>sentence-transformers</code> (a local embedding model that downloads once and runs offline). So even with zero API access, Tasks 2 and 3 run fully. See <a href="../../tools.html">Tools &amp; Claude</a> if you still need to set up API access.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Task 1 &middot; Temperature: determinism vs diversity (20 min)</h2>
+  <div class="prose">
+    <p>Day 3 claimed that low temperature concentrates the distribution (near-deterministic) and high temperature flattens it (diverse). Now <em>watch</em> it. Call the same prompt several times at temperature 0, then several times at temperature 1, on both a creative prompt and a factual one, and observe the contrast.</p>
+  </div>
+  <pre><code><span class="tok-k">import</span> os
+<span class="tok-k">from</span> anthropic <span class="tok-k">import</span> Anthropic
+
+client = Anthropic()  <span class="tok-c"># reads ANTHROPIC_API_KEY from the environment</span>
+MODEL  = <span class="tok-s">"claude-sonnet-4-5"</span>  <span class="tok-c"># use whatever current model id you have access to</span>
+
+<span class="tok-k">def</span> <span class="tok-f">ask</span>(prompt, temperature, n=<span class="tok-n">3</span>):
+    outs = []
+    <span class="tok-k">for</span> _ <span class="tok-k">in</span> <span class="tok-f">range</span>(n):
+        msg = client.messages.create(
+            model=MODEL,
+            max_tokens=<span class="tok-n">60</span>,
+            temperature=temperature,
+            messages=[{<span class="tok-s">"role"</span>: <span class="tok-s">"user"</span>, <span class="tok-s">"content"</span>: prompt}],
+        )
+        outs.append(msg.content[<span class="tok-n">0</span>].text.strip())
+    <span class="tok-k">return</span> outs
+
+creative = <span class="tok-s">"Write a one-line slogan for an independent coffee shop."</span>
+factual  = <span class="tok-s">"What is the capital of France? Answer in one word."</span>
+
+<span class="tok-k">for</span> label, temp <span class="tok-k">in</span> [(<span class="tok-s">"T=0"</span>, <span class="tok-n">0.0</span>), (<span class="tok-s">"T=1"</span>, <span class="tok-n">1.0</span>)]:
+    <span class="tok-f">print</span>(<span class="tok-s">f"\n=== creative @ </span>{label}<span class="tok-s"> ==="</span>)
+    <span class="tok-k">for</span> o <span class="tok-k">in</span> <span class="tok-f">ask</span>(creative, temp): <span class="tok-f">print</span>(<span class="tok-s">" -"</span>, o)
+
+<span class="tok-f">print</span>(<span class="tok-s">"\n=== factual @ T=0 vs T=1 ==="</span>)
+<span class="tok-f">print</span>(<span class="tok-s">"T=0:"</span>, <span class="tok-f">ask</span>(factual, <span class="tok-n">0.0</span>))
+<span class="tok-f">print</span>(<span class="tok-s">"T=1:"</span>, <span class="tok-f">ask</span>(factual, <span class="tok-n">1.0</span>))</code></pre>
+  <div class="prose">
+    <p>Predict before you run: which block will show near-identical lines, and which will diverge? Then run it and check yourself.</p>
+  </div>
+
+  <div class="callout practice">
+    <span class="label">Ship this</span>
+    <p>Produce the printed output and write one sentence answering: did the <em>factual</em> prompt diverge much between T=0 and T=1, and why is that different from the creative prompt? (Hint: a peaked distribution barely moves under temperature; a flat one moves a lot.)</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Expected behavior: at T=0 the creative slogans cluster tightly (often identical or near-identical), and at T=1 they spread into clearly different lines. The factual prompt stays "Paris" at <em>both</em> temperatures, because its distribution is so sharply peaked on the correct token that even flattening it leaves "Paris" dominant, there is simply no plausible alternative for the sampler to reach. That contrast is the whole point: temperature does not invent options that were not there, it only changes how far the sampler explores the mass the model already assigned. Where the model is confident, temperature barely matters; where it is genuinely uncertain (open-ended creative tasks), temperature is the diversity dial. No-key fallback: do the same in three fresh Claude web chats, the creative prompt diverges, the factual one does not.</p>
+    <pre><code><span class="tok-c"># one-sentence writeup (example):</span>
+<span class="tok-c"># "Factual barely moved because its next-token distribution is</span>
+<span class="tok-c">#  peaked on 'Paris', so flattening it changes nothing; the</span>
+<span class="tok-c">#  creative prompt has a flat distribution, so temperature 1</span>
+<span class="tok-c">#  let the sampler reach many different valid continuations."</span></code></pre>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Task 2 &middot; Tokenize and price a prompt (20 min)</h2>
+  <div class="prose">
+    <p>Day 2 said tokens are the unit of cost and context. Make that a number. Use a real tokenizer to split text, count tokens, watch a rare word shatter, then turn a realistic RAG prompt into a per-call dollar figure.</p>
+  </div>
+  <pre><code><span class="tok-k">import</span> tiktoken
+
+enc = tiktoken.get_encoding(<span class="tok-s">"cl100k_base"</span>)  <span class="tok-c"># a widely-used BPE vocab</span>
+
+<span class="tok-k">for</span> word <span class="tok-k">in</span> [<span class="tok-s">"the cat"</span>, <span class="tok-s">"strawberry"</span>, <span class="tok-s">"antidisestablishmentarianism"</span>, <span class="tok-s">"SKU-4471-XQ"</span>]:
+    ids = enc.encode(word)
+    pieces = [enc.decode([i]) <span class="tok-k">for</span> i <span class="tok-k">in</span> ids]
+    <span class="tok-f">print</span>(<span class="tok-s">f"</span>{word!r:35}<span class="tok-s"> -> </span>{<span class="tok-f">len</span>(ids)}<span class="tok-s"> tokens  </span>{pieces}<span class="tok-s">"</span>)
+
+<span class="tok-c"># --- price a realistic RAG call ---</span>
+<span class="tok-k">def</span> <span class="tok-f">ntok</span>(text): <span class="tok-k">return</span> <span class="tok-f">len</span>(enc.encode(text))
+
+system_prompt = <span class="tok-s">"You are a precise support assistant. Cite sources."</span> * <span class="tok-n">20</span>
+one_chunk     = <span class="tok-s">"Lorem ipsum dolor sit amet, "</span> * <span class="tok-n">60</span>   <span class="tok-c"># stand-in for a retrieved chunk</span>
+question      = <span class="tok-s">"How do I reset my password on the mobile app?"</span>
+
+in_tokens  = <span class="tok-f">ntok</span>(system_prompt) + <span class="tok-n">6</span> * <span class="tok-f">ntok</span>(one_chunk) + <span class="tok-f">ntok</span>(question)
+out_tokens = <span class="tok-n">300</span>
+
+PRICE_IN, PRICE_OUT = <span class="tok-n">3.0</span>, <span class="tok-n">15.0</span>   <span class="tok-c"># $ per 1M tokens (illustrative)</span>
+cost = in_tokens / <span class="tok-n">1e6</span> * PRICE_IN + out_tokens / <span class="tok-n">1e6</span> * PRICE_OUT
+<span class="tok-f">print</span>(<span class="tok-s">f"\ninput={</span>in_tokens<span class="tok-s">} out={</span>out_tokens<span class="tok-s">}  cost/call=${</span>cost<span class="tok-s">:.4f}"</span>)
+<span class="tok-f">print</span>(<span class="tok-s">f"at 1M calls/month: ${</span>cost * <span class="tok-n">1_000_000</span><span class="tok-s">:,.0f}"</span>)</code></pre>
+  <div class="prose">
+    <p>Note: <code>cl100k_base</code> is a convenient generic tokenizer for the exercise; exact counts differ per model family, and for true Claude counts you would use the <a href="https://docs.claude.com/en/docs/build-with-claude/token-counting">Anthropic token counting</a> endpoint. The <em>lesson</em>, that retrieved context dominates input cost, holds regardless.</p>
+  </div>
+
+  <div class="callout practice">
+    <span class="label">Ship this</span>
+    <p>Report the token count for each of the four strings (which one shattered most, and why), and the cost-per-call plus the monthly cost at a million calls. Then answer: which single slice of the input would you cut first to reduce cost, and what does that imply for your RAG design?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Expected: "the cat" stays small (about 2 tokens), "strawberry" splits into a couple of subwords, the long rare word and the SKU code fragment into many tokens each, the exact code especially, which is precisely why lexical retrieval (BM25) beats embeddings on codes and acronyms (Module 3). On cost, the six retrieved chunks vastly outweigh the system prompt and question, so they are the dominant input cost, and the monthly figure at a million calls turns a "just add more chunks" decision into a five-figure line item. The slice to cut first is the retrieved context: lower top-k and add a reranker so each surviving chunk earns its place, which reduces input tokens directly. The implication is the Module 3 thesis in one line: fewer, better chunks is simultaneously a quality move (less lost-in-the-middle) and a cost move (fewer billed input tokens). No-key needed, this task is fully offline.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Task 3 &middot; Embed and compare by hand (25 min)</h2>
+  <div class="prose">
+    <p>Day 2 said meaning is geometry and cosine similarity is the workhorse comparison. Prove it: embed several sentences, compute the full similarity matrix in NumPy, and confirm that semantically related sentences score high and unrelated ones score near zero. This is dense retrieval in miniature.</p>
+  </div>
+  <pre><code><span class="tok-k">import</span> numpy <span class="tok-k">as</span> np
+<span class="tok-k">from</span> sentence_transformers <span class="tok-k">import</span> SentenceTransformer
+
+model = SentenceTransformer(<span class="tok-s">"all-MiniLM-L6-v2"</span>)  <span class="tok-c"># small, local, no API key</span>
+
+sentences = [
+    <span class="tok-s">"How do I reset my password?"</span>,
+    <span class="tok-s">"I forgot my login credentials and cannot sign in."</span>,
+    <span class="tok-s">"What time does the cafe open on Sundays?"</span>,
+    <span class="tok-s">"The mitochondria is the powerhouse of the cell."</span>,
+]
+
+V = model.encode(sentences, normalize_embeddings=<span class="tok-k">True</span>)  <span class="tok-c"># unit vectors</span>
+<span class="tok-c"># with unit vectors, cosine similarity == dot product == V @ V.T</span>
+S = V @ V.T
+
+<span class="tok-f">print</span>(<span class="tok-s">"     "</span> + <span class="tok-s">" "</span>.join(<span class="tok-s">f"s{j}"</span> <span class="tok-k">for</span> j <span class="tok-k">in</span> <span class="tok-f">range</span>(<span class="tok-f">len</span>(sentences))))
+<span class="tok-k">for</span> i, row <span class="tok-k">in</span> <span class="tok-f">enumerate</span>(S):
+    <span class="tok-f">print</span>(<span class="tok-s">f"s{i}  "</span> + <span class="tok-s">" "</span>.join(<span class="tok-s">f"{x:4.2f}"</span> <span class="tok-k">for</span> x <span class="tok-k">in</span> row))
+
+<span class="tok-c"># sanity-check the formula by hand on one pair (no normalize):</span>
+a, b = model.encode([sentences[<span class="tok-n">0</span>], sentences[<span class="tok-n">1</span>]])
+cos = <span class="tok-f">float</span>(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
+<span class="tok-f">print</span>(<span class="tok-s">"\nmanual cosine(s0, s1) ="</span>, <span class="tok-f">round</span>(cos, <span class="tok-n">3</span>))</code></pre>
+  <div class="prose">
+    <p>Read the matrix as a "find the nearest stored point to my query" table: if sentence 0 were a user query, which stored sentence would dense retrieval return? Confirm it is the paraphrase (sentence 1), not the cafe-hours or biology line.</p>
+  </div>
+
+  <div class="callout practice">
+    <span class="label">Ship this</span>
+    <p>Produce the similarity matrix and the manual cosine value (it should match <code>S[0][1]</code>). Then answer: which two sentences are most similar and what is their score, which pair is least similar, and how does this matrix <em>literally is</em> a tiny dense-retrieval index?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Expected: the diagonal is 1.00 (each sentence is identical to itself). Sentences 0 and 1 are the password-reset query and its paraphrase, so they score the highest off-diagonal value (typically well above 0.5), even though they share few exact words, which is exactly the strength of dense retrieval over keyword matching. The biology sentence (3) is unrelated to all the others and scores near zero against them, the noise floor. The manual cosine of s0 and s1 should equal <code>S[0][1]</code> to rounding, confirming that with unit-normalized vectors, dot product and cosine are the same operation. Why it is a retrieval index: if s0 is the query, you rank the stored sentences by their similarity column and return the top one, which is s1, that ranking-by-cosine is precisely what a vector database does at scale, just with an approximate-nearest-neighbor structure instead of a full matrix. You have built dense semantic search with four rows. This task needs no API key.</p>
+    <pre><code><span class="tok-c"># expected shape (values illustrative):</span>
+<span class="tok-c">#       s0    s1    s2    s3</span>
+<span class="tok-c"># s0  1.00  0.62  0.18  0.04   <- s1 is the nearest neighbor of s0</span>
+<span class="tok-c"># s1  0.62  1.00  0.16  0.05</span>
+<span class="tok-c"># s2  0.18  0.16  1.00  0.07</span>
+<span class="tok-c"># s3  0.04  0.05  0.07  1.00   <- unrelated to everything</span></code></pre>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Task 4 &middot; Reflection writeup (15 min)</h2>
+  <div class="prose">
+    <p>The most valuable part of any lab is the synthesis. In your own words (a short paragraph each, no more), write up four observations, tying each measurement back to the mechanism from Days 1 to 5:</p>
+    <ul>
+      <li><strong>Temperature.</strong> What you saw at T=0 vs T=1 on the two prompt types, and why a peaked distribution resists temperature while a flat one does not.</li>
+      <li><strong>Tokens.</strong> Which strings fragmented and why, and the dollar figure you computed, plus what it implies for context budgeting.</li>
+      <li><strong>Embeddings.</strong> The most and least similar pairs, and why "meaning is geometry" is more than a slogan after seeing the matrix.</li>
+      <li><strong>One surprise.</strong> The single thing that did not match your prediction, and what it taught you.</li>
+    </ul>
+  </div>
+
+  <div class="callout practice">
+    <span class="label">Ship this</span>
+    <p>A four-paragraph reflection (one per bullet). Keep it concrete and mechanism-linked, not generic. This is the artifact that turns "I read about LLMs" into "I have measured how LLMs behave," which is exactly the framing that lands in interviews.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>A strong reflection is specific and traces every observation to a cause. Example shape: "Temperature 0 made the slogans identical and T=1 made them diverge, but the capital-of-France answer stayed 'Paris' at both, because its next-token distribution is so peaked that flattening it changes nothing, temperature only matters where the model is genuinely uncertain. The SKU code fragmented into many tokens while 'the cat' stayed at two, which is why exact codes are both expensive and better served by lexical retrieval, and the six retrieved chunks dominated my per-call cost, so cutting top-k is the first cost lever, not a bigger model. The password-reset query and its paraphrase scored highest despite sharing almost no words, which made 'meaning is geometry' concrete: cosine over embeddings, not keyword overlap, is what links them, and that matrix is literally a four-row dense index. My surprise was how little temperature affected the factual prompt, I had expected some drift, and it taught me that temperature acts on the distribution the model already produced, not on its knowledge." Yours should be in your own voice and reference your actual numbers.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Module 1 review questions</h2>
+  <p class="muted">A quick self-check spanning the whole module. If any key feels shaky, revisit that day before starting Module 2. Expand each into a 90-second answer with Claude using protocol prompt #2.</p>
+  <ul class="q-list">
+    <li>Explain how an LLM generates text, to a smart non-engineer.
+      <div class="a">Key: next-token prediction over a vocabulary, run in a loop; context steers the distribution.</div></li>
+    <li>What is self-attention and why was it the breakthrough?
+      <div class="a">Key: content-based weighted mixing of tokens; lets context reshape meaning and is parallelizable across the sequence, unlike RNNs.</div></li>
+    <li>Why are price and context window both measured in tokens?
+      <div class="a">Key: billing is per token (output costs more) and the window is a fixed token budget, not a word budget; so you count tokens and trim context.</div></li>
+    <li>What does temperature do, and why is temperature 0 not byte-identical?
+      <div class="a">Key: scales logits before softmax (sharper toward greedy at 0, flatter above 1); float non-associativity, possible expert routing, and model updates mean "stable," not "identical."</div></li>
+    <li>What is the KV cache and why does it matter?
+      <div class="a">Key: caches per-layer Key/Value tensors for prior tokens so each decode step only computes the new Query and attends the cache; makes generation append-cheap, costs GPU memory.</div></li>
+    <li>Why do LLMs hallucinate, and how do you mitigate it?
+      <div class="a">Key: the objective rewards plausible continuations and knowledge is lossy parametric memory; ground it with RAG and check it with evaluation.</div></li>
+    <li>Foundation models vs traditional ML, when does each win?
+      <div class="a">Key: FM for language-rich, ambiguous, multi-task, low-label, fast-iteration work; traditional ML for narrow, labeled, low-latency, regulated, cheap-at-scale prediction.</div></li>
+    <li>How do you decide what to delegate to an LLM versus not?
+      <div class="a">Key: delegate language-shaped, ambiguity-tolerant, verifiable parts; route exact, fresh-fact, long-horizon, or high-stakes-unverifiable work to tools, retrieval, structure, or traditional ML.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (stretch, optional)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>If you finished early, combine all three tasks into one tiny script that, given a query and a list of "documents," embeds everything, ranks the documents by cosine similarity, builds a prompt from the top 2, counts its tokens and prints the estimated cost, then calls Claude at temperature 0 to answer using only those documents. That is a complete, if minimal, RAG loop, retrieve, budget, ground, generate, built entirely from Module 1 primitives. Keep it under 40 lines. You will rebuild it properly in Module 3 with chunking, hybrid search, and reranking, but having a working skeleton now makes that module click. Reference the <a href="https://docs.claude.com/en/api/messages">Messages API</a> docs as needed.</p>
+    <p class="muted" style="font-size:13.5px">Save the script, you will compare it to the production-grade version you build later. See <a href="../../tools.html">Tools &amp; Claude</a> for access.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>This lab is a scaled-down version of the loop you run daily on MaiQ. Task 1 is why you keep grounded answering near temperature 0 and why your LLM-as-judge evaluation accounts for residual non-determinism rather than expecting identical outputs. Task 2 is the cost arithmetic behind your 37% reduction: fewer, better chunks means fewer billed input tokens, measured in exactly the way you just did. Task 3 is the heart of your hybrid retrieval, dense cosine similarity is the "embeddings" half that you fuse with BM25 before writing into pgvector. The optional stretch is a toy of your real ingestion-plus-retrieval pipeline. When an interviewer says "walk me through how you would build a retrieval feature from scratch," you can narrate this loop, embed, rank by similarity, budget the context, ground the answer, and then layer on the production concerns you actually handled: chunking experiments, reranking, and evaluation.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>You have now <em>measured</em> the mechanism, not just read it: temperature reshapes the distribution but cannot move a confident model off its answer; tokens are real money and real context budget, with rare strings and exact codes fragmenting most; cosine similarity over embeddings turns meaning into a rankable number, which is dense retrieval in four rows; and the reflection turned all of it into your own words. Module 1 is the spine, next-token prediction, attention, tokens, sampling, context and the KV cache, capabilities and limits, that every later module hangs on. You are ready to build on it.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d06">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Next: Module 2 begins, the anatomy of a prompt and the shift from prompt engineering to context engineering.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d05-capabilities-and-limits.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 5 &middot; Capabilities &amp; limits</div></a>
+    <a data-nav="next" class="next" href="../m02-prompting-context/d07-anatomy-of-a-prompt.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 7 &middot; Anatomy of a prompt</div></a>
+  </div>
+
+  <div class="foot">Module 1 &middot; LLM Foundations &middot; Day 6 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

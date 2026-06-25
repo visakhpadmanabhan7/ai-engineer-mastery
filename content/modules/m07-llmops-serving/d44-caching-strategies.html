@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 44 · Caching strategies</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 7 &middot; LLMOps &amp; Serving</span>
+    <span class="pill">Day 44</span>
+    <span class="pill">50 min</span>
+    <span class="diff" title="Difficulty: intermediate"><i class="on"></i><i class="on"></i><i></i></span>
+  </div>
+
+  <h1>Caching strategies</h1>
+  <p class="lede">Caching is the highest return-on-effort move in the entire LLM stack: the same work, never paid for twice. Today you learn the five layers, how to do Anthropic prompt caching right, and the one place caching quietly becomes dangerous.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Name the five cache layers in an LLM stack and what each one saves.</li>
+      <li>Implement Anthropic prompt caching correctly: stable prefix first, billing and TTL behavior.</li>
+      <li>Explain semantic caching and identify exactly where it is dangerous.</li>
+      <li>Key a tool-result cache and an embedding cache so hits actually land.</li>
+      <li>Pick the biggest cheap win for a given feature instead of caching blindly.</li>
+    </ul>
+  </div>
+
+  <h2>1 &middot; Five cache layers, five different savings</h2>
+  <div class="prose">
+    <p>"Caching" in an LLM app is not one thing. There are five distinct layers, each catching a different kind of repeated work. Knowing which one applies to a bottleneck is the senior skill:</p>
+  </div>
+
+  <table>
+    <tr><th>Layer</th><th>What it caches</th><th>What it saves</th></tr>
+    <tr><td><b>Prompt cache</b></td><td>A stable token prefix (system prompt, tools, big context) inside the provider</td><td>Re-prefill cost + TTFT on the shared prefix</td></tr>
+    <tr><td><b>Semantic cache</b></td><td>The full answer to a query, keyed by meaning</td><td>The entire LLM call for near-duplicate questions</td></tr>
+    <tr><td><b>Tool-result cache</b></td><td>The result of a tool/API call, keyed by normalized args</td><td>Re-running expensive or rate-limited tools</td></tr>
+    <tr><td><b>Embedding cache</b></td><td>The vector for a piece of text, keyed by text hash</td><td>Re-embedding identical text (ingest + query)</td></tr>
+    <tr><td><b>Retrieval cache</b></td><td>The retrieved chunk set for a query</td><td>Re-running the vector search + rerank</td></tr>
+  </table>
+
+  <div class="prose">
+    <p>They stack. A single RAG request can hit four of them: embed the query (embedding cache miss the first time), search (retrieval cache), send the prompt with a cached system prefix (prompt cache), and if the same question was asked recently, skip all of it via the semantic cache. Each layer sits at a different point in the request path and saves a different unit of work.</p>
+  </div>
+
+  <div class="diagram">  user query
+     │
+     ├─▶ [semantic cache]  hit? → return cached answer  (skips everything below)
+     │        miss ↓
+     ├─▶ [embedding cache] vector for this query text?  (hash key)
+     │        ↓
+     ├─▶ [retrieval cache] chunks for this query?       (search/rerank reuse)
+     │        ↓
+     ├─▶ [tool-result cache] any tool calls? reuse by normalized args
+     │        ↓
+     └─▶ LLM call with [prompt cache] on the stable prefix → answer
+              ↓ (write answer back into semantic cache)</div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"An LLM stack has five cache layers: prompt cache (reuse a stable prefix, saves re-prefill and TTFT), semantic cache (reuse a whole answer by meaning, saves the entire call), tool-result cache (reuse a tool's output by normalized args), embedding cache (reuse a vector by text hash), and retrieval cache (reuse a chunk set). The biggest cheap win for most apps is prompt caching the static system prefix."</p>
+  </div>
+
+  <h2>2 &middot; Prompt caching done right (Anthropic)</h2>
+  <div class="prose">
+    <p>Prompt caching lets the provider reuse the computed state of a <strong>stable prefix</strong> of your prompt instead of re-prefilling it every call. The rules that make it actually work:</p>
+    <ul>
+      <li><strong>Put static content first.</strong> The cacheable prefix must be byte-identical across calls, so order your prompt so the unchanging parts (system instructions, tool definitions, a large reference document, few-shot examples) come <em>before</em> anything that varies (the user message, retrieved chunks for this query). A cache breaks at the first differing byte.</li>
+      <li><strong>Mark the cache point.</strong> You signal where the cacheable prefix ends (Anthropic uses a <code>cache_control</code> breakpoint on the block); everything up to that point becomes the cached prefix.</li>
+      <li><strong>Billing: cached input is much cheaper.</strong> On a cache hit, the cached input tokens are billed at roughly <strong>10%</strong> of the normal input price. There is a modest one-time write cost to populate the cache, so caching pays off when the prefix is reused enough times to amortize the write.</li>
+      <li><strong>TTL is short.</strong> The cache lives about <strong>5 minutes</strong> and refreshes on use, so it shines for bursty, repeated traffic (an agent loop re-reading the same context, many users hitting the same big system prompt within minutes), not for once-a-day calls.</li>
+    </ul>
+    <p>The structural mistake to avoid: interleaving variable content into the prefix. If you place the per-request user question before the big static document, nothing is cacheable because the prefix changes every call. Static-first is the whole game.</p>
+  </div>
+
+  <pre><code><span class="tok-c"># prompt ORDER decides whether the cache works</span>
+messages = [
+  {<span class="tok-s">"role"</span>: <span class="tok-s">"system"</span>, <span class="tok-s">"content"</span>: [
+     {<span class="tok-s">"type"</span>: <span class="tok-s">"text"</span>, <span class="tok-s">"text"</span>: BIG_STATIC_INSTRUCTIONS},   <span class="tok-c"># stable, goes first</span>
+     {<span class="tok-s">"type"</span>: <span class="tok-s">"text"</span>, <span class="tok-s">"text"</span>: REFERENCE_DOC,
+      <span class="tok-s">"cache_control"</span>: {<span class="tok-s">"type"</span>: <span class="tok-s">"ephemeral"</span>}},      <span class="tok-c"># &lt;- cache breakpoint here</span>
+  ]},
+  {<span class="tok-s">"role"</span>: <span class="tok-s">"user"</span>, <span class="tok-s">"content"</span>: user_question},          <span class="tok-c"># varies per call, AFTER the cache point</span>
+]
+<span class="tok-c"># hit: the prefix above the breakpoint is billed ~10% of input price</span></code></pre>
+
+  <h2>3 &middot; Semantic caching, and where it bites</h2>
+  <div class="prose">
+    <p>A semantic cache skips the whole LLM call when a <em>similar enough</em> question was already answered. The mechanism: embed the incoming query, search a small store of past (query-embedding, answer) pairs, and if the nearest neighbor is above a cosine-similarity threshold, return its cached answer. It is the most powerful cache because it saves the entire call, and the most dangerous because "similar enough" is a judgment that can be wrong.</p>
+    <p><strong>Where it is dangerous, three red zones:</strong></p>
+    <ul>
+      <li><strong>Personalized answers.</strong> "What's my account balance?" from two different users embeds nearly identically but must never share an answer. Either do not semantically cache personalized queries, or include the user/tenant in the key.</li>
+      <li><strong>Time-sensitive answers.</strong> "What's the status of order 1234?" or "today's price" goes stale immediately. A cache hit serves yesterday's truth. Use a short TTL or exclude these intents.</li>
+      <li><strong>High-stakes answers.</strong> Medical, legal, or financial responses where a near-duplicate is not actually equivalent. A 0.95-similar question can have a materially different correct answer; serving the cached one is a real harm. Raise the threshold or do not cache.</li>
+    </ul>
+    <p>The safe pattern: only semantic-cache <em>stable, non-personalized, low-stakes, repeated</em> queries (FAQs, general explanations), set a conservative threshold, and gate by intent so personalized and time-sensitive turns bypass the cache entirely.</p>
+  </div>
+
+  <div class="callout warning">
+    <span class="label">Where semantic caching hurts</span>
+    <p>The failure is silent and confident: a wrong-but-plausible cached answer is returned with no error, because the system believes the queries are equivalent. Personalized, time-sensitive, and high-stakes intents are the three places where "near-duplicate query" does not imply "same correct answer." Gate those out by intent before they ever reach the cache.</p>
+  </div>
+
+  <h2>4 &middot; Keying the smaller caches</h2>
+  <div class="prose">
+    <p>The tool-result, embedding, and retrieval caches are simpler but live or die on <strong>cache keys</strong>. A bad key means hits never land (key too specific) or wrong data is served (key too loose).</p>
+    <ul>
+      <li><strong>Tool-result cache: normalize the args before keying.</strong> <code>get_weather(city="Munich")</code> and <code>get_weather(city=" munich ")</code> should be the same key. Lowercase, trim whitespace, sort any list/dict args, drop fields that do not affect the result, then hash. Add a TTL that matches how fast the underlying data changes (a stock quote: seconds; a country's capital: forever).</li>
+      <li><strong>Embedding cache: key on a hash of the exact text</strong> (and the embedding model id, since vectors are model-specific). Identical chunks across documents then embed once. This is a pure win with no staleness risk, because the same text always has the same vector for a given model.</li>
+      <li><strong>Retrieval cache: key on the normalized query plus the filter set</strong> (tenant, metadata filters), because the same query under a different tenant filter must not collide. TTL it to your index's update cadence so freshly ingested docs are not hidden.</li>
+    </ul>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: cache a multi-tenant FAQ bot</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>A docs assistant answers questions over a shared knowledge base for many tenants, with a 4000-token system prompt and 5 retrieved chunks per call. Where does each cache layer go?</p>
+    <ul>
+      <li><strong>Prompt cache</strong> on the 4000-token system prompt + tool definitions, marked static-first. Bursty traffic within 5 minutes is billed at ~10% on that prefix, big TTFT and cost win.</li>
+      <li><strong>Embedding cache</strong> on query text (hash + model id). Repeated questions skip re-embedding for free.</li>
+      <li><strong>Retrieval cache</strong> keyed on <em>normalized query + tenant filter</em>. Two tenants asking the same thing must not share results, so the tenant goes in the key.</li>
+      <li><strong>Semantic cache</strong> only for general, non-personalized FAQs ("how do I reset my password?"), keyed with tenant if any answer differs per tenant, conservative threshold, short TTL. Account-specific or "current status" questions bypass it.</li>
+      <li><strong>Tool-result cache</strong> if the bot calls a status API, keyed on normalized args with a short TTL because statuses change.</li>
+    </ul>
+    <p>The dominant win here is the prompt cache (a 4000-token prefix re-prefilled on every call is the biggest waste), and the dangerous layer is the semantic cache, which is exactly why it is gated to safe intents and carries the tenant in its key.</p>
+  </div>
+
+  <h2>Why this matters for you as an AI engineer</h2>
+  <div class="callout key">
+    <span class="label">Caching is the cheapest lever you have</span>
+    <p>Of every cost and latency technique in Module 7, caching has the best effort-to-payoff ratio, no retraining, no quantization risk, no serving stack. The interview signal is not "caching is good" (everyone says that); it is knowing which of the five layers applies, that prompt caching needs a static-first prefix and bills cached input at ~10%, and crucially that semantic caching is dangerous for personalized, time-sensitive, and high-stakes intents. Naming that last hazard unprompted is what separates someone who has shipped caching from someone who has only read about it.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Say each answer out loud in full sentences, as if to an interviewer. Then open the solution and compare. The gap is your lesson.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>An engineer enabled prompt caching but the cache hit rate is near zero. Their prompt order is: retrieved chunks for this query, then the user question, then the big static system instructions at the end. What is wrong and how do you fix it?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>The prompt is in the wrong order. Prompt caching reuses a stable <em>prefix</em>, and the prefix here starts with the per-query retrieved chunks, which change every call, so the very first bytes differ and nothing is cacheable. Fix: reorder so the static content (system instructions, tool definitions, any fixed reference doc) comes first and is byte-identical across calls, place the cache breakpoint at the end of that static block, and put the variable parts (retrieved chunks, user question) after it. Static-first is mandatory; a cache breaks at the first differing byte.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>Your semantic cache cut cost nicely, but support reports users occasionally getting answers about <em>someone else's</em> order. Diagnose the bug and give two fixes.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>The semantic cache is serving personalized and time-sensitive answers across users. "What's the status of my order?" from different users embeds almost identically, crosses the similarity threshold, and returns another user's cached answer, a classic dangerous-zone failure. Fixes: (1) gate by intent, classify order-status and account queries as personalized/time-sensitive and bypass the semantic cache entirely; and (2) include the user/tenant id in the cache key so a hit can only return that user's own prior answer, plus a short TTL so status answers do not go stale. The general fix is: never semantically cache personalized or time-sensitive intents.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>Your tool-result cache for a <code>search_products(query, filters)</code> tool has a poor hit rate even though users ask very similar things. The key is the raw JSON string of the arguments. Why is the hit rate low, and what is the fix?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Keying on the raw argument JSON means trivially different but semantically identical calls miss: <code>{"query":"red shoes","filters":{"size":42,"color":"red"}}</code> and <code>{"query":"red shoes ","filters":{"color":"red","size":42}}</code> produce different strings (trailing space, key order) and therefore different keys. Fix: normalize before keying, lowercase and trim the query, sort filter keys, drop fields that do not affect results, then hash the canonical form. Pair it with a TTL matched to how fast the catalog changes. Normalized keys are what make the smaller caches actually hit.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's LLMOps slice and common 2026 screens. Drill the one-line keys, then expand each into a 90-second answer with Claude using protocol prompt #2.</p>
+  <ul class="q-list">
+    <li>What caching layers exist in an LLM stack?
+      <div class="a">Key: prompt cache, semantic cache, tool-result cache, embedding cache, retrieval cache, each catching a different unit of repeated work.</div></li>
+    <li>How do you implement prompt caching properly (Anthropic)?
+      <div class="a">Key: put static content first as a byte-identical prefix, mark the cache breakpoint; cached input billed ~10%; ~5 min TTL that refreshes on use.</div></li>
+    <li>What is semantic caching and where is it dangerous?
+      <div class="a">Key: embed query, return a near-duplicate's cached answer above a cosine threshold; dangerous for personalized, time-sensitive, and high-stakes intents.</div></li>
+    <li>How do you cut LLM spend ~50% without dropping quality?
+      <div class="a">Key: prompt caching (biggest lever), semantic cache for safe repeats, model routing, shorter context, batch.</div></li>
+    <li>How do you key a tool-result cache so hits actually land?
+      <div class="a">Key: normalize args (lowercase, trim, sort, drop irrelevant fields) then hash; TTL matched to how fast the underlying data changes.</div></li>
+    <li>Why is an embedding cache a risk-free win but a semantic cache is not?
+      <div class="a">Key: identical text always maps to the same vector for a model (no staleness), whereas near-duplicate queries can have different correct answers.</div></li>
+    <li>Where do you place the cache breakpoint when retrieved chunks vary per query?
+      <div class="a">Key: after the static system/tools/reference block and before the variable chunks + user message, so the cached prefix stays byte-identical.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (15&ndash;20 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Read Anthropic's <a href="https://docs.claude.com/en/docs/build-with-claude/prompt-caching">prompt caching</a> guide, then make two calls to a Claude model with a long static system prompt (paste a few thousand tokens of reference text) plus a short varying user message, adding a <code>cache_control</code> breakpoint after the static block. Inspect the usage fields in the response: on the first call you should see cache-creation input tokens, on the second a cache read. Confirm the second call's input cost drops. Then deliberately move the user message <em>before</em> the static block and watch the cache stop working, that is the static-first rule, proven.</p>
+    <p class="muted" style="font-size:13.5px">No API key yet? Sketch the prompt layout on paper and mark where the cache breakpoint goes for a RAG request. See <a href="../../tools.html">Tools &amp; Claude</a>.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>Caching is a natural extension of the cost work you did on MaiQ. Your 37% reduction came from retrieval and chunking experiments, and caching is the layer that compounds those savings: once you have trimmed top-k and chunk size, prompt-caching the stable system prefix and caching repeated retrievals removes the remaining redundant work. In an interview you can say "after the retrieval-side wins, the next lever I reach for is caching, prompt caching the static prefix is the cheapest, and I am careful to gate semantic caching away from personalized and time-sensitive queries so a cost win never becomes a correctness bug." That pairs your real cost achievement with the safety judgment seniors are screened for.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>Five cache layers each save a different unit of work: prompt, semantic, tool-result, embedding, retrieval. Prompt caching is usually the biggest cheap win, and it requires a byte-identical static-first prefix; cached input bills around 10% with about a 5-minute TTL. Semantic caching is the most powerful and the most dangerous, never use it for personalized, time-sensitive, or high-stakes intents. The smaller caches live or die on normalized keys (and the right TTL). Caching is the best effort-to-payoff lever in the whole stack, as long as you cache the right thing in the right place.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d44">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: guardrails and safety, the input/output checks that keep an LLM feature trustworthy.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d43-serving-scaling.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 43 &middot; Serving &amp; scaling</div></a>
+    <a data-nav="next" class="next" href="d45-guardrails-safety.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 45 &middot; Guardrails &amp; safety</div></a>
+  </div>
+
+  <div class="foot">Module 7 &middot; LLMOps &amp; Serving &middot; Day 44 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

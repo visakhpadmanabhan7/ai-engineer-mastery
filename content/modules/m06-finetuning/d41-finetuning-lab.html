@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 41 · Lab — design a fine-tuning plan</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 6 &middot; Fine-tuning &amp; Model Adaptation</span>
+    <span class="pill">Day 41</span>
+    <span class="pill">75 min</span>
+    <span class="diff" title="Difficulty: intermediate"><i class="on"></i><i class="on"></i><i></i></span>
+  </div>
+
+  <h1>Lab &mdash; design a fine-tuning plan</h1>
+  <p class="lede">No GPU today. The hard part of fine-tuning is the thinking, deciding whether to do it at all, then specifying the data, the config, the eval, and the rollout. You will write a complete, defensible plan for a realistic scenario, then check it against a model solution. This is exactly the artifact a senior interviewer asks you to talk through.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Decide whether fine-tuning is even the right tool, before designing it.</li>
+      <li>Write a data specification: example count, format, and how to build the pairs.</li>
+      <li>Sketch a LoRA config and justify each choice from the constraints.</li>
+      <li>Define an eval plan: a held-out set plus the Module 5 judge, with an explicit ship bar.</li>
+      <li>Lay out a safe rollout, and articulate the whole plan as an interview answer.</li>
+    </ul>
+  </div>
+
+  <h2>The scenario</h2>
+  <div class="callout example">
+    <span class="label">Brief</span>
+    <p>You want <strong>MaiQ to always turn a free-text issue into a strict JSON ticket</strong> in a consistent, terse house tone. The required shape is fixed:</p>
+    <pre><code>{
+  <span class="tok-s">"category"</span>: <span class="tok-s">"bug" | "feature" | "question" | "infra"</span>,
+  <span class="tok-s">"priority"</span>: <span class="tok-s">"low" | "medium" | "high" | "urgent"</span>,
+  <span class="tok-s">"summary"</span>: <span class="tok-s">"&lt;= 14 words, terse, no fluff"</span>,
+  <span class="tok-s">"component"</span>: <span class="tok-s">"string | null"</span>
+}</code></pre>
+    <p>Today, a strong general model with a careful prompt and a few examples gets this right most of the time, but it slips: occasional extra prose around the JSON, an invented enum value, an over-long summary, roughly a few percent of the time under load. Product wants the slip rate near zero, and wants to drop the long prompt to cut latency and cost. Your job: decide if fine-tuning is right, and if so, plan it end to end.</p>
+  </div>
+
+  <h2>How to run this lab</h2>
+  <div class="prose">
+    <p>Spend about <strong>45 minutes writing your own plan first</strong>, in the five-part template below, before opening any model solution. Write real sentences and real numbers (ranges are fine), not bullets of intent. Then spend ~30 minutes comparing against the model solution under each section and noting where your reasoning was thinner. The gap is the lesson, exactly like the daily practice problems, but at system scale.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Part 1 &mdash; Is fine-tuning even right?</h2>
+  <div class="callout practice">
+    <span class="label">Your turn</span>
+    <p>Before any config, justify the lever. Run the scenario through Day 37's flowchart. Is this a FORM problem or a FACTS problem? Have prompting and few-shot been exhausted? Is there a latency/cost reason? Could structured output (tool/function calling, schema-constrained decoding) solve it without training? Write 4 to 6 sentences ending in a clear decision: fine-tune, or not, and why.</p>
+  </div>
+  <details class="solution"><summary>Show model solution &mdash; Part 1</summary>
+  <div class="body prose">
+    <p>This is a <strong>FORM</strong> problem (a fixed format and tone), not a FACTS problem, so RAG is not the lever. Two things justify fine-tuning here, and both are legitimate per the flowchart. First, the behavior is well-defined and demonstrable with examples, which is what SFT teaches best. Second, there is a real <strong>latency/cost</strong> driver: the current solution leans on a long prompt plus few-shot examples on a large model, and fine-tuning a smaller model lets you shed that overhead, the classic "distill the prompt into the weights." Before committing, the honest first move is to try harder cheap levers: enforce the shape with <strong>structured output</strong> (tool/function calling or constrained decoding) so the JSON is schema-valid by construction, which often eliminates the extra-prose and invalid-enum slips outright. The defensible decision: attempt structured output first; if the residual problem is purely cost/latency or the tone consistency at the last percent, fine-tune a small model so it produces the shape and tone natively with a short prompt. Fine-tuning is justified, but only as the rung above structured output, not instead of it.</p>
+  </div></details>
+
+  <h2>Part 2 &mdash; Data specification</h2>
+  <div class="callout practice">
+    <span class="label">Your turn</span>
+    <p>Specify the dataset. How many examples to start? What is each example (input and ideal output)? How will you build them, and how do you guarantee quality and consistency? What format/wrapper do they need? Where does the loss apply? Write the spec a teammate could execute.</p>
+  </div>
+  <details class="solution"><summary>Show model solution &mdash; Part 2</summary>
+  <div class="body prose">
+    <p><strong>Count:</strong> start with a few hundred clean pairs (say 300 to 500); this is a narrow form task, so quality and consistency matter far more than volume, and 400 hand-checked pairs beat thousands of noisy ones (Day 38). <strong>Each example:</strong> input = a real free-text issue; ideal output = the exact, valid JSON ticket in the house tone. <strong>Build:</strong> mine real MaiQ issues, draft each ticket (optionally bootstrap drafts with the current model, then <em>human-correct every one</em>), and reject any pair whose JSON is invalid, whose enums are off, or whose summary breaks the 14-word, terse rule, because the model copies exactly what you show it, mistakes included. <strong>Consistency:</strong> one rigid format, the same field order, the same tone, across every example; validate every "ideal" output against the JSON schema programmatically before it enters the set. <strong>Format:</strong> wrap each pair in the base model's own <strong>chat template</strong> via its tokenizer (never hand-rolled role markers), and <strong>mask the loss to the assistant (JSON) tokens only</strong> so the model learns to produce the ticket, not echo the issue. Hold out 10 to 20 percent as a validation split that never touches training.</p>
+  </div></details>
+
+  <h2>Part 3 &mdash; LoRA config sketch</h2>
+  <div class="callout practice">
+    <span class="label">Your turn</span>
+    <p>Pick the adaptation method and a starting config. Full FT, LoRA, or QLoRA, and why? Choose a starting rank r and alpha, learning-rate posture, and epoch count, justifying each from the constraints (narrow task, small clean data, one GPU, forgetting risk). Decide whether you would merge the adapter for MaiQ. You are not expected to give exact optimal numbers, you are expected to reason.</p>
+  </div>
+  <details class="solution"><summary>Show model solution &mdash; Part 3</summary>
+  <div class="body prose">
+    <p><strong>Method:</strong> LoRA. The data is small and the task narrow, so full fine-tuning is overkill and raises the forgetting risk; freezing the base and training a ~1% adapter is cheaper and structurally limits drift. Use <strong>QLoRA</strong> instead only if the chosen base will not fit in memory on the single GPU, accepting a small quantization fidelity cost. <strong>Rank r:</strong> start low, around 8 to 16, because a strict format/tone change is a low-complexity update; raise r only if the held-out eval shows underfitting. <strong>Alpha:</strong> set it to roughly r or 2r and tune the alpha/r ratio, not the raw numbers. <strong>Learning rate / epochs:</strong> low LR, 2 to 3 epochs, watching train-versus-validation loss for the overfit elbow, this is the Day 38 catastrophic-forgetting discipline, since over-tuning a small homogeneous set would erode general ability. <strong>Merge:</strong> if MaiQ serves this single fixed behavior from a dedicated model, merge the adapter for the leanest serving artifact; if instead MaiQ runs multi-tenant and other adapters share the base, keep it separate to preserve hot-swapping (and remember a QLoRA adapter cannot be cleanly merged into a 4-bit base without dequantizing).</p>
+  </div></details>
+
+  <h2>Part 4 &mdash; Eval plan (hold-out + the Module 5 judge)</h2>
+  <div class="callout practice">
+    <span class="label">Your turn</span>
+    <p>Define how you decide the fine-tune worked, with an explicit ship bar. What do you measure on the held-out set? Which checks are programmatic versus judged? How does the Module 5 LLM-as-judge fit, and for what? How do you detect catastrophic forgetting? State the numeric gate you would ship on.</p>
+  </div>
+  <details class="solution"><summary>Show model solution &mdash; Part 4</summary>
+  <div class="body prose">
+    <p>Loss is necessary, not sufficient (Day 38), so evaluate the <em>behavior</em> on the held-out split with a layered eval. <strong>Programmatic checks (the bulk):</strong> JSON parses; schema conforms; <code>category</code> and <code>priority</code> are valid enums; <code>summary</code> is &le; 14 words; no extra prose outside the JSON. These are deterministic ground truth, so they are graded by code, not a judge (Module 5's rule: do not use an LLM judge where a programmatic check exists). <strong>The Module 5 LLM-as-judge</strong> covers what code cannot score: <em>tone/terseness</em> and whether the <code>category</code>/<code>priority</code>/<code>summary</code> are <em>semantically reasonable</em> for the issue, scored against a numbered rubric with anchored levels, and ideally calibrated against a few human labels. <strong>Forgetting check:</strong> a regression probe of general questions (and a handful of out-of-distribution issues) to confirm the model did not get narrower or dumber. <strong>Ship bar (explicit):</strong> for example, &ge; 99% schema-and-enum conformance and 100% no-extra-prose on the held-out set, judge tone score above a set threshold, and no regression on the general probe; if it misses, the fix is more/better data, not more epochs.</p>
+  </div></details>
+
+  <h2>Part 5 &mdash; Rollout</h2>
+  <div class="callout practice">
+    <span class="label">Your turn</span>
+    <p>You have a fine-tune that passes the bar. Now ship it safely. How do you roll out without risking production? Sketch the sequence and the guardrail/rollback. Keep it to 3 to 5 sentences.</p>
+  </div>
+  <details class="solution"><summary>Show model solution &mdash; Part 5</summary>
+  <div class="body prose">
+    <p>Roll out gradually, the same discipline as any model change. Start in <strong>shadow mode</strong>: run the fine-tuned model on real production traffic alongside the current solution without serving its output, and compare schema-conformance and judge scores on the live distribution (shadow catches real input variety and load that offline eval misses, Module 5). Then move to a <strong>small canary</strong> (single-digit percent of traffic) with a guardrail metric, the live schema-validation pass rate, and an automatic <strong>rollback</strong> if it dips below the bar. Ramp only as the canary holds, keep the previous version one switch away, and keep the schema validator in the serving path as a final net so a malformed ticket never reaches downstream code regardless of the model. Continue logging outputs to mine new failure cases into the next dataset iteration.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Put it together: the 90-second version</h2>
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"It is a FORM problem, so first I would try structured output to make the JSON valid by construction. If a fine-tune is still warranted for cost/latency or tone, I would collect a few hundred hand-checked (issue &rarr; ideal ticket) pairs in the model's chat template, mask loss to the response, and run a low-rank LoRA, small r, low LR, two to three epochs, watching the val elbow. I would gate on programmatic schema conformance plus an LLM-as-judge for tone, with a regression probe for forgetting, and ship only past an explicit bar. Rollout is shadow, then canary with a schema-validation guardrail and instant rollback, keeping the validator in the serving path." That is a complete, senior answer to "how would you fine-tune for X."</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Module 6 review &mdash; rapid-fire</h2>
+  <p class="muted">Close the module by drilling these. One-line keys; expand each into a 60 to 90 second answer with Claude using protocol prompt #2.</p>
+  <ul class="q-list">
+    <li>Prompting vs RAG vs fine-tuning &mdash; how do you choose?
+      <div class="a">Key: cost ladder prompting &lt; fine-tune &lt; pretraining; start prompting + RAG + few-shot; fine-tune for form/style/latency/cost, never for new facts.</div></li>
+    <li>What does SFT actually do, and what does it teach poorly?
+      <div class="a">Key: continues next-token training on (instruction &rarr; ideal response) pairs; teaches form/behavior well, recallable world facts poorly.</div></li>
+    <li>What is catastrophic forgetting and the four levers against it?
+      <div class="a">Key: over-tuning erodes general ability; low LR, few epochs, mixed data, adapters (LoRA).</div></li>
+    <li>What is LoRA and why is it efficient?
+      <div class="a">Key: freeze base, train low-rank adapter matrices A and B (~1% of params); cheap, swappable per task.</div></li>
+    <li>What is QLoRA and when do you use it over LoRA?
+      <div class="a">Key: LoRA on a 4-bit quantized frozen base; use when memory-bound, accepting a small fidelity cost.</div></li>
+    <li>What is DPO and how does it differ from RLHF?
+      <div class="a">Key: optimizes directly on preference pairs, no reward model or RL loop; simpler and more stable than RLHF.</div></li>
+    <li>When is fine-tuning the wrong answer?
+      <div class="a">Key: when you need fresh/changing facts (use RAG), data is tiny, or prompting/structured output is not yet exhausted.</div></li>
+    <li>How do you prove a fine-tune is good enough to ship?
+      <div class="a">Key: held-out behavioral eval (programmatic conformance + judge for tone) plus a forgetting regression probe, past an explicit bar; not loss alone.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (the optional real run)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on (optional, needs a GPU or a managed endpoint)</span>
+    <p>If you want to make the plan real, the cheapest path is a managed fine-tune. Format ~20 of your hand-built pairs to the OpenAI <a href="https://platform.openai.com/docs/guides/fine-tuning">fine-tuning</a> data format (or run a tiny LoRA via Hugging Face <a href="https://huggingface.co/docs/trl/main/en/sft_trainer">TRL SFT trainer</a> in Colab), launch one small job, and run your Part 4 programmatic eval on a held-out handful. The goal is not a production model; it is to feel that the dataset and the eval, not the training command, were the real work.</p>
+    <p class="muted" style="font-size:13.5px">No GPU or budget? The lab is fully complete as a written plan, that is the interview-relevant artifact. See <a href="../../tools.html">Tools &amp; Claude</a> for access.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>This lab is deliberately a MaiQ-shaped problem, so the plan you just wrote is one you could narrate as your own thinking. The evaluation half is genuinely yours: the layered held-out eval, programmatic checks plus an LLM-as-judge for what code cannot score, is the same framework you built and used to run 11-plus retrieval and chunking experiments, so you can speak to the eval and rollout with real authority. The honest line on the fine-tuning itself is "I have not run a production fine-tune at MaiQ, but here is exactly how I would scope one, and notice my first instinct is to try structured output before reaching for training," which is precisely the senior, cost-aware judgment that decided your 37% cost reduction. Pairing a strong eval story you have lived with a correctly-scoped fine-tuning plan is a very convincing answer to any model-adaptation question.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>The fine-tuning skill is the plan, not the GPU: decide the lever (here, structured output first, then a small fine-tune for cost/tone), specify a few hundred clean pairs in the chat template with masked loss, sketch a low-rank LoRA with the forgetting discipline, gate on a layered behavioral eval with an explicit ship bar, and roll out via shadow then canary with a schema guardrail and instant rollback. You can now answer "how would you fine-tune for X" end to end, and you have closed Module 6 with the framework that makes the answer obvious.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d41">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Next module: LLMOps and serving &mdash; starting with the economics of inference and where your latency and cost actually go.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d40-preference-tuning-dpo.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 40 &middot; Preference tuning (RLHF, DPO)</div></a>
+    <a data-nav="next" class="next" href="../m07-llmops-serving/d42-inference-economics.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 42 &middot; Inference economics</div></a>
+  </div>
+
+  <div class="foot">Module 6 &middot; Fine-tuning &amp; Model Adaptation &middot; Day 41 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

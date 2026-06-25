@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 7 · Anatomy of a great prompt</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 2 &middot; Prompting &amp; Context</span>
+    <span class="pill">Day 7</span>
+    <span class="pill">50 min</span>
+    <span class="diff" title="Difficulty: foundational"><i class="on"></i><i></i><i></i></span>
+  </div>
+
+  <h1>Anatomy of a great prompt</h1>
+  <p class="lede">A prompt is not a wish you whisper at a model. It is a specification you hand to a system that will do exactly what you describe and nothing you forgot to say. Today you learn the parts, the roles they live in, and why the system message has more leverage than any other channel.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Name the three message roles (system, user, assistant) and say what each is for.</li>
+      <li>List the six components of a strong prompt and place each in the right role.</li>
+      <li>Explain <em>why</em> the system prompt has leverage, tracing it back to SFT and preference tuning from Day 1.</li>
+      <li>Turn a vague request into a specific, decomposed one and predict how the output changes.</li>
+      <li>Recognize the five mistakes that silently break otherwise reasonable prompts.</li>
+    </ul>
+  </div>
+
+  <h2>Three roles, and why the model treats them differently</h2>
+  <div class="prose">
+    <p>Every chat-model API call is a list of messages, and each message carries a <strong>role</strong>. There are three you will use constantly:</p>
+    <ul>
+      <li><strong>system</strong> &mdash; the standing instructions: who the model is, how it behaves, what format it must produce, what it must never do. Written once, applies to the whole conversation.</li>
+      <li><strong>user</strong> &mdash; the actual request and its inputs: the question, the document to summarize, the messy text to extract from.</li>
+      <li><strong>assistant</strong> &mdash; the model's own turns. You can also <em>write</em> assistant turns yourself to provide examples, or to prefill the start of a response and steer its shape.</li>
+    </ul>
+    <p>The roles are not just labels. The model was <strong>trained</strong> to weight them differently. Recall Day 1: a base model is pure autocomplete, then SFT teaches it the <em>format</em> of following instructions, then preference tuning shapes whose instructions it follows and how. During that shaping, system-role content is treated as the authority that governs the conversation, and user-role content as the request to be served within those rules. So putting a rule in the system message is not cosmetic, it is using a behavior the model was explicitly trained into.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Concept</span>
+    <p>The system prompt has leverage because the model's post-training (SFT + RLHF/DPO) taught it to treat system-role text as the governing contract for the whole exchange. A constraint in the system message is obeyed far more reliably than the same words buried in a user message, because you are steering through the channel the model was aligned to obey.</p>
+  </div>
+
+  <h2>The six components of a strong prompt</h2>
+  <div class="prose">
+    <p>A complete prompt answers six questions. You do not need all six every time, but when an output disappoints, the cause is almost always a missing or vague one of these.</p>
+    <ol>
+      <li><strong>Role / persona</strong> &mdash; who is answering. "You are a senior technical writer" narrows tone, vocabulary, and assumptions. Goes in the system message.</li>
+      <li><strong>Task</strong> &mdash; the single action verb of what to do: classify, extract, summarize, rewrite, draft. State the one job plainly.</li>
+      <li><strong>Context</strong> &mdash; the inputs and background the model needs but does not have: the document, the user's situation, relevant facts. This is the part RAG fills at query time (Day 10, Module 3).</li>
+      <li><strong>Constraints</strong> &mdash; the boundaries: length, what to include, what to avoid, edge-case handling ("if the field is missing, return null, do not guess").</li>
+      <li><strong>Format</strong> &mdash; the exact shape of the output: JSON with these keys, a markdown table, three bullet points. Downstream code depends on this (Day 9).</li>
+      <li><strong>Examples</strong> &mdash; one or more demonstrations of input mapped to ideal output. The strongest way to pin a format or an edge case (Day 8).</li>
+    </ol>
+    <p>Where each lives matters. Persona, constraints, and format are stable across requests, so they belong in the <strong>system</strong> message. Context and the specific task instance change per request, so they belong in the <strong>user</strong> message. Examples can sit in either, but framing them as prior user/assistant turns often reads most naturally to the model.</p>
+  </div>
+
+  <div class="diagram">  ┌─────────────────────── SYSTEM (written once, governs all turns) ──────────────────┐
+  │ ROLE       You are a support-ticket triage assistant for a B2B SaaS company.       │
+  │ TASK       Classify each ticket and extract the customer's core problem.           │
+  │ CONSTRAINTS  • Use ONLY the categories listed. • If unsure, use "other".            │
+  │              • Never invent an account ID that is not present in the text.          │
+  │ FORMAT     Return JSON: {category, priority, summary, account_id|null}.            │
+  │ FORMAT     priority ∈ {low, medium, high}.  summary ≤ 20 words.                     │
+  └────────────────────────────────────────────────────────────────────────────────────┘
+  ┌─────────────────────── USER (changes every request) ───────────────────────────────┐
+  │ CONTEXT    Ticket text:                                                             │
+  │            "Hi, since the Tuesday update our exports to S3 are 502-ing for          │
+  │             account 4471. This is blocking our nightly pipeline. Please help."      │
+  └────────────────────────────────────────────────────────────────────────────────────┘
+              │
+              ▼   model fills the contract, not its imagination
+  {"category":"integration_error","priority":"high",
+   "summary":"S3 exports failing with 502 since Tuesday update, blocking nightly pipeline",
+   "account_id":"4471"}</div>
+
+  <div class="prose">
+    <p>Notice what the structure buys you. The category is constrained to a closed set, so a parser downstream can trust it. The "never invent an account ID" line pre-empts the most likely hallucination. The format is explicit enough that the output drops straight into code. None of that happens if the prompt is just "triage this ticket."</p>
+  </div>
+
+  <h2>Specificity: the single highest-return habit</h2>
+  <div class="prose">
+    <p>The model cannot read your intent, only your words. Every place you are vague, it fills the gap with the most <em>statistically average</em> choice, which is rarely what you wanted. Compare:</p>
+    <ul>
+      <li><span class="muted">Vague:</span> "Summarize this." &rarr; You get a length, tone, and focus the model guessed.</li>
+      <li><span class="muted">Specific:</span> "Summarize this incident report in exactly 3 bullets for an on-call engineer: what broke, blast radius, and the immediate next action. Omit background." &rarr; You get the artifact you actually need.</li>
+    </ul>
+    <p>Specificity is not verbosity. A specific prompt names the audience, the length, the focus, and the failure behavior, then stops. Adding more words that do not constrain anything just dilutes the signal (an anti-pattern you will meet on Day 11).</p>
+  </div>
+
+  <h2>Decomposition: when one prompt is the wrong unit</h2>
+  <div class="prose">
+    <p>If a task has several distinct sub-jobs ("read this contract, extract the parties, then assess risk, then draft a summary email"), cramming them into one prompt forces the model to juggle goals and usually means it does each one a little worsely. Two cleaner moves:</p>
+    <ul>
+      <li><strong>Decompose into steps within one prompt</strong> &mdash; tell it to work through the sub-tasks in order before producing the final answer. This is the seed of chain-of-thought (Day 8).</li>
+      <li><strong>Decompose into separate calls</strong> &mdash; one call extracts, its output feeds a second call that assesses, a third drafts. Each call is simpler, individually testable, and individually cacheable. This is the seed of chains and context engineering (Day 10).</li>
+    </ul>
+    <p>The senior instinct is to ask "what is the smallest unit the model can do reliably?" and build up from there, rather than writing one heroic mega-prompt that fails in ways you cannot localize.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: from vague to specified</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>Goal: extract structured data from a job posting. The first attempt is a single line.</p>
+    <p><span class="muted">Attempt 1 (user message only):</span> <code>Get the key info from this job ad: &lt;text&gt;</code></p>
+    <p>The model returns a prose paragraph, sometimes a bulleted list, with different keys each call. Unparseable. Now apply the six components, split across roles:</p>
+  </div>
+  <div class="diagram">  SYSTEM:
+    You are a precise job-posting parser.
+    Extract fields and return ONLY JSON, no prose, with these keys:
+      {title, company, location, seniority, remote, must_have_skills[], salary|null}
+    Rules:
+      • seniority ∈ {junior, mid, senior, lead}; infer from wording, else "mid".
+      • remote ∈ {onsite, hybrid, remote}.
+      • must_have_skills: only skills explicitly required, max 8, lowercase.
+      • salary: copy the stated range verbatim, or null if absent. Do NOT estimate.
+
+  USER:
+    Posting:
+    "Senior ML Engineer, Acme GmbH (Munich, hybrid). You will own our
+     retrieval stack. Required: Python, PyTorch, vector databases. €85k to €105k."</div>
+  <div class="prose">
+    <p>Now the output is deterministic in shape: <code>seniority</code> is "senior" (the word is present), <code>remote</code> is "hybrid", <code>salary</code> is copied verbatim rather than guessed, and the keys never drift because the contract is in the governing system message. The exact same model, the exact same input text, but the prompt did the engineering. We will make this output <em>guaranteed</em> parseable, not just usually parseable, on Day 9.</p>
+  </div>
+
+  <h2>The five mistakes that quietly break good prompts</h2>
+  <div class="callout key">
+    <span class="label">Failure modes, derived from the components</span>
+    <p><b>1. Rule in the wrong role.</b> A hard constraint sitting in the user message gets overridden by later user text; move it to the system message.<br>
+    <b>2. Conflicting instructions.</b> "Be concise" and "explain every step in detail" cancel out; the model picks one unpredictably. Audit for contradictions.<br>
+    <b>3. Vague constraints.</b> "Keep it short" has no operational meaning; "max 20 words" does.<br>
+    <b>4. Unstated edge-case behavior.</b> If you never say what to do when a field is missing, the model invents one. Always specify the null/"unknown"/"skip" path.<br>
+    <b>5. No format contract.</b> Asking for data without naming the exact output shape guarantees drift that breaks downstream parsing.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Answer out loud in full sentences, as if to an interviewer. Then open the solution and compare. The gap is your lesson.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>A teammate puts the instruction "Always respond in valid JSON" as the last sentence of a long user message, and it works most of the time but occasionally returns prose. What is the most likely cause, and what is the one-line fix?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>The rule is in the wrong role. User-message instructions compete with the rest of the user text and with any earlier turns, so a strong distractor in the input (a long document, an example that contains prose) can pull the model off the format. The fix is to move "respond in valid JSON, no prose" into the <em>system</em> message, where post-training taught the model to treat it as the governing contract for every turn. Senior bonus: for a hard guarantee, do not rely on instruction at all, use tool/function calling or constrained decoding (Day 9), which enforces the format mechanically rather than asking nicely.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>You are asked to "improve" this prompt: <em>"You are a helpful expert assistant. Please provide a comprehensive, detailed, and concise answer about our refund policy."</em> Identify two problems and rewrite it.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Two problems: (1) <em>conflicting instructions</em> &mdash; "comprehensive and detailed" fights "concise", so the model picks unpredictably; (2) <em>missing context and format</em> &mdash; there is no refund policy supplied and no output shape, so it will either hallucinate a policy or produce free-form prose. A rewrite separates roles and resolves the conflict: system = "You answer customer refund questions using ONLY the policy text provided. If the policy does not cover the question, say so and suggest contacting support. Answer in at most 4 sentences." user = the customer question plus the actual policy text as context. Now there is one clear length target, grounded context, and an explicit out-of-scope path.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>You need the model to (a) read a customer email, (b) detect the sentiment, (c) extract any mentioned product names, and (d) draft a reply matching the sentiment. Argue for either one prompt or a decomposed pipeline, and say what you would measure to decide.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Both are defensible; the senior answer names the trade-off. One prompt is simpler, fewer calls, lower latency and cost, and fine if the model handles all four reliably on your data. A decomposed pipeline (classify sentiment + extract products in one call, draft reply in a second that receives those as inputs) makes each step individually testable and lets you swap a cheaper model for the easy classification step while reserving the strong model for drafting. To decide, build a small labeled set and measure per-step accuracy: if the single prompt's extraction or sentiment degrades when bundled with drafting (a common "juggling goals" failure), split it. Start with one prompt, decompose only when measurement shows a step is being dragged down.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's Prompting &amp; Context slice and common 2026 screens. Drill the one-line keys, then expand each into a 90-second answer.</p>
+  <ul class="q-list">
+    <li>What are the components of a strong prompt, and where does each live?
+      <div class="a">Key: role, task, context, constraints, format, examples; stable parts (persona/format/constraints) in system, per-request parts (context/task instance) in user.</div></li>
+    <li>Why does putting a rule in the system prompt have more leverage than putting it in the user message?
+      <div class="a">Key: SFT + preference tuning trained the model to treat system-role text as the governing contract; user text competes with the request and distractors.</div></li>
+    <li>Where should a given rule live: system prompt, tool, few-shot, or retrieval?
+      <div class="a">Key: persona/format &rarr; system prompt; hard-to-describe pattern &rarr; few-shot; external data/action &rarr; tool; per-tenant policy &rarr; retrieval/metadata, not the prompt.</div></li>
+    <li>What is the difference between making a prompt specific and making it longer?
+      <div class="a">Key: specificity adds constraints (audience, length, focus, edge cases); length without constraint dilutes signal and reads as stuffing.</div></li>
+    <li>When do you decompose a task instead of writing one prompt?
+      <div class="a">Key: when sub-jobs compete and degrade each other; split into ordered steps or separate testable/cacheable calls; build up from the smallest reliable unit.</div></li>
+    <li>Name three reasons a reasonable-looking prompt produces inconsistent output.
+      <div class="a">Key: conflicting instructions, rule in the wrong role, no format contract / unstated edge-case behavior.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (15&ndash;20 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Open the Anthropic <a href="https://docs.claude.com/en/docs/build-with-claude/prompt-engineering/overview">prompt engineering docs</a> or the Workbench. Take a one-line request you would actually make ("summarize this PR description", "classify this bug") and run it bare. Then rebuild it with all six components, putting persona + constraints + format in the <code>system</code> field and the input in the <code>user</code> field. Run both on three different inputs and compare consistency of shape, not just quality. Notice how the structured version's <em>format</em> stops drifting first.</p>
+    <p class="muted" style="font-size:13.5px">No API key yet? Do it in the Claude web app: paste the bare prompt in one chat, the six-component version in another, and run both on the same three inputs. See <a href="../../tools.html">Tools &amp; Claude</a> to set up access.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>On MaiQ, the features you took from prototype to production are exactly these contracts hardened into code: a triage or extraction step is a system message defining the persona, the closed set of categories, and the JSON shape, with the per-document text arriving in the user message. When an interviewer asks "how do you write a reliable prompt," you can answer from production: "I treat the system message as the governing contract for persona, constraints, and output format, keep the changing context in the user message, and specify the edge-case path so the model never has to guess what to do with a missing field." That framing leads naturally into your structured-output and evaluation work in the next lessons.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>A prompt is a specification, not a wish. Three roles exist and the model was trained to weight them differently, which is why the system message governs behavior. Six components answer the full spec: role, task, context, constraints, format, examples. Specificity beats verbosity, and decomposition beats one heroic mega-prompt when sub-jobs compete. Most "the model is dumb" complaints are really a missing constraint, a wrong-role rule, or an absent format contract.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d07">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: examples and step-by-step reasoning &mdash; few-shot and chain-of-thought, and when each is worth its cost.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="../m01-llm-foundations/d06-foundations-lab.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 6 &middot; Foundations lab</div></a>
+    <a data-nav="next" class="next" href="d08-fewshot-cot.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 8 &middot; Few-shot &amp; chain-of-thought</div></a>
+  </div>
+
+  <div class="foot">Module 2 &middot; Prompting &amp; Context Engineering &middot; Day 7 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

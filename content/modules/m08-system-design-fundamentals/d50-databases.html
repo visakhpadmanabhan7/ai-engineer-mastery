@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 50 · Databases: SQL/NoSQL, sharding, CAP</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 8 &middot; System Design Fundamentals</span>
+    <span class="pill">Day 50</span>
+    <span class="pill">60 min</span>
+    <span class="diff" title="Difficulty: advanced"><i class="on"></i><i class="on"></i><i class="on"></i></span>
+  </div>
+
+  <h1>Databases: SQL/NoSQL, sharding, CAP</h1>
+  <p class="lede">The database is the hard half of every system design, because it holds the state. Today you build the judgment to choose one, index it, replicate it, shard it, and reason about consistency, with Postgres as your strong default and a clear story for when to leave it.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Justify Postgres as the default and name the specific scale or shape that makes you switch to NoSQL.</li>
+      <li>Match an access pattern to the right index: B-tree, GIN, or HNSW.</li>
+      <li>Explain leader-follower replication, sync vs async, and the read-your-writes problem.</li>
+      <li>Shard by a key, and predict the two things that break: cross-shard joins and hot keys.</li>
+      <li>Apply CAP and PACELC as design vocabulary rather than trivia.</li>
+      <li>Pick a transaction isolation level and keep transactions short, never awaiting an LLM inside one.</li>
+    </ul>
+  </div>
+
+  <h2>1 &middot; SQL vs NoSQL, and why Postgres is the default</h2>
+  <div class="prose">
+    <p>The honest senior answer to "SQL or NoSQL?" is: start with a relational database, specifically Postgres, and switch only when a concrete requirement forces you off it. Postgres has quietly become a one-size-fits-most engine because it is far more than a relational store:</p>
+    <ul>
+      <li><strong>Relational core</strong> with real ACID transactions, joins, and a mature query planner, the thing you want for anything money-like or correctness-sensitive.</li>
+      <li><strong>JSONB</strong> for schemaless / document-style data, indexable, so you get NoSQL-style flexibility without giving up SQL.</li>
+      <li><strong>Full-text search (FTS)</strong> built in, often enough to defer a dedicated search engine.</li>
+      <li><strong>pgvector</strong> for embeddings and approximate nearest neighbor, so your vectors can live next to the relational rows they describe (you used exactly this on MaiQ).</li>
+    </ul>
+    <p>That combination means one database often covers relational data, documents, search, and vectors, which is why "default to Postgres" is a defensible interview stance. You reach for NoSQL when you hit a specific wall:</p>
+    <ul>
+      <li><strong>Key-value at extreme scale / single-digit-ms latency</strong> with a simple access pattern: a wide-column or KV store (DynamoDB, Cassandra) that scales writes horizontally out of the box.</li>
+      <li><strong>Document store</strong> when the data is deeply nested and you rarely join (MongoDB), though JSONB covers much of this.</li>
+      <li><strong>Wide-column</strong> for massive write throughput with known query patterns (Cassandra), trading joins and ad-hoc queries for linear write scale.</li>
+    </ul>
+    <p>The trap to avoid is reaching for NoSQL because it sounds scalable. NoSQL buys horizontal write scale and a flexible schema by <em>giving up</em> joins, multi-row transactions, and ad-hoc querying. If you do not have a write-scale or latency problem that Postgres cannot meet, you are paying that price for nothing.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"I default to Postgres because it gives me relational integrity, JSONB for flexible data, full-text search, and pgvector for embeddings in one engine, which covers most workloads. I switch to a key-value or wide-column NoSQL store only when I have a concrete need it cannot meet: horizontal write scale beyond a single primary, or single-digit-millisecond key lookups at massive scale, and I accept losing joins and multi-row transactions in exchange." That shows judgment, not fashion.</p>
+  </div>
+
+  <h2>2 &middot; Indexing: match the index to the query</h2>
+  <div class="prose">
+    <p>An index is a precomputed data structure that turns a full-table scan (O(N)) into a fast lookup. The senior skill is knowing <em>which</em> index a given query needs, because the wrong one is no help at all. Three to know:</p>
+    <ul>
+      <li><strong>B-tree</strong> &mdash; the default. Sorted tree giving O(log N) lookups, and crucially it serves equality (<code>=</code>), range (<code>&lt;</code>, <code>BETWEEN</code>), prefix, and <code>ORDER BY</code> on the indexed column. Use it for primary keys, foreign keys, timestamps, and anything you filter or sort by exact value or range.</li>
+      <li><strong>GIN (Generalized Inverted Index)</strong> &mdash; for "is X contained in this value" queries: full-text search, JSONB containment (<code>@&gt;</code>), and array membership. It inverts the mapping (term &rarr; rows that contain it), which is exactly the structure a search needs. A B-tree cannot answer "which rows contain this word."</li>
+      <li><strong>HNSW (Hierarchical Navigable Small World)</strong> &mdash; the approximate-nearest-neighbor index for vector similarity (in pgvector). It builds a navigable graph so a similarity query is fast and sub-linear instead of a brute-force O(N&middot;d) comparison against every vector. It trades a little recall for a large speed win, the standard bargain of ANN.</li>
+    </ul>
+    <p>The unifying idea: indexes cost write speed and storage to buy read speed, and each index type answers a specific <em>shape</em> of question. Equality and ranges &rarr; B-tree; "contains a term" &rarr; GIN; "nearest in vector space" &rarr; HNSW. Indexing the column the query actually filters on is the single highest-leverage database tuning move.</p>
+  </div>
+
+  <h2>3 &middot; Replication and consistency</h2>
+  <div class="prose">
+    <p>You met read replicas on Day 49 as a scaling tool. Now look at the consistency they imply, because that is what interviewers probe. The standard topology is <strong>leader-follower</strong> (primary-replica): one leader accepts all writes and streams its changes to followers that serve reads. The key decision is <em>when</em> the leader considers a write done.</p>
+    <ul>
+      <li><strong>Synchronous replication</strong> &mdash; the leader waits for a follower to acknowledge before confirming the write to the client. You get strong consistency (a read on that follower will see the write) at the cost of higher write latency and reduced availability (if the follower is slow or down, the write stalls).</li>
+      <li><strong>Asynchronous replication</strong> &mdash; the leader confirms the write immediately and replicates in the background. Fast writes and the leader stays available even if followers lag, but reads on a follower can be <strong>stale</strong> by the replication lag. This is the common default.</li>
+    </ul>
+    <p>Async replication creates the classic <strong>read-your-writes</strong> problem: a user posts a comment (write goes to the leader), the page reloads and reads from a lagging follower that has not received it yet, so their own comment seems to vanish. Fixes: route a user's reads to the leader for a short window after they write, pin a session to a single replica, or track a write timestamp and read from a replica caught up past it. Naming read-your-writes and giving one of these fixes is a strong signal.</p>
+  </div>
+
+  <h2>4 &middot; Sharding: partition by key, and what breaks</h2>
+  <div class="prose">
+    <p>Replicas scale reads, but every replica still holds the whole dataset and replays every write, so they do nothing for write volume or for data that no longer fits one machine. The answer is <strong>sharding</strong>: split the data horizontally across multiple independent databases (shards), each owning a slice of the keyspace. Now writes and storage spread across shards, and you scale by adding shards.</p>
+    <p>Everything hinges on the <strong>shard key</strong>, the field you partition on (user_id, tenant_id, a hash of the primary key). It determines which shard a row lives on, so you choose it to (a) spread load evenly and (b) keep the queries you care about on a single shard. Two things reliably break, and a good answer names both:</p>
+    <ul>
+      <li><strong>Cross-shard joins and transactions hurt.</strong> A query that needs data from many shards (a join, or a transaction spanning shards) must fan out, gather, and merge, which is slow and complex, and multi-shard transactions need distributed coordination (two-phase commit) that is expensive and fragile. So pick a shard key that keeps your hot queries within one shard. Sharding by user_id keeps "everything for this user" on one shard, but makes "everything across all users in this city" a cross-shard fan-out.</li>
+      <li><strong>Hot keys / hot shards.</strong> If one key gets disproportionate traffic (a celebrity, a giant tenant, a viral item), its shard becomes a bottleneck while others sit idle, the very imbalance you sharded to avoid. Mitigate by choosing a higher-cardinality or hashed key, or by splitting the hot entity out specially.</li>
+    </ul>
+    <p>The honest framing for an interview: sharding is the tool of last resort for write/storage scale, you adopt it once a single primary genuinely cannot keep up, and the entire design problem collapses to choosing the right shard key. Get the key right and most queries stay single-shard; get it wrong and you have rebuilt your bottleneck with extra moving parts.</p>
+  </div>
+
+  <div class="diagram">  shard key = hash(user_id) % 3        all of one user's rows land on ONE shard
+
+   write/read user 42 ──hash──▶ shard 1   [ users 0,3,6 … ]   ✓ single-shard query
+   write/read user 17 ──hash──▶ shard 2   [ users 1,4,7 … ]
+   write/read user 88 ──hash──▶ shard 0   [ users 2,5,8 … ]
+
+   ✓ "everything for user 42"      → one shard, fast
+   ✗ "join users ↔ orders across   → fan out to ALL shards, gather, merge (slow)
+       every user in region X"
+   ✗ user 42 is a celebrity        → shard 1 is a HOT shard while 0 and 2 idle</div>
+
+  <h2>5 &middot; CAP and PACELC in practice</h2>
+  <div class="prose">
+    <p>CAP is the most over-quoted theorem in interviews, so use it precisely. It says: in a distributed data store, when a <strong>network partition</strong> happens (nodes cannot all talk to each other), you must choose between <strong>consistency</strong> (every read sees the latest write, or errors) and <strong>availability</strong> (every request gets a non-error response, possibly stale). You cannot have both <em>during a partition</em>. Crucially the choice only forces itself when there is a partition, the rest of the time it is irrelevant.</p>
+    <ul>
+      <li><strong>CP systems</strong> sacrifice availability to stay consistent: during a partition, the minority side refuses requests rather than serve stale or conflicting data (a strongly-consistent store, a primary that rejects writes if it cannot reach a quorum). Choose CP for money, inventory, anything where a wrong answer is worse than no answer.</li>
+      <li><strong>AP systems</strong> sacrifice consistency to stay available: every node keeps answering during a partition and reconciles afterward (Dynamo-style stores, eventually consistent). Choose AP for feeds, likes, presence, anything where staleness is tolerable but downtime is not.</li>
+    </ul>
+    <p><strong>PACELC</strong> is the more useful refinement: <em>if</em> there is a <strong>P</strong>artition, choose <strong>A</strong> or <strong>C</strong>; <strong>E</strong>lse (normal operation), choose between <strong>L</strong>atency and <strong>C</strong>onsistency. It captures the everyday trade you actually make far more often than partitions occur: even with a healthy network, stronger consistency (synchronous replication, quorum reads) costs latency, and lower latency means accepting some staleness. Reaching for PACELC instead of bare CAP signals that you understand consistency is a continuous, always-present trade, not a one-time partition-only choice.</p>
+  </div>
+
+  <h2>6 &middot; Transactions and isolation</h2>
+  <div class="prose">
+    <p>A transaction groups operations so they are <strong>atomic</strong> (all or nothing) and <strong>isolated</strong> from concurrent ones. The isolation level controls how much concurrent transactions can interfere, trading correctness against concurrency:</p>
+    <ul>
+      <li><strong>Read Committed</strong> (Postgres default) &mdash; you only see committed data, no dirty reads. Good enough for the large majority of workloads. It still allows non-repeatable reads and write skew under contention.</li>
+      <li><strong>Repeatable Read</strong> &mdash; rows you read stay stable for the transaction's life.</li>
+      <li><strong>Serializable</strong> &mdash; the strongest: transactions behave as if run one at a time. Use it specifically to prevent <strong>write skew</strong>, where two transactions each read a consistent state, then both write in a way that violates an invariant neither could see the other breaking (the classic "both on-call doctors take themselves off shift simultaneously"). The cost is more aborts and retries under contention.</li>
+    </ul>
+    <p>The operational rule that matters most for an AI engineer: <strong>keep transactions short, and never await an LLM (or any slow external call) inside one</strong>. A transaction holds locks and database resources for its whole duration. If you open a transaction, then call an LLM that takes two or five seconds, you pin those locks for seconds per request, which destroys concurrency and can cascade into lock contention and timeouts across the system. The pattern is: do the slow work (LLM call, embedding, external API) outside any transaction, then open a short transaction only to write the result. Locks belong to the database, not to the model's latency.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"Read Committed covers most workloads; I escalate to Serializable only to kill a specific write-skew invariant, accepting more retries. And I keep transactions short on principle, the slow parts, especially an LLM call or an external API, happen outside the transaction, and I open a transaction only to commit the result. Holding locks across an LLM call is how you turn a fast database into a contention nightmare."</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: choose the store for a multi-tenant doc-search product</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>You are storing tenants' documents, their chunks with embeddings, and structured metadata, and serving hybrid search per tenant. Walk the database decisions.</p>
+  </div>
+  <div class="diagram">  CHOICE     Postgres + pgvector — one engine for relational rows, JSONB
+             metadata, full-text (BM25-ish), and vector ANN side by side.
+
+  INDEXES    B-tree on (tenant_id, doc_id) and created_at  → filters + ranges
+             GIN on the tsvector and on JSONB metadata      → keyword + contains
+             HNSW on the embedding column                   → vector similarity
+
+  REPLICATE  one primary for ingestion writes, async read replicas for the
+             read-heavy search traffic (accept small lag; search tolerates it).
+
+  SHARD?     not yet. Below ~10M chunks Postgres is comfortable. If a few huge
+             tenants blow that up, shard by tenant_id → each tenant single-shard
+             (search is always scoped to one tenant anyway). Watch hot tenants.
+
+  TX         ingestion: embed + parse OUTSIDE any transaction (slow), then a
+             short tx to write the chunk rows. Never hold a lock across the
+             embedding/LLM call.
+
+  CAP/ACELC  search path is AP-ish: a slightly stale replica is fine, availability
+             matters more. The tenant-filter correctness is enforced in the query,
+             not by consistency level.</div>
+  <div class="prose">
+    <p>Every choice ties to an access pattern. The shard key (tenant_id) is dictated by the fact that search is always tenant-scoped, so it keeps queries single-shard. The "embed outside the transaction" rule is the AI-specific landmine this lesson exists to flag. And the tenant isolation is a data-layer query constraint, never something you trust the consistency level to provide.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Say each answer out loud in full sentences, as if to an interviewer. Then open the solution and compare. The gap is your lesson.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>A candidate proposes sharding a social app by user_id and is happy. The product's two hottest features are "load my profile and my posts" and "show the global trending feed across all users." Predict how each feature behaves under this shard key, and what you would do about the second one.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Sharding by user_id is great for the first feature and bad for the second, and the reason is locality. "My profile and my posts" is naturally scoped to one user, so all that data lives on a single shard and the query is a fast single-shard lookup, exactly what a good shard key should give you. "Global trending across all users" is the opposite: the data it needs is spread across every shard by construction, so answering it means fanning out to all shards, gathering partial results, and merging and ranking them, which is slow, gets slower as you add shards, and is precisely the cross-shard query pain sharding introduces. You would not fix this by re-sharding (any key that helps the global feed would hurt the per-user query). Instead you serve the global feed from a different path: precompute the trending feed asynchronously (a background job that aggregates across shards on a schedule and writes the result into a cache or a small dedicated store), so the read-time query hits one precomputed structure instead of fanning out live. The general lesson is that a shard key optimizes one access pattern at the expense of others, and cross-shard read patterns are solved with precomputation and caching, not by contorting the shard key.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>Users report that right after they save an edit, refreshing the page sometimes shows the old version, but a second refresh shows the new one. The system uses a single primary with two async read replicas. Explain exactly what is happening and give two fixes with their trade-offs.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>This is the read-your-writes problem caused by asynchronous replication lag. The save is a write, so it goes to the primary and is confirmed immediately; the page reload is a read, and it gets load-balanced to one of the replicas. With async replication a replica is a little behind the primary, so if the read lands on a replica that has not yet received the edit, the user sees the stale (old) version, even though their write succeeded. The second refresh works because by then the replica has caught up, or the read happened to hit the primary or an already-updated replica. Fix one: route a user's reads to the primary for a short window (a few seconds) after they perform a write, so they always see their own changes; the trade-off is extra read load on the primary and you have to track "this user wrote recently." Fix two: pin a session to a single replica and track the write position (log sequence number), reading only from a replica that has caught up past the user's last write; this keeps reads off the primary but adds bookkeeping and can momentarily block a read until the replica catches up. Both deliver read-your-writes consistency without forcing full synchronous replication (which would fix it globally but slow every write and reduce availability), so you scope the stronger guarantee to just the user who needs it.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>Code review: a teammate's request handler opens a database transaction, inserts a draft row, calls an LLM to generate a summary (2 to 4 seconds), updates the row with the summary, then commits, all inside one transaction "so it is atomic." Under load this endpoint causes database timeouts elsewhere. Explain the mechanism and rewrite the flow.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>The mechanism is lock duration. A transaction holds its locks and a database connection for its entire lifetime, and this one wraps a 2-to-4-second LLM call inside the transaction, so every in-flight request pins database resources for several seconds rather than milliseconds. Under load this is fatal: the connection pool drains because connections are stuck waiting on the model, locks on the affected rows are held long enough to block other transactions that touch the same data, and the contention cascades into timeouts on unrelated requests competing for connections or locks. The model's latency has effectively become the database's lock-hold time. The rewrite is to keep the slow work outside any transaction: insert the draft row in a short transaction and commit immediately, then call the LLM with no transaction open, then run a second short transaction to write the summary back to the row and commit. The row is still durably persisted at each step, and if you truly need the draft and summary to appear atomically to readers you gate visibility with a status flag (draft vs ready) rather than by holding a transaction open across the call. The principle is that locks belong to the database and must be held for microseconds-to-milliseconds, never for the duration of an external or model call.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's System Design Fundamentals slice. Drill the one-line keys, then expand each into a 90-second answer with Claude using protocol prompt #2.</p>
+  <ul class="q-list">
+    <li>SQL vs NoSQL, what is your default and when do you switch?
+      <div class="a">Key: default Postgres (relational + JSONB + FTS + pgvector); switch for key-value scale (DynamoDB), document, or wide-column write-throughput needs.</div></li>
+    <li>What is sharding and what breaks?
+      <div class="a">Key: partition data by key across nodes; cross-shard joins/transactions and hot keys are the pain; pick the shard key carefully to keep hot queries single-shard.</div></li>
+    <li>Explain the CAP theorem in practice (and PACELC).
+      <div class="a">Key: under a partition choose consistency or availability; PACELC adds that even without a partition you trade latency vs consistency.</div></li>
+    <li>How does replication work, and what consistency does async give you?
+      <div class="a">Key: leader-follower; sync = consistent but slower/less available, async = fast but stale reads; async causes the read-your-writes problem.</div></li>
+    <li>How do you fix read-your-writes under async replicas?
+      <div class="a">Key: route the writer's reads to the primary briefly, or pin to a replica caught up past their write position; scope the guarantee to the user who needs it.</div></li>
+    <li>Which index for which query: B-tree, GIN, HNSW?
+      <div class="a">Key: B-tree for equality/range/sort, GIN for full-text and JSONB/array containment, HNSW for approximate vector nearest-neighbor in pgvector.</div></li>
+    <li>What isolation level do you use, and why keep transactions short?
+      <div class="a">Key: Read Committed by default, Serializable to prevent write skew; keep tx short and never await an LLM inside one, locks held across a slow call cause contention.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (15&ndash;20 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Make indexing tangible in Postgres. Create a table with a few hundred thousand rows (generate them with <code>generate_series</code>), then run a filtered query and prefix it with <code>EXPLAIN ANALYZE</code> to see a sequential scan and its cost. Add a B-tree index on the filtered column, run <code>EXPLAIN ANALYZE</code> again, and watch the plan switch to an index scan with a far lower cost, this is the O(N) to O(log N) jump in the planner's own words. If you have pgvector installed, repeat with a small vectors table: compare a brute-force similarity query to one backed by an HNSW index. Docs: <a href="https://www.postgresql.org/docs/current/sql-explain.html">EXPLAIN</a> and pgvector indexing at <a href="https://github.com/pgvector/pgvector">github.com/pgvector/pgvector</a>.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>Your MaiQ ingestion path is a live case study for this entire lesson. You chose Postgres with pgvector so that chunk embeddings sit right next to the relational rows and metadata they belong to, which is precisely the "one engine for relational, JSONB, search, and vectors" argument for defaulting to Postgres. The FastAPI service does the slow embedding work and only then writes into pgvector, the right shape because the embedding call must not happen inside a database transaction holding locks. And because MaiQ is multi-tenant, the natural shard key if you ever outgrow a single primary is the tenant, since retrieval is always tenant-scoped, so most queries would stay single-shard. When an interviewer asks you to design a vector store at scale, you can speak from having built one: Postgres plus pgvector with an HNSW index, async replicas for the read-heavy retrieval, embeddings computed outside the write transaction, and tenant as the partition boundary.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>Default to Postgres, relational integrity plus JSONB, full-text search, and pgvector cover most workloads, and switch to NoSQL only for a concrete write-scale or latency need, accepting the loss of joins and multi-row transactions. Match the index to the query: B-tree for equality and ranges, GIN for containment and search, HNSW for vector similarity. Replication scales reads but async lag creates the read-your-writes problem, which you fix per-writer rather than by making every write synchronous. Sharding is the last-resort tool for write and storage scale, and it lives or dies by a shard key that keeps hot queries single-shard while avoiding hot keys. Use CAP and PACELC as precise vocabulary, and above all keep transactions short, never hold a database lock across an LLM call.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d50">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: caching and CDNs, the fastest way to take load off that database you just designed.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d49-scaling-basics.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 49 &middot; Scaling, load balancing, statelessness</div></a>
+    <a data-nav="next" class="next" href="d51-caching-cdn.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 51 &middot; Caching &amp; CDNs</div></a>
+  </div>
+
+  <div class="foot">Module 8 &middot; System Design Fundamentals &middot; Day 50 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

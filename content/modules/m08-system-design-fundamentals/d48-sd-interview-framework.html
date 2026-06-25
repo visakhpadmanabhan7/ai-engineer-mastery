@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 48 · The system design framework</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 8 &middot; System Design Fundamentals</span>
+    <span class="pill">Day 48</span>
+    <span class="pill">55 min</span>
+    <span class="diff" title="Difficulty: intermediate"><i class="on"></i><i class="on"></i><i></i></span>
+  </div>
+
+  <h1>The system design framework</h1>
+  <p class="lede">A system design interview is not a quiz, it is a 45-minute conversation that you are expected to <em>drive</em>. Today you learn the methodology that turns a vague prompt into a structured design, so you are never staring at a blank whiteboard wondering where to start.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Run the seven-step methodology from memory: clarify, estimate, architecture, data model, deep-dive, trade-offs, ops.</li>
+      <li>Split requirements into functional and non-functional, and name the non-functional axes that change a design.</li>
+      <li>Do back-of-envelope capacity math (QPS, payload, storage per year) without a calculator.</li>
+      <li>Pick the one bottleneck worth a deep dive instead of spreading yourself thin.</li>
+      <li>State a trade-off as "I chose X, which costs me Y," because naming what you give up is the senior signal.</li>
+      <li>Close with operations: rollout, observability, and cost, the part juniors forget.</li>
+    </ul>
+  </div>
+
+  <h2>Why a framework at all</h2>
+  <div class="prose">
+    <p>The interviewer is not grading the "right answer." There usually is not one. They are watching <strong>how you think under ambiguity</strong>: do you ask the right questions, do you reason about scale, do you make defensible trade-offs, do you communicate clearly. A framework gives you a track to run on so your cognitive budget goes to the hard parts (the deep dive, the trade-offs) instead of to "what do I say next."</p>
+    <p>The single most common failure is jumping straight to a database schema or a box diagram before understanding the problem. The second most common is going broad and shallow, touching ten components for one minute each and deep-diving none. The framework fixes both: it front-loads understanding and then forces you to pick a bottleneck and go deep.</p>
+  </div>
+
+  <h2>The seven-step methodology</h2>
+  <div class="prose">
+    <p>This is the spine. Memorize the order. You will spend the first ~10 minutes on steps 1 and 2, the bulk on steps 3 to 5, and close on steps 6 and 7.</p>
+  </div>
+
+  <div class="diagram">  1. CLARIFY        functional (what it does) + non-functional (scale, latency,
+     ~5 min        consistency, tenancy, geo). Pin scope. Write requirements down.
+        │
+  2. ESTIMATE       back-of-envelope: DAU → QPS (avg + peak), payload size,
+     ~5 min        storage/yr, read:write ratio. These numbers DRIVE the design.
+        │
+  3. HIGH-LEVEL     draw the boxes: client → LB → app servers → cache → DB,
+     ARCHITECTURE   plus queue / blob store / CDN as needed. One clean diagram.
+        │
+  4. DATA MODEL     the core entities, the key access patterns, the indexes.
+                    "How do I read this at scale?" decides the schema.
+        │
+  5. DEEP-DIVE      pick the ONE bottleneck the scale exposes and go deep:
+     THE BOTTLENECK hot key? fan-out? write throughput? consistency? Solve it.
+        │
+  6. TRADE-OFFS     name what you gave up. "Async analytics → eventual
+                    consistency on the counter, which is fine here because…"
+        │
+  7. WRAP / OPS     rollout (canary, flags), observability (metrics, alerts,
+                    SLOs), cost, failure modes. The part juniors skip.</div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"I clarify functional and non-functional requirements, size the system with back-of-envelope estimates, sketch a high-level architecture, define the data model around the access patterns, then deep-dive the one bottleneck the scale exposes. I close by naming the trade-offs I made and the operational story: rollout, observability, and cost." Open with that sentence and the interviewer relaxes, because they can see you have a plan.</p>
+  </div>
+
+  <h2>1 &middot; Clarify: functional vs non-functional</h2>
+  <div class="prose">
+    <p>A vague prompt ("design Twitter") is a deliberate test. Your job is to narrow it into something you can actually build in 40 minutes. Separate the two kinds of requirement explicitly, because they shape different parts of the design.</p>
+    <p><strong>Functional requirements</strong> are the features: what can a user <em>do</em>? "Post a tweet, follow a user, view a home timeline." Pick the two or three that matter and say you are scoping the rest out. Resist the urge to support everything.</p>
+    <p><strong>Non-functional requirements</strong> are the qualities, and these are what actually drive architecture. Drill each one out loud:</p>
+    <ul>
+      <li><strong>Scale</strong> &mdash; how many users, how many requests, how much data? Get a number even if you have to propose one ("let us assume 100M DAU").</li>
+      <li><strong>Read vs write ratio</strong> &mdash; read-heavy (timelines, feeds) and write-heavy (logging, ingestion) lead to opposite designs. Read-heavy means caching and replicas; write-heavy means partitioning and queues.</li>
+      <li><strong>Latency</strong> &mdash; what is the p95/p99 budget? "Sub-200ms timeline" rules out synchronous fan-out at read time.</li>
+      <li><strong>Consistency</strong> &mdash; does every reader need the latest write instantly (strong), or is a few seconds of staleness fine (eventual)? This single choice cascades through replication, caching, and the database.</li>
+      <li><strong>Tenancy</strong> &mdash; single-tenant or multi-tenant? Multi-tenant forces isolation in the data layer and a tenant key on every query (you saw this for RAG in Module 3).</li>
+      <li><strong>Geo / availability</strong> &mdash; one region or global? What uptime target (three nines vs four)? Global means CDNs, regional replicas, and harder consistency.</li>
+    </ul>
+    <p>Write these down where the interviewer can see them. They become your contract, and you will refer back to them when justifying trade-offs.</p>
+  </div>
+
+  <h2>2 &middot; Estimate: the capacity cheat-sheet</h2>
+  <div class="prose">
+    <p>Estimation is where you prove you can reason about scale instead of guessing. You do not need precision, you need the right order of magnitude and a clear method. Round aggressively. The numbers you produce here decide whether one database is enough or you need sharding, whether a cache is optional or mandatory.</p>
+    <p>The core moves are always the same: turn users into requests per second, turn requests into bandwidth, turn writes into storage per year.</p>
+  </div>
+
+  <table>
+    <tr><th>Quantity</th><th>How to get it</th><th>Anchor numbers to memorize</th></tr>
+    <tr><td><b>QPS (average)</b></td><td>DAU &times; actions/user/day &divide; 86,400 s/day</td><td>1 day &asymp; 10<sup>5</sup> s (86,400, round to 100k).</td></tr>
+    <tr><td><b>QPS (peak)</b></td><td>average &times; 2 to 5 (traffic is bursty)</td><td>Use &times;3 as a default peak factor.</td></tr>
+    <tr><td><b>Storage / year</b></td><td>writes/day &times; bytes/write &times; 365</td><td>1 year &asymp; 3 &times; 10<sup>7</sup> s; &asymp; 3 &times; 10<sup>7</sup> writes/yr at 1 wps.</td></tr>
+    <tr><td><b>Bandwidth</b></td><td>QPS &times; payload size</td><td>Char &asymp; 1 byte; a tweet &asymp; 300 B; an image &asymp; 200 KB.</td></tr>
+    <tr><td><b>Read:write</b></td><td>ask, or assume by domain</td><td>Social feed &asymp; 100:1 read-heavy; logging &asymp; write-heavy.</td></tr>
+  </table>
+
+  <div class="prose">
+    <p>Two reference facts make the arithmetic fast: a day has roughly <strong>100,000 seconds</strong> (86,400), and a year has roughly <strong>30 million seconds</strong>. So a system at 1,000 writes per second stores about 30 billion records a year. Powers of two for memory: 2<sup>10</sup> &asymp; 1 thousand (KB), 2<sup>20</sup> &asymp; 1 million (MB), 2<sup>30</sup> &asymp; 1 billion (GB), 2<sup>40</sup> &asymp; 1 trillion (TB).</p>
+  </div>
+
+  <div class="callout example">
+    <span class="label">Worked estimate</span>
+    <p>Design a URL shortener. Assume 100M new URLs created per day, read-heavy at 100:1.</p>
+    <p><b>Write QPS</b> = 100M &divide; 100k s &asymp; <b>1,000 writes/s</b>. <b>Read QPS</b> = 1,000 &times; 100 = <b>100,000 reads/s</b> (peak maybe 300k). <b>Storage</b>: each row &asymp; 500 B (short code + long URL + metadata), so 100M &times; 500 B = 50 GB/day &asymp; <b>18 TB/year</b>. <b>Keyspace</b>: base62 with 7 characters = 62<sup>7</sup> &asymp; 3.5 trillion codes, comfortably above years of growth.</p>
+    <p>Conclusion the numbers force: reads at 100k/s mean a cache and read replicas are mandatory, not optional; 18 TB/year means you plan for partitioning within a couple of years; the write path is light enough for a single primary with async replication. You did not design anything yet, but the math already told you the shape.</p>
+  </div>
+
+  <h2>3 &middot; High-level architecture</h2>
+  <div class="prose">
+    <p>Now draw the boxes, once, cleanly. Start from the request and follow it through the system. Most web-scale designs are a variation on the same backbone, and the estimate tells you which optional pieces to add.</p>
+  </div>
+
+  <div class="diagram">
+   client ──▶ [ CDN ]* ──▶ [ load balancer ] ──▶ ┌─ app server ─┐
+                                                  ├─ app server ─┤  (stateless fleet)
+                                                  └─ app server ─┘
+                                                        │
+                          ┌─────────────────────────────┼───────────────┐
+                          ▼                              ▼               ▼
+                    [ cache (Redis) ]            [ primary DB ]   [ message queue ]*
+                    hot reads, ~90% hit          writes + replicas   async / spiky work
+                                                        │                  │
+                                                  [ read replicas ]  [ workers → blob/analytics ]
+
+   * add the CDN, queue, and blob store only when the requirements call for them.</div>
+
+  <div class="prose">
+    <p>State your reasoning as you place each box: "Load balancer so I can scale app servers horizontally; servers are stateless so any node serves any request; Redis in front of the database because the read QPS is 100x the write QPS; a queue for the click-analytics path so the redirect stays fast and the counting is async." Each component earns its place by tying back to a requirement or an estimate. Boxes without justification are the junior tell.</p>
+  </div>
+
+  <h2>4 &middot; Data model around access patterns</h2>
+  <div class="prose">
+    <p>Design the schema <em>backwards from how you read it</em>, not forwards from how it is "naturally" structured. The question that decides everything is: what are the high-volume queries, and can the data layer serve them in one cheap lookup?</p>
+    <p>List the core entities and their relationships, then list the access patterns and the index each one needs. For the URL shortener the dominant read is "given a short code, fetch the long URL," so the short code is the primary key, the lookup is O(1) in a key-value store or a B-tree index, and that single decision is most of the design. When the dominant access pattern is a key lookup at huge read volume, you lean toward a key-value store or a heavily cached relational table; when you need rich filtering, joins, and transactions, you lean relational. You will go deep on SQL vs NoSQL, indexing, and sharding next lesson.</p>
+  </div>
+
+  <h2>5 &middot; Deep-dive the bottleneck</h2>
+  <div class="prose">
+    <p>This is the part that separates candidates. Do not narrate all ten components. Pick the <strong>one</strong> place where the scale you estimated actually breaks the naive design, announce it, and solve it in detail. Picking well is itself a signal: it shows you can find the load-bearing wall.</p>
+    <p>How to find it: look at your biggest number and ask what it stresses. 100k reads/s stresses the read path, so the deep dive is caching strategy, cache invalidation, and read replicas. A celebrity with 50M followers stresses fan-out, so the deep dive is push vs pull timelines. 1M writes/s stresses the write path, so the deep dive is partitioning and the shard key. A strong-consistency requirement on a global system stresses coordination, so the deep dive is the consistency model. State the bottleneck out loud ("the interesting problem here is fan-out on write for high-follower accounts"), then work it.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Concept</span>
+    <p>A senior candidate spends 40% of the interview on one deep dive and the rest on scaffolding. A junior candidate spends 10% on each of ten things. Depth on the right bottleneck beats breadth across all of them, every time. If you are unsure which to pick, ask the interviewer: "the two interesting bottlenecks here are X and Y, which would you like me to dig into?"</p>
+  </div>
+
+  <h2>6 &middot; Trade-offs: name what you give up</h2>
+  <div class="prose">
+    <p>Every real decision costs something. The mark of seniority is stating both sides unprompted, in the form "I chose X, which buys me A but costs me B, and B is acceptable here because of requirement R." There is no free lunch and the interviewer knows it, so a design presented as all upside reads as naive.</p>
+    <p>Reach for the classic axes: strong vs eventual consistency (correctness vs availability and latency); SQL vs NoSQL (flexible queries and transactions vs horizontal write scale); sync vs async (simplicity and freshness vs throughput and resilience); normalization vs denormalization (no duplication vs fast reads); push vs pull fan-out (fast reads vs write amplification). For each one you use, say the cost. "Async click counting gives me a fast redirect and decouples a spiky workload, at the cost of an eventually-consistent counter, which is fine because nobody needs the click count to be exact to the millisecond."</p>
+  </div>
+
+  <h2>7 &middot; Wrap with operations</h2>
+  <div class="prose">
+    <p>Most candidates stop at the architecture. Closing with operations is free differentiation, because it shows you have actually run systems, not just diagrammed them. Spend the last few minutes here:</p>
+    <ul>
+      <li><strong>Rollout</strong> &mdash; how do you ship a change safely? Feature flags, canary release to 1% of traffic, gradual ramp, instant rollback. Never a big-bang deploy.</li>
+      <li><strong>Observability</strong> &mdash; the golden signals: latency (p95/p99), traffic (QPS), errors (rate), saturation (resource use). Define one or two SLOs ("p99 redirect under 100ms, error rate under 0.1%") and alert on burn.</li>
+      <li><strong>Failure modes</strong> &mdash; what happens when the cache dies, a replica lags, the queue backs up? Name the single points of failure and how you remove them (replication, multi-AZ).</li>
+      <li><strong>Cost</strong> &mdash; a rough sense of the dominant cost driver (storage? egress bandwidth? compute? for LLM systems, tokens). Showing cost awareness signals real ownership.</li>
+    </ul>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: drive the whole framework on a URL shortener</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>A 90-second skeleton you could narrate end to end. Notice every step ties back to the one before it.</p>
+  </div>
+  <div class="diagram">  CLARIFY    functional: shorten a URL, redirect a short code, basic click count.
+             non-functional: read-heavy 100:1, p99 redirect < 100ms, eventual
+             consistency on counts OK, global, very high availability.
+
+  ESTIMATE   100M writes/day → 1k write QPS; 100k read QPS (peak ~300k);
+             ~18 TB/yr; base62 × 7 chars = 62^7 ≈ 3.5T keyspace.
+
+  ARCH       client → CDN → LB → stateless app servers → Redis (hot codes)
+             → KV store / indexed Postgres; clicks → queue → analytics worker.
+
+  DATA       table { short_code PK, long_url, created_at, owner }; the redirect
+             is a single PK lookup → O(1); analytics written async, not inline.
+
+  DEEP-DIVE  reads at 100k/s: cache-aside on Redis (~90% hit on hot links),
+             read replicas behind it; cold miss → DB → backfill cache.
+             code generation: counter+base62 or hash-of-URL, dedup on collision.
+
+  TRADE-OFFS 301 (permanent, cacheable by browser, kills your analytics) vs
+             302 (temporary, every click hits you, keeps analytics) → 302.
+             async counting → eventual-consistent click count (acceptable).
+
+  OPS        canary new code-gen behind a flag; SLO p99 < 100ms + error < 0.1%;
+             multi-AZ Redis + DB replica; dominant cost = read bandwidth + cache.</div>
+  <div class="prose">
+    <p>That is a complete, defensible design in one screen, and every line is justified by the line above it. The 301-vs-302 trade-off is the kind of small, specific decision that signals you have thought about the real system, not the textbook one.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Say each answer out loud in full sentences, as if to an interviewer. Then open the solution and compare. The gap is your lesson.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>An interviewer says "design Instagram" and stays silent. You have five minutes before you should draw anything. What do you actually say and ask in those five minutes, and why does this come before the diagram?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>You scope and size, out loud. First nail two or three functional requirements and explicitly cut the rest: "I will support uploading a photo, viewing a home feed, and following users; I will treat stories, DMs, and reels as out of scope for now, is that reasonable?" Then drill the non-functional axes that change the design: expected DAU, the read:write ratio (a feed is heavily read-heavy), the latency budget for loading a feed, whether the feed can be eventually consistent (it can, a few seconds of staleness is fine), and whether it is global (it is, so CDN for images). Then estimate: DAU into QPS, average photo size into storage per year, which immediately tells you image storage and bandwidth dominate. This comes before the diagram because every box you would draw, push vs pull feed, where the cache sits, whether you shard, is determined by these answers. Drawing first means guessing at requirements and then reverse-justifying the picture, which is exactly the junior pattern interviewers screen for.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>You estimate 50,000 reads/s and 500 writes/s for a feature. A peer designs a single Postgres primary serving all reads and writes directly, no cache, no replicas. Without changing the requirements, give the two-sentence critique grounded in the numbers, and the fix.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>A single primary taking 50k reads/s will saturate on the read path long before the 500 writes/s matter, and it is a single point of failure, so a node restart or AZ blip takes the whole feature down. The 100:1 read:write ratio is the tell: serve reads from a cache (Redis, cache-aside, aiming ~90% hit so only ~5k/s reach the database) plus a few read replicas for the misses, and keep the primary for writes only with async replication to the followers. That turns "one box doing everything" into "writes on the primary, the overwhelming read traffic absorbed by cache and replicas," which is both scalable and survives the loss of any single node.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>You are 35 minutes in and have a clean architecture but have not done a deep dive. The system is a chat app with 200M users where some group chats have 100k members. Which bottleneck do you pick, how do you announce it, and what trade-off must you name?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Pick fan-out, because that is where the scale breaks: a single message to a 100k-member group is one write that must reach 100k inboxes, which is the write-amplification problem. Announce it explicitly so the interviewer knows you found the load-bearing wall: "the interesting bottleneck here is message fan-out for very large groups, let me deep-dive that." Then work the push-vs-pull trade-off and name what each costs. Push (fan-out on write) precomputes every member's inbox, giving fast reads but huge write amplification for large groups (100k writes per message). Pull (fan-out on read) stores the message once and assembles each member's view on read, cheap to write but expensive and slow to read for active users. The senior answer is a hybrid: push for normal-sized chats, fall back to pull for the rare huge groups, and you state the cost of the hybrid, which is added system complexity and a threshold you have to tune.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's System Design Fundamentals slice. Drill the one-line keys, then expand each into a 90-second answer with Claude using protocol prompt #2.</p>
+  <ul class="q-list">
+    <li>Walk through your system design methodology.
+      <div class="a">Key: clarify (functional + non-functional: scale, latency, consistency, tenancy) &rarr; estimate (QPS, storage) &rarr; high-level arch &rarr; data model &rarr; deep-dive the bottleneck &rarr; trade-offs (name what you give up) &rarr; ops (rollout, observability, cost).</div></li>
+    <li>Design a URL shortener.
+      <div class="a">Key: base62 ~7 chars (~3.5T keyspace), KV store, 301 vs 302 trade-off, async click analytics.</div></li>
+    <li>How do you split functional from non-functional requirements, and which non-functional axis matters most?
+      <div class="a">Key: functional = what it does; non-functional = scale, read:write, latency, consistency, tenancy, geo; consistency usually cascades hardest through the design.</div></li>
+    <li>How do you do back-of-envelope capacity estimation under pressure?
+      <div class="a">Key: DAU &times; actions &divide; ~100k s/day = QPS; &times;3 for peak; writes &times; bytes &times; 365 for storage/yr; round aggressively, the order of magnitude drives the design.</div></li>
+    <li>How do you decide which part of a design to deep-dive?
+      <div class="a">Key: find the biggest estimated number and ask what it stresses (hot reads, fan-out, write throughput, consistency); announce the one bottleneck and go deep instead of broad-and-shallow.</div></li>
+    <li>Give an example of stating a trade-off well in an interview.
+      <div class="a">Key: "I chose X, which buys A but costs B, acceptable here because requirement R"; never present a design as all upside.</div></li>
+    <li>What do you cover in the operational wrap-up that juniors skip?
+      <div class="a">Key: rollout (flags, canary, rollback), observability (golden signals + SLOs), failure modes / single points of failure, cost driver.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (15&ndash;20 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Pick one prompt from "design a pastebin," "design a parking-lot reservation system," or "design a notification service." Open a blank text file and write the seven headings (Clarify, Estimate, Architecture, Data model, Deep-dive, Trade-offs, Ops) as a template. Fill each section in two or three bullets, doing the QPS and storage math by hand. Then open <a href="../../tools.html">Claude</a> and paste your design with the prompt: "Act as a senior staff engineer interviewing me. Critique this system design: where did I hand-wave, what bottleneck did I miss, and what trade-off did I fail to name?" Iterate once on the feedback. You now have a reusable template you can paste into any future design.</p>
+    <p class="muted" style="font-size:13.5px">Keep the filled-in template. Reuse the seven-heading skeleton for the rate-limiter lab on Day 53 and every ML and GenAI design in Modules 9 and 10.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>You already drove this loop on MaiQ without calling it system design. The FastAPI ingestion service writing into pgvector is a high-level architecture with a clear write path; choosing hybrid retrieval (BM25 plus dense, fused with RRF) over pure dense was a deep dive into the retrieval bottleneck; the LLM-as-judge evaluation framework is the observability-and-rollout half of the wrap, the thing that let you ship a chunking change and prove it was safe. When an interviewer asks you to design a system, narrate the methodology and then ground a trade-off in something you actually did: "on MaiQ I ran 11+ retrieval experiments and chose the configuration that cut inference cost 37% for only a 2% retrieval-quality drop, which is exactly the cost-versus-quality trade-off this framework asks you to name." That turns an abstract framework answer into a credible, lived one.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>A system design interview is a conversation you drive with a seven-step methodology: clarify, estimate, architecture, data model, deep-dive, trade-offs, ops. Front-load the first two steps so the numbers tell you the shape before you draw anything. Pick one bottleneck and go deep rather than touching everything shallowly. State every decision as a trade-off with a named cost, and always close on operations, because that is the part that signals you have run systems, not just sketched them. This template is reusable: every lesson in this module fills in one of these steps in depth.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d48">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: scaling, load balancing, and why stateless app servers are the foundation of horizontal scale.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="../m07-llmops-serving/d47-optimization-lab.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 47 &middot; Optimization lab</div></a>
+    <a data-nav="next" class="next" href="d49-scaling-basics.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 49 &middot; Scaling, load balancing, statelessness</div></a>
+  </div>
+
+  <div class="foot">Module 8 &middot; System Design Fundamentals &middot; Day 48 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

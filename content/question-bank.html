@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Question Bank — AI Engineer Mastery Path</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="index.html">Path</a>
+    <a href="question-bank.html" class="active">Question Bank</a>
+    <a href="tools.html">Tools &amp; Claude</a>
+    <a href="resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="hero">
+    <div class="eyebrow">~290 questions &middot; your Notion bank, drill-ready</div>
+    <h1>Question Bank</h1>
+    <p class="lede">The best of your Notion "AI Engineer Interview Question Bank" plus the strongest 2026 web questions, organized by topic with one-line answer keys. Each section links to its full Notion deep-dive and the lessons that build the underlying skill. Drill these before every round.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">How to drill (read once)</span>
+    <p>Cover the key, <b>say the answer out loud</b> in full sentences (90 seconds), then reveal and compare. Never type bullet points: interviews are spoken. Once a week, paste a section to Claude with daily-protocol <a href="tools.html">prompt #2 or #3</a> and have it grade you or run a rapid-fire mock. Treat every real interview as a chance to add a question back to your Notion bank.</p>
+  </div>
+
+  <div class="tag-list" style="margin:18px 0 8px">
+    <a class="pill" href="#foundations">Foundations</a>
+    <a class="pill" href="#prompting">Prompting &amp; Context</a>
+    <a class="pill gold" href="#rag">RAG &amp; Retrieval</a>
+    <a class="pill gold" href="#agents">Agents</a>
+    <a class="pill gold" href="#eval">Evaluation &amp; MLOps</a>
+    <a class="pill" href="#finetune">Fine-tuning</a>
+    <a class="pill" href="#llmops">LLMOps &amp; Serving</a>
+    <a class="pill" href="#backend">Python &amp; Backend</a>
+    <a class="pill" href="#sysdesign">System Design</a>
+    <a class="pill" href="#livecoding">Live Coding</a>
+    <a class="pill" href="#behavioral">Behavioral &amp; STAR</a>
+    <a class="pill" href="#askback">Questions to Ask Back</a>
+  </div>
+
+  <!-- FOUNDATIONS -->
+  <h2 id="foundations">Foundations &amp; practical patterns</h2>
+  <p class="muted">Full deep-dive: <a href="https://app.notion.com/p/35402c23068e81a287fecaaaf47f9359">Notion &middot; Foundations</a> &middot; Lessons: <a href="modules/m01-llm-foundations/d01-how-llms-work.html">Module 1</a></p>
+  <ul class="q-list">
+    <li>Explain how an LLM generates text to a smart non-engineer.<div class="a">Key: next-token prediction over a vocabulary, looped; context steers the distribution.</div></li>
+    <li>What is an agent, and how is it different from a chain?<div class="a">Key: agent = LLM has autonomy over control flow (picks next step + tool in a loop); chain = fixed, dev-wired pipeline.</div></li>
+    <li>When should you NOT use an agent?<div class="a">Key: scoped/deterministic task, tight latency, single-prompt-expressible, safety-critical. Knowing when not to is the senior signal.</div></li>
+    <li>What is agentic retrieval vs a fixed retrieval step?<div class="a">Key: retrieval as a tool the LLM chooses to call, with crafted queries and multiple iterations.</div></li>
+    <li>Prompt engineering vs context engineering?<div class="a">Key: prompt = static contract (persona/format, written once); context = the dynamic per-turn supply chain (chunks, history, tool results, order). Most prod failures are context failures.</div></li>
+    <li>What makes a good tool definition?<div class="a">Key: action-verb name, "use this when / do NOT use when" docstring, tight typed params, return description. Negative scoping matters.</div></li>
+    <li>Where should a rule live: system prompt / tool / few-shot / retrieval / metadata?<div class="a">Key: external data/action&rarr;tool; persona/format&rarr;system; hard-to-describe pattern&rarr;few-shot; filter-by-attribute&rarr;metadata; multi-tenant policy&rarr;retrieval, not the prompt.</div></li>
+    <li>Foundation models vs traditional ML, when does each win?<div class="a">Key: FM for language-rich/ambiguous/multi-task + fast iteration; traditional for narrow, labeled, low-latency, regulated, cheap-at-scale.</div></li>
+    <li>How is AI Engineering different from ML Engineering?<div class="a">Key: ML trains custom models from data (data-centric, slow cycle); AI eng builds on foundation models via API (prompt-centric, fast cycle).</div></li>
+    <li>Pretraining vs fine-tuning vs prompting, how do you choose?<div class="a">Key: effort/cost ladder prompting &lt; fine-tuning &lt; pretraining. Exhaust prompting + RAG + few-shot first; pretraining almost never for a product team.</div></li>
+  </ul>
+
+  <!-- PROMPTING -->
+  <h2 id="prompting">Prompting &amp; context engineering</h2>
+  <p class="muted">Lessons: <a href="modules/m02-prompting-context/d07-anatomy-of-a-prompt.html">Module 2</a></p>
+  <ul class="q-list">
+    <li>Why does structured output matter and how do you enforce it?<div class="a">Key: downstream code parses it; enforce via tool/function calling (schema-enforced) or Pydantic &gt; JSON mode &gt; prompt; constrained decoding is strongest.</div></li>
+    <li>When does structured output break?<div class="a">Key: over-generated optional fields, similar enums, truncated long JSON, deep nesting (&gt;3 levels). Pair with post-validation.</div></li>
+    <li>What is the 3-layer constraint model for outputs?<div class="a">Key: L1 output format (tool calling) / L2 schema (Pydantic) / L3 semantic ("does this date make sense?").</div></li>
+    <li>Few-shot vs zero-shot vs chain-of-thought, when each?<div class="a">Key: zero-shot for simple; few-shot to pin format/edge cases; CoT for multi-step reasoning (costs tokens + latency).</div></li>
+    <li>What is the "sandwich" pattern?<div class="a">Key: cheap deterministic model on the input, expensive FM in the middle, cheap classifier on the output.</div></li>
+  </ul>
+
+  <!-- RAG -->
+  <h2 id="rag">RAG &amp; retrieval <span class="pill gold">core</span></h2>
+  <p class="muted">Full deep-dive: <a href="https://app.notion.com/p/35402c23068e81009808d363d2c61dda">Notion &middot; RAG</a> &middot; Lessons: <a href="modules/m03-rag-retrieval/d13-why-rag-architecture.html">Module 3</a></p>
+  <ul class="q-list">
+    <li>What is RAG and why use it instead of fine-tuning?<div class="a">Key: retrieves context at query time; wins on dynamic knowledge, provenance/citations, no retrain.</div></li>
+    <li>Walk through a vanilla RAG pipeline.<div class="a">Key: ingest &rarr; chunk &rarr; embed &rarr; index &rarr; retrieve &rarr; generate.</div></li>
+    <li>What is the most common RAG failure mode?<div class="a">Key: retrieval (~70-75% of bad answers): bad chunking, bad embeddings, no reranker, wrong top-k.</div></li>
+    <li>Compare fixed / semantic / sentence-window / parent-child chunking.<div class="a">Key: fixed = N-token+overlap (cheap, breaks boundaries); semantic = similarity splits; sentence-window = index sentence, expand at retrieval; parent-child = index small, return parent. Start parent-child.</div></li>
+    <li>How do you choose chunk size and overlap?<div class="a">Key: embedder max tokens + question granularity + context budget; start 256-512 tokens, 10-20% overlap.</div></li>
+    <li>What is BM25 and why does it still matter in 2026?<div class="a">Key: probabilistic bag-of-words (TF-IDF + length norm + TF saturation); dominates exact-match (codes, names, acronyms).</div></li>
+    <li>Why ANN instead of brute-force cosine?<div class="a">Key: brute force is O(N&middot;d) and hits a cliff; ANN (HNSW/IVF/PQ) trades a little recall for big speed; HNSW default.</div></li>
+    <li>What is hybrid search and how do you fuse scores?<div class="a">Key: BM25 + dense in parallel, merge via RRF (rank-only, scale-free) or weighted fusion; RRF avoids score-scale mismatch.</div></li>
+    <li>What is reranking and where does it sit?<div class="a">Key: rescore top 50-100 with a cross-encoder (joint query,chunk); the precision booster before generation.</div></li>
+    <li>Bi-encoder vs cross-encoder vs ColBERT?<div class="a">Key: bi-encoder scales retrieval (precompute); cross-encoder for small-N rerank (accurate, slow); late-interaction in the middle.</div></li>
+    <li>pgvector vs Pinecone vs Qdrant vs Weaviate vs Milvus?<div class="a">Key: pgvector = vectors next to relational (&le;~10M); Pinecone = managed scale; Qdrant/Weaviate = first-class filter/delete; Milvus = huge scale.</div></li>
+    <li>What are recall@k, MRR, NDCG?<div class="a">Key: recall@k = did we retrieve it at all (most important); MRR = 1/rank of first relevant; NDCG = graded, log-discounted.</div></li>
+    <li>How do you evaluate generation, not just retrieval?<div class="a">Key: RAGAS-style LLM-as-judge: faithfulness (trust most), answer relevancy, contextual precision/recall.</div></li>
+    <li>How do you prove a retrieval change is actually better?<div class="a">Key: offline golden set &rarr; shadow/interleaving &rarr; online per-user A/B with guardrail metrics.</div></li>
+    <li>Multi-tenant RAG isolation?<div class="a">Key: metadata filter &rarr; per-tenant namespace &rarr; per-tenant index; never drop the tenant filter (data-layer constraint, not LLM filtering).</div></li>
+    <li>What is query rewriting / HyDE / multi-query?<div class="a">Key: transform the query before retrieval (decomposition, step-back, HyDE); help ambiguous/multi-hop, can hurt precise queries.</div></li>
+    <li>What is GraphRAG / RAPTOR / CRAG, when worth it?<div class="a">Key: GraphRAG = entity-relation KG + summaries for global/multi-hop; RAPTOR = recursive summary tree for multi-doc synthesis; CRAG = grade chunks, drop irrelevant, fall back.</div></li>
+    <li>How do you cut RAG cost ~30% without quality loss?<div class="a">Key: embed once, cache reranks, route, lower top-k, smaller generator, prompt caching. (Your real story: 11+ experiments, 37% cut, 2% drop.)</div></li>
+  </ul>
+
+  <!-- AGENTS -->
+  <h2 id="agents">Agents <span class="pill gold">core</span></h2>
+  <p class="muted">Full deep-dive: <a href="https://app.notion.com/p/35402c23068e81dba434d2bf64f0e3ca">Notion &middot; Agents</a> &middot; Lessons: <a href="modules/m04-agents/d22-what-is-an-agent.html">Module 4</a></p>
+  <ul class="q-list">
+    <li>What is the ReAct loop and why still the single-agent default?<div class="a">Key: interleaves Thought &rarr; Action &rarr; Observation; simple, debuggable from the trace; good for a handful of tool calls.</div></li>
+    <li>Plan-Execute vs ReAct, when does Plan-Execute win?<div class="a">Key: &gt;6 mostly-parallel steps knowable upfront; planner emits a DAG, executor runs, re-planner inspects.</div></li>
+    <li>Supervisor vs Swarm vs Hierarchical topology?<div class="a">Key: supervisor = one routing LLM (default, debuggable, slower); swarm = direct handoffs (faster, harder to trace); hierarchical for &gt;20 agents.</div></li>
+    <li>Large tool space (50+) without wrong picks?<div class="a">Key: tool retrieval (embed descriptions, top 5-10), categorical routing, or supervisor; ~10-20 tools is the sweet spot.</div></li>
+    <li>What is a hallucinated tool call and how do you prevent it?<div class="a">Key: nonexistent name or schema-violating args; prevent via structured tool calling, registry validation, tight typed args, self-correction (bad args &gt; bad names).</div></li>
+    <li>What is idempotency in tool design and why care?<div class="a">Key: agents retry loops; create/charge/delete firing twice is dangerous; idempotency keys are non-negotiable.</div></li>
+    <li>How do you implement an approval gate for high-risk actions?<div class="a">Key: classify read vs write; framework interrupt (LangGraph) pauses on the tool; draft action &rarr; human approves &rarr; execute.</div></li>
+    <li>LangChain vs LangGraph, when does the upgrade pay off?<div class="a">Key: LangChain = integrations/chains; LangGraph = stateful graph runtime (cycles, interrupts, checkpoints); upgrade when control flow gets complex.</div></li>
+    <li>Agents are non-deterministic, how do you sleep at night?<div class="a">Key: five layers, constrain the action space, tracing on every call, eval (trajectory + output), guardrails/approval, canary + rollback.</div></li>
+    <li>How do you evaluate an agent?<div class="a">Key: final-answer correctness (LLM-judge) + tool-call accuracy + trajectory eval + online/safety; start with the first two.</div></li>
+    <li>Right answer but wrong tool, bug or feature?<div class="a">Key: bug; right answer on a wrong trajectory is luck and breaks under data shift.</div></li>
+    <li>Short-term vs long-term vs episodic memory?<div class="a">Key: short = working context (pruned); long = durable user facts (vector/KV by user_id); episodic = summaries of past sessions.</div></li>
+    <li>What is MCP vs A2A?<div class="a">Key: MCP = standard for agent-to-tool/data; A2A = agent-to-agent across trust boundaries; internal handoffs are just function calls / graph nodes.</div></li>
+  </ul>
+
+  <!-- EVAL -->
+  <h2 id="eval">Evaluation &amp; MLOps <span class="pill gold">core</span></h2>
+  <p class="muted">Full deep-dive: <a href="https://app.notion.com/p/35402c23068e810db860ee697c89d4eb">Notion &middot; Evaluation &amp; MLOps</a> &middot; Lessons: <a href="modules/m05-evaluation/d31-why-eval-is-the-job.html">Module 5</a>, <a href="modules/m07-llmops-serving/d42-inference-economics.html">Module 7</a></p>
+  <ul class="q-list">
+    <li>Offline vs online evaluation, when each?<div class="a">Key: offline = fixed dataset vs expected (golden/replay/synthetic); online = live signals (thumbs-down, escalation). Use both.</div></li>
+    <li>How do you build a golden set that does not rot?<div class="a">Key: seed by intent, mine prod traces (low-confidence + bug reports), tag intent/difficulty/last-reviewed, refresh quarterly.</div></li>
+    <li>What is LLM-as-judge and where does it break?<div class="a">Key: scales human eval cheaply; biases, position, verbosity, self-preference; calibrate vs humans (kappa/Spearman &ge; ~0.6).</div></li>
+    <li>How do you build a stable judge rubric?<div class="a">Key: numbered scale with explicit per-level anchors, 1-2 in-context examples per level, force reasoning before the score.</div></li>
+    <li>How do you mitigate judge biases?<div class="a">Key: randomize + average both orders (position), normalize length (verbosity), use a different model family (self-preference).</div></li>
+    <li>When is LLM-as-judge the wrong tool?<div class="a">Key: deterministic ground truth (math/code/structured &rarr; programmatic), expert domains (&rarr; human), cost-prohibitive scale.</div></li>
+    <li>Output eval vs trajectory eval?<div class="a">Key: output scores the final response; trajectory scores the path (right tools, right order, recovered, policy followed).</div></li>
+    <li>What does a production tracing pipeline look like?<div class="a">Key: span tree per request (LLM/tool/retrieval spans with tokens + cost + latency each), OTel/OTLP, LangSmith/Langfuse view.</div></li>
+    <li>What do you log vs NOT log per request?<div class="a">Key: log prompt version, model, temp, tokens, latency, tool calls + args, doc IDs, hashed user/session, cost; never raw PII.</div></li>
+    <li>What is shadow mode catching that offline eval misses?<div class="a">Key: real input distribution, real tool latency/failures, real concurrency/rate limits.</div></li>
+    <li>How do you cut LLM spend ~50% without dropping quality?<div class="a">Key: prompt caching (biggest lever), semantic cache, model routing, shorter context, batch.</div></li>
+    <li>What SLOs would you set for an LLM endpoint?<div class="a">Key: latency p95/p99, error + refusal rate, cost-per-request budget, faithfulness floor on a rolling sample.</div></li>
+    <li>Walk through shadow &rarr; canary &rarr; full rollout.<div class="a">Key: shadow (parallel, no serve) &rarr; canary 1&rarr;5&rarr;100% &rarr; full; eval-gated, rollback ready.</div></li>
+  </ul>
+
+  <!-- FINETUNE -->
+  <h2 id="finetune">Fine-tuning &amp; adaptation</h2>
+  <p class="muted">Lessons: <a href="modules/m06-finetuning/d37-prompt-rag-finetune.html">Module 6</a></p>
+  <ul class="q-list">
+    <li>Prompting vs RAG vs fine-tuning, how do you choose?<div class="a">Key: fine-tune changes form/style/latency/cost, not facts; RAG supplies fresh facts; exhaust prompting first.</div></li>
+    <li>What is LoRA and why is it efficient?<div class="a">Key: freeze base weights, train small low-rank adapter matrices; ~99% fewer trainable params, swappable adapters.</div></li>
+    <li>What is QLoRA?<div class="a">Key: LoRA on a 4-bit quantized base; fits big-model fine-tuning on one GPU.</div></li>
+    <li>What is catastrophic forgetting and how do you avoid it?<div class="a">Key: over-tuning erodes general ability; low LR, few epochs, mixed data, adapters.</div></li>
+    <li>What is DPO vs RLHF?<div class="a">Key: DPO optimizes directly on preference pairs (no separate reward model or RL loop); simpler, stable.</div></li>
+  </ul>
+
+  <!-- LLMOPS -->
+  <h2 id="llmops">LLMOps, serving &amp; optimization</h2>
+  <p class="muted">Lessons: <a href="modules/m07-llmops-serving/d42-inference-economics.html">Module 7</a></p>
+  <ul class="q-list">
+    <li>What inference-time optimizations exist and when each?<div class="a">Key: prompt caching &rarr; KV caching &rarr; continuous batching &rarr; quantization &rarr; speculative decoding.</div></li>
+    <li>What is KV caching and when does it matter most?<div class="a">Key: cache per-layer key/value so each new token attends without recompute; biggest win on long shared prefixes / agent loops.</div></li>
+    <li>What is continuous batching?<div class="a">Key: dynamically add/remove sequences in a serving batch (vLLM) for 2-4x throughput vs static batching.</div></li>
+    <li>Explain speculative decoding to a skeptic.<div class="a">Key: small draft model proposes N tokens, big model verifies in one parallel pass, accepts the matching prefix; same distribution, faster.</div></li>
+    <li>What is semantic caching and where is it dangerous?<div class="a">Key: embed query, return a near-duplicate's cached answer above a cosine threshold; dangerous for personalized/time-sensitive/high-stakes.</div></li>
+    <li>How do you design a rate limiter for an LLM API client?<div class="a">Key: token bucket (refill rate r, capacity = burst) client-side + server-side; atomic check-decrement (Redis Lua).</div></li>
+    <li>How do you handle 429s from a provider?<div class="a">Key: respect Retry-After, exponential backoff + jitter, cap attempts, only retry idempotent calls.</div></li>
+    <li>What is a circuit breaker and its states?<div class="a">Key: Closed (allow, count failures) &rarr; Open (fail fast, cooldown) &rarr; Half-open (one probe; success closes).</div></li>
+  </ul>
+
+  <!-- BACKEND -->
+  <h2 id="backend">Python &amp; backend</h2>
+  <p class="muted">Full deep-dive: <a href="https://app.notion.com/p/35402c23068e81dd9fb6dd95713c61e6">Notion &middot; Python &amp; Backend</a></p>
+  <ul class="q-list">
+    <li>Explain the GIL at a senior level.<div class="a">Key: one thread runs bytecode at a time; released during blocking I/O + C extensions; I/O&rarr;asyncio, CPU&rarr;multiprocessing (3.13 has experimental free-threading).</div></li>
+    <li>async/await mental model?<div class="a">Key: async def returns a coroutine; await yields to the loop; cooperative, a non-awaiting coroutine starves all.</div></li>
+    <li>Can you have a race condition in single-threaded async?<div class="a">Key: yes, any await is a yield point; read-await-write loses updates. Use asyncio.Lock or atomic store ops.</div></li>
+    <li>FastAPI vs Flask vs Django, pick each?<div class="a">Key: FastAPI = async APIs/ML/LLM/OpenAPI (default); Flask = tiny sync; Django = CRUD/admin/ORM.</div></li>
+    <li>Sync route vs async route in FastAPI?<div class="a">Key: async def when all deps are async; def (threadpool) for blocking. Never call requests.get in an async route.</div></li>
+    <li>Fan out N LLM calls with bounded concurrency?<div class="a">Key: asyncio.Semaphore + gather(return_exceptions=True), or TaskGroup (3.11+).</div></li>
+    <li>SQL vs NoSQL, your default?<div class="a">Key: Postgres (relational + JSONB + FTS + pgvector) unless a specific reason; never await an LLM inside a DB transaction.</div></li>
+    <li>Idempotency keys for a retried POST?<div class="a">Key: client sends an Idempotency-Key UUID; server stores (key, response, TTL) and replays the cached result.</div></li>
+    <li>Cursor vs offset pagination?<div class="a">Key: cursor (opaque (sort_key, id) token) for production; offset breaks under inserts and is slow on big tables.</div></li>
+  </ul>
+
+  <!-- SYSTEM DESIGN -->
+  <h2 id="sysdesign">System design (general + AI)</h2>
+  <p class="muted">Full deep-dive: <a href="https://app.notion.com/p/35402c23068e81b38084f3a584627c29">Notion &middot; System Design</a> &middot; Lessons: <a href="modules/m08-system-design-fundamentals/d48-sd-interview-framework.html">Modules 8&ndash;10</a></p>
+  <ul class="q-list">
+    <li>Walk through your system design methodology.<div class="a">Key: clarify (func + non-func: scale, latency, consistency, tenancy) &rarr; estimate (QPS, storage) &rarr; high-level arch &rarr; data model &rarr; deep-dive the bottleneck &rarr; trade-offs (name what you give up) &rarr; ops.</div></li>
+    <li>Design a URL shortener.<div class="a">Key: base62 ~7 chars (~3.5T keyspace), KV store, 301 vs 302 trade-off, async click analytics.</div></li>
+    <li>Design a rate limiter.<div class="a">Key: token bucket / sliding window; Redis atomic; per-user + global; distributed coordination.</div></li>
+    <li>Explain the CAP theorem in practice.<div class="a">Key: under partition choose consistency or availability; most systems tune within CP/AP (PACELC adds the no-partition latency tradeoff).</div></li>
+    <li>What is sharding and what breaks?<div class="a">Key: partition by key across nodes; cross-shard joins/transactions and hot keys are the pain; pick the shard key carefully.</div></li>
+    <li>Design a production RAG assistant.<div class="a">Key: ingestion (parse, parent-child chunk, embed) &rarr; hybrid retrieval + rerank + tenant filters &rarr; grounded generation with citations &rarr; faithfulness eval + observability + cost controls. Touch the 11-point AI checklist.</div></li>
+    <li>Design a multi-tenant LLM / agent platform.<div class="a">Key: tool registry, per-tenant scoping in code, prompt/version mgmt, eval + tracing, cost budgets, sandboxed skills with human review for high-risk scopes.</div></li>
+    <li>Design an agent marketplace / Skill Store.<div class="a">Key: signed manifests, sandboxed per-invocation credentials, static analysis + eval + human review for risky scopes, circuit breakers per skill. (You shipped this in MaiQ.)</div></li>
+    <li>Design real-time LLM inference with cost optimization.<div class="a">Key: continuous batching (2-4x), KV/prefix caching (50%+ on agent loops), quantization, routing, spot + on-demand.</div></li>
+    <li>Capacity numbers to know.<div class="a">Key: 1536-dim float32 &asymp; 6 KB (~1.5 KB int8); frontier model ~$5/1M in, ~$15/1M out; aim ~90% cache-hit on hot reads.</div></li>
+  </ul>
+
+  <!-- LIVE CODING -->
+  <h2 id="livecoding">Live coding patterns</h2>
+  <p class="muted">Full deep-dive: <a href="https://app.notion.com/p/35402c23068e81e3b74bfdf9b5fcb99d">Notion &middot; Live Coding</a> &middot; Practice: every <a href="modules/m03-rag-retrieval/d21-rag-lab.html">Lab</a> day</p>
+  <ul class="q-list">
+    <li>Implement a minimal ReAct agent with one tool.<div class="a">Key: Pydantic-validated JSON step, max_steps guard, feed parse errors back into the next prompt.</div></li>
+    <li>Write a recursive character chunker with overlap.<div class="a">Key: separator priority \n\n &rarr; \n &rarr; ". " &rarr; " "; carry overlap tokens between chunks.</div></li>
+    <li>Implement hybrid retrieval via RRF.<div class="a">Key: score = sum of 1/(k+rank), k=60, rank-only so it is scale-free across BM25 and dense.</div></li>
+    <li>Write an LLM-as-judge scorer.<div class="a">Key: numbered rubric, JSON out, self-consistency by sampling + averaging, drop malformed outputs.</div></li>
+    <li>Implement a TTL + LRU cache.<div class="a">Key: OrderedDict, lazy expiry, move_to_end on read, popitem(last=False) to evict oldest.</div></li>
+    <li>Top-k embeddings by cosine.<div class="a">Key: L2-normalize then dot product; np.argpartition is O(N), beats argsort for top-k.</div></li>
+    <li>Rate-limited async LLM batch.<div class="a">Key: Semaphore + token-bucket sleep; collect results by index to preserve order.</div></li>
+    <li>Parse partial JSON from a stream.<div class="a">Key: track open brackets/strings, synthesize closers; SSE blocks split on blank lines, watch the [DONE] sentinel.</div></li>
+  </ul>
+  <div class="callout interview"><span class="label">Live-coding reflexes</span><p>Ask 2-3 clarifying questions first; name the trade-off at every fork; reach for Pydantic reflexively; assert <em>schema and length</em> on LLM outputs, not exact strings; backoff <em>with</em> jitter; leave 5 minutes for one happy-path + one edge-case test.</p></div>
+
+  <!-- BEHAVIORAL -->
+  <h2 id="behavioral">Behavioral &amp; STAR</h2>
+  <p class="muted">Full deep-dive: <a href="https://app.notion.com/p/35402c23068e81a9be5ac5770716ff30">Notion &middot; Behavioral &amp; STAR</a> &middot; Lessons: <a href="modules/m11-interview-mastery/d64-your-project-stories.html">Module 11</a></p>
+  <ul class="q-list">
+    <li>Walk me through your career, why AI engineering, why now?<div class="a">Key: the arc to production AI; the MaiQ shipping + evaluation focus; concrete and forward-looking.</div></li>
+    <li>Tell me about an AI system you shipped, what broke first?<div class="a">Key: STAR, Action-heavy (50-60%), name the option you ruled out, quantify, end with a learning.</div></li>
+    <li>A model underperformed in production, what did you do?<div class="a">Key: follow the data, isolate retrieval vs generation, eval-driven fix, measured result.</div></li>
+    <li>How do you decide a model is good enough to ship?<div class="a">Key: offline eval gates + online guardrails + a quality floor; risk vs value; rollback ready.</div></li>
+    <li>A hard reliability trade-off (latency/cost/quality)?<div class="a">Key: a real decision (rerank depth vs latency, model routing), what you measured, what you gave up.</div></li>
+    <li>Biggest professional failure?<div class="a">Key: real, owned, with the lesson and what you changed; no fake-humility ("I work too hard").</div></li>
+  </ul>
+  <div class="callout key"><span class="label">STAR proportions</span><p>Situation/Task ~25%, <b>Action 50-60%</b> (the signal: reasoning, trade-offs, the ruled-out option), Result 15-25% (a metric + a learning). Prepare 6-8 stories re-angled, not 30. Have these five ready: shipped-to-prod, failure-with-learning, conflict, ambiguous-decision, project-led.</p></div>
+
+  <!-- ASK BACK -->
+  <h2 id="askback">Questions to ask back</h2>
+  <p class="muted">Full deep-dive: <a href="https://app.notion.com/p/35402c23068e81caa1c5dd9338260501">Notion &middot; Questions to Ask Back</a></p>
+  <ul class="q-list">
+    <li>Hiring manager.<div class="a">Ask: what does success look like at 30/60/90 days? What is the first hard problem, and why is it still unsolved? 12-month headcount plan?</div></li>
+    <li>Peer engineer (the truth round).<div class="a">Ask: how do you measure model/agent quality in prod and catch regressions before users? Most painful tech debt + the actual plan? Worst incident this year?</div></li>
+    <li>CTO / senior leader.<div class="a">Ask: the AI strategy in one sentence and the most important bet, and what would prove it wrong? Where is the eng org structurally weak?</div></li>
+    <li>Founder (seed / Series A).<div class="a">Ask: runway and burn? The anti-pitch: why should I NOT join? Biggest mistake running the company and what changed?</div></li>
+    <li>Best closer.<div class="a">Ask: "Any reservations about my fit I could address right now?" Then confirm next steps, timeline, and who else is in the loop.</div></li>
+  </ul>
+  <div class="callout warning"><span class="label">Avoid</span><p>Generic ("what does the company do?"), premature (salary in the first 5 minutes), or loaded ("is there a lot of politics?"). Anchor every question to a specific recent event, person, or decision.</p></div>
+
+  <div class="foot">Question Bank &middot; sourced from your Notion "AI Engineer Interview Question Bank" (2026) + 2026 web screens &middot; keep the Notion bank as your living long-term asset. <a href="index.html">Home</a></div>
+
+</div>
+<script src="assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 17 · Hybrid search &amp; fusion</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 3 &middot; RAG &amp; Retrieval</span>
+    <span class="pill">Day 17</span>
+    <span class="pill">50 min</span>
+    <span class="diff" title="Difficulty: intermediate"><i class="on"></i><i class="on"></i><i></i></span>
+  </div>
+
+  <h1>Hybrid search &amp; fusion</h1>
+  <p class="lede">You have two retrievers with opposite blind spots: dense for meaning, BM25 for exact tokens. Today you combine them into one ranked list, and learn why Reciprocal Rank Fusion is the safe default for doing it.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Describe hybrid search: run BM25 and dense in parallel, then fuse the results.</li>
+      <li>Explain Reciprocal Rank Fusion (RRF) and why being rank-only makes it scale-free.</li>
+      <li>Contrast RRF with weighted score fusion and say when each is right.</li>
+      <li>Argue why score-scale mismatch makes RRF the safe default.</li>
+      <li>Work an RRF example by hand to merge two ranked lists.</li>
+    </ul>
+  </div>
+
+  <h2>The idea: two retrievers, one list</h2>
+  <div class="prose">
+    <p>Yesterday's punchline was that lexical and dense retrieval fail on opposite queries: BM25 misses paraphrase, dense misses exact identifiers. The obvious move is to stop choosing. <strong>Hybrid search runs both retrievers in parallel</strong>, BM25 over the keyword index and dense search over the vector index, and merges their two ranked lists into a single result. A query for an error code is rescued by BM25; a query phrased in synonyms is rescued by dense; and a chunk that <em>both</em> retrievers like rises to the top, which is a strong signal it is genuinely relevant.</p>
+    <p>The whole design question reduces to one thing: <strong>how do you merge two ranked lists into one?</strong> That merge step is called <em>fusion</em>, and getting it right is the substance of today.</p>
+  </div>
+
+  <div class="diagram">  HYBRID SEARCH
+
+       user query
+          ├──────────────► BM25 (lexical index)  → ranked list A
+          │                                         (exact tokens, codes, names)
+          └──────────────► dense (vector index)  → ranked list B
+                                                    (meaning, paraphrase)
+                    │
+                    ▼
+              ╔══════════════╗
+              ║    FUSION    ║   merge A + B → one ranked list
+              ╚══════════════╝   (RRF, or weighted score fusion)
+                    │
+                    ▼
+            top-k → (rerank, Day 18) → generate</div>
+
+  <h2>1 &middot; The merge problem: scores do not compare</h2>
+  <div class="prose">
+    <p>Your first instinct is probably "just add the two scores." That fails, and understanding why is the key insight of the lesson. The two retrievers produce scores on <strong>completely different scales with different distributions</strong>:</p>
+    <ul>
+      <li>A <strong>BM25</strong> score is an unbounded positive number whose magnitude depends on term rarity, document length, and corpus statistics. A great match might score 12, or 30, depending on the corpus.</li>
+      <li>A <strong>cosine</strong> similarity is bounded in a narrow band (often roughly 0.6 to 0.9 for plausible matches), tightly clustered, and means something entirely different.</li>
+    </ul>
+    <p>Add or average these directly and BM25's larger raw numbers swamp the cosine scores, so the dense retriever effectively stops contributing. The scales are incomparable, and the mismatch is not a tuning detail, it silently breaks the fusion.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Concept</span>
+    <p>The fusion trap is <strong>score-scale mismatch</strong>: BM25 scores and cosine similarities live on different, incomparable scales, so naively adding them lets one retriever dominate. You either normalize the scores carefully (fragile, corpus-dependent) or sidestep scores entirely and fuse on <em>rank</em>. The latter is RRF, and it is why RRF is the safe default.</p>
+  </div>
+
+  <h2>2 &middot; Reciprocal Rank Fusion (RRF)</h2>
+  <div class="prose">
+    <p>RRF sidesteps the score problem with one elegant move: <strong>throw the scores away and fuse on rank position instead</strong>. Each document gets a contribution from each list based only on <em>where</em> it ranked, not what it scored. The formula is small and worth knowing exactly:</p>
+  </div>
+
+  <pre><code><span class="tok-c"># For each document d, sum over the lists it appears in:</span>
+RRF(d) = sum over lists of  1 / (k + rank_in_that_list)
+
+<span class="tok-c"># rank is 1-based (best = 1). k is a constant, commonly ~60.</span>
+<span class="tok-c"># Higher total = better. Documents in BOTH lists get two terms = a boost.</span></code></pre>
+
+  <div class="prose">
+    <p>Read what each part does:</p>
+    <ul>
+      <li><strong>1 / (k + rank)</strong> means rank 1 contributes the most and the value falls off smoothly as rank grows. A document near the top of either list gets a big contribution.</li>
+      <li><strong>Summing across lists</strong> means a document that appears in <em>both</em> the BM25 and dense lists earns two contributions, so cross-retriever agreement is rewarded automatically, which is exactly the signal you want.</li>
+      <li><strong>The constant k (commonly around 60)</strong> softens the influence of the very top ranks and controls how quickly the contribution decays. A larger k flattens the curve so lower-ranked items still matter; the value is robust and rarely needs tuning.</li>
+      <li><strong>Rank-only, therefore scale-free.</strong> Because RRF never touches the raw scores, BM25's unbounded numbers and cosine's narrow band become irrelevant. It does not matter that one retriever scores in the tens and the other in tenths, only the ordering is used.</li>
+    </ul>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"RRF fuses ranked lists by summing 1 over (k plus rank) across lists, with k around 60. Because it uses rank, not score, it is scale-free, so it sidesteps the score-scale mismatch between BM25 and cosine, and it rewards documents both retrievers agree on. That is why it is the default fusion method." Crisp and correct.</p>
+  </div>
+
+  <h2>3 &middot; Weighted score fusion, and when to prefer it</h2>
+  <div class="prose">
+    <p>The alternative is <strong>weighted score fusion</strong>: normalize each retriever's scores onto a common range (say 0 to 1), then take a weighted sum, <code>final = &alpha; &middot; dense_norm + (1 - &alpha;) &middot; bm25_norm</code>. The weight &alpha; lets you dial how much each retriever matters, which is its advantage: if you know dense should dominate for your corpus, you can encode that.</p>
+    <p>The catch is the normalization, and it is a real one. To put scores on a common scale you typically min-max normalize per query, but the min and max shift from query to query and corpus to corpus, so the mapping is unstable and a few outlier scores can distort it. You are reintroducing exactly the score-scale fragility RRF was designed to avoid, now with a tuning parameter to babysit. Prefer weighted fusion only when you have a <strong>reliable way to normalize</strong> and a measured reason to weight the retrievers unequally, and you have the evaluation harness to tune &alpha; honestly.</p>
+  </div>
+
+  <table>
+    <tr><th>Method</th><th>Fuses on</th><th>Strength</th><th>Use when</th></tr>
+    <tr><td><b>RRF</b></td><td>Rank only</td><td>Scale-free, robust, almost no tuning; rewards agreement.</td><td><b>Default.</b> Different score scales, want it to just work.</td></tr>
+    <tr><td><b>Weighted score fusion</b></td><td>Normalized scores</td><td>Can weight retrievers (&alpha;) and use score magnitude as signal.</td><td>You can normalize reliably and have measured a reason to weight unevenly.</td></tr>
+  </table>
+
+  <h2>4 &middot; When hybrid helps most</h2>
+  <div class="prose">
+    <p>Hybrid search is rarely worse than either retriever alone, but its <em>uplift</em> is largest in specific situations, worth naming so you can justify the added complexity:</p>
+    <ul>
+      <li><strong>Mixed query distributions.</strong> Real users mix conceptual questions with exact-identifier lookups in the same product. Neither retriever alone serves both; hybrid serves each query with whichever retriever is strong on it.</li>
+      <li><strong>Domains heavy in names, codes, and jargon.</strong> Technical docs, legal text, medical records, support knowledge bases, anywhere exact tokens and meaning both matter, are where the two retrievers' strengths stack.</li>
+      <li><strong>Recall-critical applications.</strong> When missing the right passage is costly, two retrievers cast a wider, complementary net than one, and fusion lifts the chunks they agree on.</li>
+    </ul>
+    <p>It helps least when queries are <em>uniform</em>, an all-conceptual semantic-search product, or an all-exact log search, where one retriever already covers the distribution and the second adds latency for little gain. As always, measure: hybrid is the strong default, but Day 19's evaluation tells you whether it actually beat the single-retriever baseline on <em>your</em> data.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: fuse two ranked lists with RRF</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>A query returns these two top-4 lists. Fuse them with RRF, using k = 60. Document D appears in both lists; watch it win.</p>
+  </div>
+  <div class="diagram">  BM25 list:   1. A    2. D    3. C    4. E
+  Dense list:  1. B    2. D    3. A    4. F
+
+  RRF(d) = Σ  1 / (60 + rank)        [only lists where d appears]
+
+  A:  1/(60+1)  + 1/(60+3)   = 0.01639 + 0.01587 = 0.03226
+  D:  1/(60+2)  + 1/(60+2)   = 0.01613 + 0.01613 = 0.03226
+  B:  1/(60+1)               = 0.01639
+  C:  1/(60+3)               = 0.01587
+  E:  1/(60+4)               = 0.01563
+  F:  1/(60+4)               = 0.01563
+
+  FUSED ranking:
+    1. A  (0.03226)   ┐ tie: top of one list (rank 1) ≈ middle of both
+    1. D  (0.03226)   ┘ D earns it by being rank 2 in BOTH retrievers
+    3. B  (0.01639)
+    4. C  (0.01587) ...</div>
+
+  <div class="prose">
+    <p>The lesson is in document <strong>D</strong>. It was never rank 1 in either list, yet it ties for the top of the fused list because <em>both</em> retrievers ranked it highly (rank 2 each). RRF rewarded that agreement automatically by summing two contributions. Meanwhile B, which was rank 1 in dense but absent from BM25, gets only one contribution and lands below. Notice we never used a single raw score, the BM25 numbers and cosine numbers never entered the math, only positions did. That is scale-free fusion in action: it would produce the identical result whether BM25 scored in the tens or the thousands.</p>
+  </div>
+
+  <h2>Why this matters for you as an AI engineer</h2>
+  <div class="callout key">
+    <span class="label">Three consequences, derived not memorized</span>
+    <p><b>Stop choosing retrievers</b> &larr; BM25 and dense fail on opposite queries, so running both in parallel and fusing serves the whole query distribution one retriever alone cannot.<br>
+    <b>Fuse on rank, not score</b> &larr; BM25 and cosine scores are incomparable, so RRF (rank-only, scale-free) sidesteps the mismatch and is the safe default; reach for weighted fusion only with reliable normalization.<br>
+    <b>Agreement is signal</b> &larr; a chunk both retrievers rank highly is probably truly relevant, and RRF surfaces it automatically by summing contributions across lists.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Say each answer out loud in full sentences, as if to an interviewer. Then open the solution and compare. The gap is your lesson.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>An engineer combined BM25 and dense by adding their raw scores. Conceptual queries got noticeably worse after the change. Diagnose the bug and give the one-line fix.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>This is <strong>score-scale mismatch</strong>. BM25 scores are unbounded positive numbers that can run into the tens or higher, while cosine similarities sit in a narrow band around 0.6 to 0.9, so adding the raw scores lets BM25's large magnitudes swamp the cosine contribution. The dense retriever effectively stops mattering, which is exactly why the conceptual (paraphrase) queries, the ones that <em>depend</em> on dense, degraded. The one-line fix: fuse on rank instead of raw score using <strong>Reciprocal Rank Fusion</strong> (sum of 1/(k+rank), k around 60), which is scale-free and never compares the incomparable scores. If you genuinely need score-weighted fusion, you must min-max normalize each retriever's scores first and tune the weight, but RRF is the simpler, safer default.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>Two ranked lists. List 1 (BM25): [X, Y, Z]. List 2 (dense): [Y, W, X]. Compute the RRF order with k = 60 and explain which document the method favors and why.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Apply RRF(d) = sum of 1/(60 + rank) over the lists d appears in (1-based ranks):</p>
+    <ul>
+      <li><strong>Y</strong>: 1/(60+2) + 1/(60+1) = 0.01613 + 0.01639 = <strong>0.03252</strong> (in both lists, ranks 2 and 1)</li>
+      <li><strong>X</strong>: 1/(60+1) + 1/(60+3) = 0.01639 + 0.01587 = <strong>0.03226</strong> (in both lists, ranks 1 and 3)</li>
+      <li><strong>Z</strong>: 1/(60+3) = 0.01587 (BM25 only)</li>
+      <li><strong>W</strong>: 1/(60+2) = 0.01613 (dense only)</li>
+    </ul>
+    <p>Fused order: <strong>Y, X, W, Z</strong>. The method favors <strong>Y</strong> because it appears in <em>both</em> lists at high ranks (1 and 2), so it collects two large contributions, edging out X (also in both, but at ranks 1 and 3). Documents found by only one retriever (W, Z) fall below those both retrievers agree on, even though W was rank 2 in dense. RRF's core behavior: cross-retriever agreement, rewarded automatically through summation, beats a strong showing in a single list.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>Your manager asks why you did not just use weighted score fusion with a tuned &alpha;, "it is more flexible." Give a balanced answer: when RRF is the right default, and the specific condition under which weighted fusion becomes worth it.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>RRF is the right default because it fuses on rank, so it is scale-free and immune to the score-scale mismatch between BM25 (unbounded) and cosine (narrow band), and it needs essentially no tuning, the constant k around 60 is robust. Weighted score fusion is genuinely more flexible (the weight &alpha; lets you make dense or BM25 count more), but that flexibility costs you a reliable score-normalization step, and per-query min-max normalization is unstable because the min and max shift across queries and corpora, reintroducing exactly the fragility RRF avoids, plus a parameter to babysit. The specific condition under which weighted fusion is worth it: when you have a <strong>reliable, stable normalization</strong> for both retrievers' scores <em>and</em> an evaluation harness that shows a measured uplift from weighting them unequally on your data. Absent that evidence, RRF is the safer, simpler choice, and you can always upgrade later once an eval justifies it.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's RAG &amp; Retrieval slice and common 2026 screens. Drill the one-line keys, then expand each into a 90-second answer with Claude using protocol prompt #2.</p>
+  <ul class="q-list">
+    <li>What is hybrid search and how do you combine the scores?
+      <div class="a">Key: run BM25 and dense in parallel, merge via RRF (rank-only, scale-free) or weighted fusion; RRF avoids the score-scale mismatch.</div></li>
+    <li>Explain Reciprocal Rank Fusion and why it is scale-free.
+      <div class="a">Key: sum 1/(k+rank) across lists, k around 60; uses rank not score, so incomparable BM25 and cosine scales never matter, and agreement is rewarded.</div></li>
+    <li>Why not just add BM25 and cosine scores directly?
+      <div class="a">Key: score-scale mismatch, BM25 is unbounded, cosine is a narrow band; the larger scale dominates and the other retriever stops contributing.</div></li>
+    <li>RRF vs weighted score fusion, when each?
+      <div class="a">Key: RRF = scale-free, robust default; weighted fusion = can weight retrievers but needs reliable score normalization and a measured reason to weight unevenly.</div></li>
+    <li>What does the constant k do in RRF?
+      <div class="a">Key: dampens the influence of the very top ranks and controls decay; larger k flattens the curve so lower ranks still count; ~60 is a robust default.</div></li>
+    <li>When does hybrid search help most, and least?
+      <div class="a">Key: most on mixed query distributions and name/code/jargon-heavy domains; least when queries are uniform (all-conceptual or all-exact), where it adds latency for little gain.</div></li>
+    <li>Why does a document in both retrievers' lists rank higher under RRF?
+      <div class="a">Key: it earns a contribution from each list, so cross-retriever agreement is rewarded automatically by the summation, a strong relevance signal.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (15&ndash;25 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Wire your two Day 15 and Day 16 retrievers into a hybrid pipeline. Take the BM25 index and the dense (pgvector) index over the same corpus, run a query through both to get two ranked lists, and write a short RRF function: <code>score[doc] += 1 / (60 + rank)</code> summed across lists, then sort descending. Test it on a mixed query set, some exact identifiers, some paraphrases, and confirm the fused list beats either retriever alone on the queries each was weak on. For reference, skim how a production engine implements this: the <a href="https://www.elastic.co/docs/reference/elasticsearch/rest-apis/reciprocal-rank-fusion">Elasticsearch RRF</a> docs, and Weaviate's <a href="https://docs.weaviate.io/weaviate/search/hybrid">hybrid search</a> guide.</p>
+    <p class="muted" style="font-size:13.5px">Tomorrow you add a reranker after fusion, so keep the fused top-50 around, you will rescore it with a cross-encoder. See <a href="../../tools.html">Tools &amp; Claude</a> for setup.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>This lesson is <em>exactly</em> what you built on MaiQ: <strong>hybrid retrieval combining BM25 and dense embeddings, fused with RRF</strong>. That is the textbook production approach, and you can narrate the reasoning end to end from real experience: "we run BM25 and dense in parallel because our users mix exact identifiers with conceptual questions, and we fuse with RRF specifically because BM25 and cosine scores are on incomparable scales, so rank-based fusion is the robust choice that does not let one retriever swamp the other." When an interviewer pushes on "why RRF and not weighted fusion," your answer is grounded in having shipped it, not read it. And because you ran <strong>11+ retrieval experiments under an LLM-as-judge framework</strong>, you can close the loop: hybrid was not assumed, it was measured against single-retriever baselines, and the fused pipeline is what fed your <strong>37 percent cost reduction with only a 2 percent quality drop</strong>. This is one of your strongest, most defensible RAG stories, lead with it.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>Hybrid search runs BM25 and dense retrieval in parallel and fuses their ranked lists, so the system serves both exact-identifier and paraphrase queries that no single retriever covers. You cannot just add the scores, BM25 and cosine are on incomparable scales, and the larger one would dominate. Reciprocal Rank Fusion solves this by fusing on rank (sum of 1/(k+rank), k around 60), which is scale-free and automatically rewards documents both retrievers agree on, making it the safe default. Weighted score fusion is more flexible but reintroduces fragile score normalization, so prefer it only with reliable normalization and a measured reason to weight retrievers unevenly. Hybrid helps most on mixed query distributions and code/name-heavy domains, and you confirm the uplift by evaluation.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d17">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: rerankers, a cross-encoder precision pass that rescore the fused top candidates before generation.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d16-bm25-lexical.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 16 &middot; BM25 &amp; lexical search</div></a>
+    <a data-nav="next" class="next" href="d18-rerankers.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 18 &middot; Rerankers</div></a>
+  </div>
+
+  <div class="foot">Module 3 &middot; RAG &amp; Retrieval &middot; Day 17 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

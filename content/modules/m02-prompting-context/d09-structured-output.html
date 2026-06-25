@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 9 · Structured output &amp; schemas</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 2 &middot; Prompting &amp; Context</span>
+    <span class="pill">Day 9</span>
+    <span class="pill">55 min</span>
+    <span class="diff" title="Difficulty: intermediate"><i class="on"></i><i class="on"></i><i></i></span>
+  </div>
+
+  <h1>Structured output &amp; schemas</h1>
+  <p class="lede">The moment an LLM stops being a chatbot and starts being a component in a system, its output has to be parsed by code that does not tolerate "almost JSON." Today you learn the ladder of techniques that move you from hoping for valid output to guaranteeing it, and the three layers of constraint you still have to check even when the JSON parses.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Explain why structured output is the hinge between "demo" and "production".</li>
+      <li>Order the enforcement ladder from weakest to strongest and say what each guarantees.</li>
+      <li>Use Pydantic to validate, coerce, and reject model output.</li>
+      <li>Apply the three-layer constraint model: format, schema, semantics.</li>
+      <li>Predict where structured output breaks and design a validate-and-retry loop around it.</li>
+    </ul>
+  </div>
+
+  <h2>Why structured output is non-negotiable in production</h2>
+  <div class="prose">
+    <p>A human reads prose. Code reads fields. The instant an LLM's output feeds a database write, a function argument, a UI component, or another LLM call, "the answer is roughly right" is not enough, the <em>shape</em> has to be exactly right or your program throws. A response that drifts from <code>{"priority": "high"}</code> to <code>Priority: High (I'd estimate)</code> is a production incident, not a style difference.</p>
+    <p>This is why structured output is one of the most-asked AI-engineering interview topics: it is the seam where probabilistic generation meets deterministic software, and the candidate who only knows "ask nicely for JSON in the prompt" is signaling they have not shipped. The senior move is to know there is a <em>ladder</em> of enforcement, increasing in strength, and to pick the right rung for the stakes.</p>
+  </div>
+
+  <h2>The enforcement ladder</h2>
+  <div class="prose">
+    <p>From weakest (just asking) to strongest (making invalid output impossible):</p>
+  </div>
+
+  <div class="diagram">  STRENGTH ↑     technique                        what it guarantees
+  ─────────────────────────────────────────────────────────────────────────────
+  weakest        1. PROMPT INSTRUCTION              nothing: model usually complies,
+                    "respond in JSON, no prose"        sometimes adds prose / drifts
+                 2. JSON MODE                        valid JSON syntax, but NOT your
+                    (model constrained to emit JSON)   keys, types, or required fields
+                 3. TOOL / FUNCTION CALLING          output matches a declared schema
+                    (schema attached to the call)      (names, types, required): strong
+  strongest      4. CONSTRAINED DECODING             token sampling is masked to a
+                    (grammar / regex / JSON-schema)    grammar, so invalid tokens cannot
+                                                       even be produced
+  ─────────────────────────────────────────────────────────────────────────────
+  ALWAYS, on top of any rung:  Pydantic VALIDATION in your code  (last line of defense)</div>
+
+  <div class="prose">
+    <p>Read the ladder as "how much can still go wrong":</p>
+    <ul>
+      <li><strong>Prompt instruction</strong> relies on the model choosing to comply. Fine for low stakes, but a distractor in the input or a long output can knock it off. Never trust it alone for a parser.</li>
+      <li><strong>JSON mode</strong> forces syntactically valid JSON, which removes "trailing comma" and "prose wrapper" failures, but it does <em>not</em> know your keys exist or that <code>priority</code> must be one of three values. You can get valid JSON with the wrong shape.</li>
+      <li><strong>Tool / function calling</strong> attaches a schema (field names, types, which are required) to the request, and the model is constrained to produce arguments matching it. This is the workhorse for production structured output: you get the right keys and types, not just valid syntax.</li>
+      <li><strong>Constrained decoding</strong> is the strongest: the decoder masks the next-token distribution so only tokens consistent with a grammar or JSON schema can be sampled. Invalid output is impossible by construction. It is less universally available across providers, which is why tool calling is the common default.</li>
+    </ul>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"I enforce structured output with the strongest mechanism available: tool or function calling so the model is constrained to a declared schema, or constrained decoding when I control the stack. Prompt-only JSON and JSON mode are weaker, JSON mode guarantees syntax, not my schema. Then I always validate the parsed object with Pydantic in code as the last line of defense, because even schema-constrained output can violate semantic rules." That answer walks the whole ladder and shows you know its limits.</p>
+  </div>
+
+  <h2>Pydantic: your schema and your last line of defense</h2>
+  <div class="prose">
+    <p>Even with tool calling, the object that lands in your code should pass through a validator before anything downstream touches it. Pydantic is the standard in Python: you declare the schema as a class, and parsing either returns a clean typed object or raises a precise error you can catch and act on. The same class can <em>generate</em> the JSON schema you hand to the model, so the contract is defined in exactly one place.</p>
+  </div>
+
+  <pre><code><span class="tok-k">from</span> pydantic <span class="tok-k">import</span> BaseModel, Field, field_validator
+<span class="tok-k">from</span> typing <span class="tok-k">import</span> Optional, Literal
+
+<span class="tok-k">class</span> <span class="tok-f">Ticket</span>(BaseModel):
+    category: Literal[<span class="tok-s">"bug"</span>, <span class="tok-s">"feature_request"</span>, <span class="tok-s">"how_to"</span>, <span class="tok-s">"billing"</span>]
+    priority: Literal[<span class="tok-s">"low"</span>, <span class="tok-s">"medium"</span>, <span class="tok-s">"high"</span>]
+    summary: str = Field(..., max_length=<span class="tok-n">160</span>)
+    account_id: Optional[str] = <span class="tok-k">None</span>          <span class="tok-c"># may legitimately be absent</span>
+
+    <span class="tok-f">@field_validator</span>(<span class="tok-s">"account_id"</span>)
+    <span class="tok-k">def</span> <span class="tok-f">digits_only</span>(cls, v):
+        <span class="tok-k">if</span> v <span class="tok-k">is not</span> <span class="tok-k">None</span> <span class="tok-k">and not</span> v.isdigit():
+            <span class="tok-k">raise</span> ValueError(<span class="tok-s">"account_id must be digits or null"</span>)
+        <span class="tok-k">return</span> v
+
+<span class="tok-c"># The schema you give the model is generated from the SAME class:</span>
+schema = Ticket.model_json_schema()          <span class="tok-c"># feed this to tool/function calling</span>
+
+<span class="tok-c"># After the model returns arguments, validate before trusting them:</span>
+<span class="tok-k">try</span>:
+    ticket = Ticket.model_validate(raw_args)   <span class="tok-c"># raw_args = dict from the tool call</span>
+<span class="tok-k">except</span> ValidationError <span class="tok-k">as</span> e:
+    <span class="tok-c"># e tells you exactly which field/rule failed → drives a retry (below)</span>
+    handle_invalid(e)</code></pre>
+
+  <div class="prose">
+    <p>Three things this buys you for free: <code>Literal</code> rejects any category or priority outside the allowed set (the schema constraint), <code>max_length</code> catches an over-long summary, and the custom validator enforces a <em>semantic</em> rule (account IDs are digit strings) that no JSON schema expresses. One class is simultaneously your prompt's schema and your runtime guard.</p>
+  </div>
+
+  <h2>The three-layer constraint model</h2>
+  <div class="prose">
+    <p>"Valid output" is three separate questions, and each layer catches what the layer below cannot:</p>
+    <ul>
+      <li><strong>Layer 1 &mdash; Format.</strong> Is it syntactically parseable at all? Is it JSON, not prose? Enforced by tool calling / JSON mode / constrained decoding.</li>
+      <li><strong>Layer 2 &mdash; Schema.</strong> Does it have the right keys, types, required fields, and enum values? Enforced by the declared schema and re-checked by Pydantic types and <code>Literal</code>s.</li>
+      <li><strong>Layer 3 &mdash; Semantics.</strong> Do the values make <em>sense</em>? A date that is valid JSON, a valid string, and parses as a date can still be in the year 1900 or after the resolution date. No schema catches this, only domain logic (a Pydantic validator, or a downstream check).</li>
+    </ul>
+    <p>Junior engineers stop at Layer 1 ("it parsed, ship it"). The Layer 3 failures, a quantity of -5, an end date before a start date, a totals field that does not sum, are the ones that corrupt data silently and surface as a bug three weeks later.</p>
+  </div>
+
+  <h2>Where structured output breaks</h2>
+  <div class="callout key">
+    <span class="label">Failure modes to design against</span>
+    <p><b>Optional fields over-generated.</b> The model invents a value for a field that should have been null or omitted, because "filling it in" looks more complete. Fix: make absence explicit in the prompt and allow null in the schema.<br>
+    <b>Similar enums confused.</b> Closely worded categories ("error" vs "warning", "refund" vs "return") get swapped. Fix: distinct names, a one-line definition per value, and a few-shot example on the boundary (Day 8).<br>
+    <b>Truncation on long JSON.</b> A large object hits the output-token limit mid-structure and the JSON is unparseable. Fix: cap or paginate the output, raise <code>max_tokens</code>, or stream and repair.<br>
+    <b>Deep nesting (&gt; ~3 levels).</b> Reliability drops as structures nest; the model loses track of which closing brace it owes. Fix: flatten the schema, or split into multiple calls each producing a shallow object.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: validate and retry</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>Even strong enforcement occasionally returns an object that fails a semantic rule. The production pattern is not to crash, it is to feed the validation error back to the model and let it correct itself once or twice before giving up.</p>
+  </div>
+
+  <pre><code><span class="tok-k">def</span> <span class="tok-f">extract_ticket</span>(text, max_retries=<span class="tok-n">2</span>):
+    messages = [{<span class="tok-s">"role"</span>: <span class="tok-s">"user"</span>, <span class="tok-s">"content"</span>: text}]
+    <span class="tok-k">for</span> attempt <span class="tok-k">in</span> range(max_retries + <span class="tok-n">1</span>):
+        raw_args = call_model_with_tool(messages, schema=Ticket.model_json_schema())
+        <span class="tok-k">try</span>:
+            <span class="tok-k">return</span> Ticket.model_validate(raw_args)        <span class="tok-c"># L1+L2+L3 all pass → done</span>
+        <span class="tok-k">except</span> ValidationError <span class="tok-k">as</span> e:
+            <span class="tok-k">if</span> attempt == max_retries:
+                <span class="tok-k">raise</span>                                    <span class="tok-c"># give up loudly, do not return junk</span>
+            <span class="tok-c"># Show the model exactly what it got wrong, ask for a corrected object:</span>
+            messages += [
+                {<span class="tok-s">"role"</span>: <span class="tok-s">"assistant"</span>, <span class="tok-s">"content"</span>: str(raw_args)},
+                {<span class="tok-s">"role"</span>: <span class="tok-s">"user"</span>,
+                 <span class="tok-s">"content"</span>: <span class="tok-s">f"That failed validation: {e.errors()}. "</span>
+                            <span class="tok-s">"Return a corrected object that satisfies every rule."</span>},
+            ]</code></pre>
+
+  <div class="prose">
+    <p>Walk the trace. The model returns <code>{"category":"bug","priority":"urgent","summary":"...","account_id":"acct-4471"}</code>. Pydantic rejects it twice over: <code>priority</code> is not in the allowed <code>Literal</code> set, and <code>account_id</code> is not digits. The error object names both failures precisely. We append the bad output and the specific complaints, and call again. The model now returns <code>priority:"high"</code> and <code>account_id:"4471"</code>, which validates, and we return a clean typed object. Two properties make this production-grade: it <strong>self-corrects on the exact error</strong> rather than re-rolling blindly, and it <strong>fails loudly</strong> after the cap instead of silently returning malformed data. This validate-and-retry loop is the same idea you will scale up into agent self-correction in Module 4.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Answer out loud in full sentences, as if to an interviewer. Then open the solution and compare. The gap is your lesson.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>A teammate enables "JSON mode" and declares victory: "now the output is always valid, our parser is safe." Why is that confidence misplaced, and what would you add?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>JSON mode only guarantees Layer 1: the output is syntactically valid JSON. It says nothing about Layer 2 (your keys, types, required fields, enum values) or Layer 3 (whether the values make sense). You can get perfectly valid JSON with a missing required field, an extra hallucinated key, a string where you needed a number, or a priority value you never allowed, and your parser will then break or, worse, accept garbage. The fix is to go up the ladder to tool/function calling so a schema is enforced, and to validate the parsed object with Pydantic (types, <code>Literal</code> enums, and semantic validators) as the last line of defense. "Valid syntax" is necessary, not sufficient.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>Your extraction returns a JSON object that parses and matches the schema, but a downstream report shows nonsense: an invoice where <code>total</code> does not equal the sum of <code>line_items</code>. Which layer failed, and where do you fix it?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Layer 3, semantics, failed: the object is well-formed (Layer 1) and schema-correct (Layer 2), but the <em>values</em> are internally inconsistent. No format or schema mechanism catches a cross-field arithmetic rule, so the fix lives in your validation code, not in the prompt or the schema. Add a Pydantic model-level validator (e.g. a <code>model_validator</code>) that recomputes the sum of line items and rejects the object if <code>total</code> does not match within a tolerance, then route the failure into the retry loop or to a human queue. Two senior notes: (1) for anything this deterministic, consider computing <code>total</code> in code from the line items rather than trusting the model to add; (2) log the rejection so you can see how often the model gets it wrong, which is an evaluation signal (Module 5).</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>You must extract a deeply nested structure (document &rarr; sections &rarr; clauses &rarr; obligations, 4 levels) and reliability is poor: truncation and malformed nesting. Propose a redesign.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Deep nesting past about three levels is a known break point, compounded here by output-length truncation on a large object. Two complementary fixes: (1) <em>flatten</em> the schema, instead of one giant nested object, emit a flat list of obligations where each row carries its <code>section_id</code> and <code>clause_id</code> as references, reconstructing the tree in code; this is shallow and far more reliable. (2) <em>Decompose into multiple calls</em>, first extract the sections, then for each section make a separate call to extract its clauses and obligations; each call produces a small, shallow object well under the token limit and is individually retryable. Both reduce per-call complexity, which is the actual cause of the malformed nesting. If output size is still a risk, also raise <code>max_tokens</code> and detect truncation (unbalanced braces) explicitly so you never hand a half-object downstream.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's Prompting &amp; Context slice and common 2026 screens. Drill the one-line keys, then expand each into a 90-second answer.</p>
+  <ul class="q-list">
+    <li>Why does structured output matter, and how do you enforce it?
+      <div class="a">Key: downstream code parses it; enforce via tool/function calling (schema) or constrained decoding &gt; JSON mode &gt; prompt; validate with Pydantic on top.</div></li>
+    <li>Walk the enforcement ladder from weakest to strongest.
+      <div class="a">Key: prompt instruction &rarr; JSON mode (syntax only) &rarr; tool/function calling (schema) &rarr; constrained decoding (invalid tokens impossible).</div></li>
+    <li>What is the three-layer constraint model for outputs?
+      <div class="a">Key: L1 format (tool calling), L2 schema (Pydantic types/Literals), L3 semantics ("does this date/total make sense").</div></li>
+    <li>When does structured output break?
+      <div class="a">Key: over-generated optional fields, confused similar enums, truncated long JSON, deep nesting (&gt;3 levels); pair with post-validation.</div></li>
+    <li>JSON mode guarantees valid JSON &mdash; why is that not enough?
+      <div class="a">Key: it secures only syntax (L1); wrong keys, wrong types, missing required fields, and bad enum values still pass.</div></li>
+    <li>How do you handle output that parses but fails a business rule?
+      <div class="a">Key: a semantic validator rejects it, feed the specific error back for a bounded retry, fail loudly after the cap, log for eval.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (15&ndash;20 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Define a small Pydantic model (3-4 fields, one <code>Literal</code> enum, one optional field, one custom validator). Read Anthropic's <a href="https://docs.claude.com/en/docs/agents-and-tools/tool-use/overview">tool use docs</a>, then make a tool/function call whose schema is <code>YourModel.model_json_schema()</code>, parse the returned arguments with <code>model_validate</code>, and deliberately give it a messy input that should trip the validator. Wrap it in the validate-and-retry loop from the worked example and confirm it self-corrects within two attempts and raises cleanly if it cannot.</p>
+    <p class="muted" style="font-size:13.5px">Pydantic docs: <a href="https://docs.pydantic.dev/latest/">docs.pydantic.dev</a>. No API key yet? Model the schema and validator locally and feed it hand-written JSON, including a deliberately invalid one, to feel the three layers fire. See <a href="../../tools.html">Tools &amp; Claude</a> for access.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>On MaiQ, the features you took to production are precisely the ones that turn model output into structured data other code consumes, so you can speak to this seam from experience: defining the schema once, constraining the model to it, and validating before anything downstream runs. When an interviewer probes "how do you make an LLM safe to put inside a system," the strong answer is the ladder plus the loop: "I constrain the model to a declared schema, validate the parsed object with Pydantic including semantic rules the schema cannot express, and on failure feed the exact validation error back for a bounded retry rather than crashing or shipping junk." That same validate-and-correct discipline is what made your features reliable enough to take from prototype to production.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>Structured output is the seam between probabilistic generation and deterministic code, so getting the shape exactly right is non-negotiable in production. Climb the enforcement ladder: tool/function calling or constrained decoding beats JSON mode, which beats prompt-only, and Pydantic validation always sits on top. Check three layers, format, schema, and semantics, because valid JSON can still carry nonsense values. Design for the known break points (optional fields, similar enums, truncation, deep nesting) and wrap everything in a validate-and-retry loop that self-corrects on the exact error and fails loudly when it cannot.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d09">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: the senior topic &mdash; context engineering, the dynamic supply chain that feeds the window every turn.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d08-fewshot-cot.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 8 &middot; Few-shot &amp; chain-of-thought</div></a>
+    <a data-nav="next" class="next" href="d10-context-engineering.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 10 &middot; Context engineering</div></a>
+  </div>
+
+  <div class="foot">Module 2 &middot; Prompting &amp; Context Engineering &middot; Day 9 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

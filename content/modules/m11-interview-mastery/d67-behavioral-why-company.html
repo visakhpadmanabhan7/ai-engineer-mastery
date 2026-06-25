@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 67 · Behavioral &amp; why this company</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 11 &middot; Interview Mastery</span>
+    <span class="pill">Day 67</span>
+    <span class="pill">45 min</span>
+    <span class="diff" title="Difficulty: foundational"><i class="on"></i><i></i><i></i></span>
+  </div>
+
+  <h1>Behavioral &amp; "why this company"</h1>
+  <p class="lede">In 2026 the behavioral round carries roughly half the hiring decision. The technical rounds prove you <em>can</em> do the job; the behavioral round decides whether they want to work with you and whether you will stay. Today you make it your strength, not the part you wing.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Recognize and avoid the five behavioral anti-patterns that read as junior.</li>
+      <li>Deliver a tight career-arc answer to "why AI engineering, why now."</li>
+      <li>Answer "why this company" with researched specifics instead of flattery.</li>
+      <li>Adjust register for the German market: formal at traditional firms, warmer at startups.</li>
+      <li>Ask the right question back to each interviewer type, including the founder anti-pitch.</li>
+    </ul>
+  </div>
+
+  <h2>1 &middot; Why the behavioral round decides so much</h2>
+  <div class="prose">
+    <p>Two candidates clear the technical bar; the team hires one. The tiebreaker is almost always behavioral: communication, ownership, honesty about failure, and whether the interviewer can imagine sitting next to you for two years. This round is not "soft." It is a test of judgment under social pressure, and it is scored as rigorously as the system-design round, just on different axes. Treat it with the same preparation you gave RAG.</p>
+    <p>The good news is that you already built the raw material on Day 64: your five STAR stories. The behavioral round is mostly those stories, plus two set-pieces, the career arc and "why this company", plus the questions you ask back. Prepare those three things and you have prepared the round.</p>
+  </div>
+
+  <h2>2 &middot; The five anti-patterns</h2>
+  <div class="prose">
+    <p>Most weak behavioral answers fail in one of five recognizable ways. Learn to hear them in your own practice answers and delete them on sight.</p>
+  </div>
+
+  <table>
+    <tr><th>Anti-pattern</th><th>What it sounds like</th><th>The fix</th></tr>
+    <tr><td><b>The "we" wall</b></td><td>"We built... we decided... we shipped..." for ninety seconds straight.</td><td>Reclaim your part: "the team did X; the piece I owned was Y."</td></tr>
+    <tr><td><b>No metric</b></td><td>"It worked really well and everyone was happy."</td><td>A number, or a concrete before/after. "Confident but wrong answers, down to near-zero on that query class."</td></tr>
+    <tr><td><b>Hero narrative</b></td><td>"I single-handedly saved the project; everything I touched worked."</td><td>One honest stumble. Flawlessness reads as dishonest or as someone who never learns.</td></tr>
+    <tr><td><b>No trade-off</b></td><td>"I chose X." (and nothing about what X cost)</td><td>Name the road not taken: "I chose X over Y, accepting that I gave up Z."</td></tr>
+    <tr><td><b>No learning</b></td><td>"...and I learned a lot."</td><td>A transferable principle: "the lesson was to isolate retrieval before upgrading the model."</td></tr>
+  </table>
+
+  <div class="callout warning">
+    <span class="label">The single most common failure</span>
+    <p>The "we" wall sinks more strong engineers than any other anti-pattern. Collaborative people instinctively credit the team, which is admirable and disqualifying at once, because the interviewer literally cannot score what they cannot attribute to you. You are not stealing credit by saying "I"; you are answering the question that was asked. Say "we" for context, "I" for your decisions and actions.</p>
+  </div>
+
+  <h2>3 &middot; The career-arc answer: why AI engineering, why now</h2>
+  <div class="prose">
+    <p>"Walk me through your career" is not an invitation to recite your resume top to bottom. It is asking for a <em>narrative with a direction</em>: where you started, what pulled you toward AI engineering, and why this is the obvious next step. Ninety seconds, forward-looking, ending on the present.</p>
+    <p>The shape that works is a three-beat arc: a <strong>starting point</strong>, a <strong>turn toward AI</strong>, and a <strong>current focus that points at the role</strong>. Each beat is one or two sentences. The mistake is making it a timeline ("then I did X, then Y, then Z"); make it a <em>story about momentum</em> toward production AI.</p>
+  </div>
+
+  <div class="callout example">
+    <span class="label">Worked example &mdash; Visakh's arc, ~75 seconds</span>
+    <p><b>[Start]</b> "I came into the field through data science: at Einbliq in Munich I worked on streaming analytics and observability, and at Vay in Berlin on the data-science side of self-driving, routing, ETAs, fleet rebalancing, all heavily statistical evaluation.<br><br>
+    <b>[The turn]</b> "Alongside that, my master's thesis was on hybrid retrieval, combining knowledge graphs with Sentence-BERT, and it won Best Student Paper at JURIX 2024. That research is what pulled me from analyzing data toward <em>building</em> language systems, because I saw retrieval and grounding were the hard, interesting problems.<br><br>
+    <b>[Now, pointing at the role]</b> "That is exactly what I do today at MaindTec as a core developer on MaiQ: taking AI features from prototype to production, and obsessing over retrieval quality and evaluation, I built an LLM-as-judge harness and cut inference cost meaningfully without losing quality. So 'why AI engineering, why now' is simple: I have moved from measuring systems to shipping them, and this role is where that trajectory goes next."</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>End the arc by closing the loop to the job: <em>"...which is why this role is the natural next step, not a pivot."</em> The interviewer is listening for whether you are running <em>toward</em> their role or just away from your current one. A forward-looking arc that lands on their job answers that before they ask.</p>
+  </div>
+
+  <h2>4 &middot; "Why this company," done with specifics</h2>
+  <div class="prose">
+    <p>"Why us?" is a research test disguised as a motivation question. Generic flattery ("you are innovative and I love your culture") scores zero, because it could be pasted into any application. A strong answer names something specific about <em>this</em> company and connects it to something specific about <em>you</em>. The formula:</p>
+  </div>
+
+  <div class="diagram">  a strong "why this company" answer
+  ┌────────────────────────────────────────────────────────────┐
+  │  SPECIFIC about them   +   SPECIFIC about you   =   fit     │
+  │                                                            │
+  │  "Your product does     "which is exactly the     a reason │
+  │   <real detail X>"       work I did when I <real    only    │
+  │                          experience Y>"            you can  │
+  │                                                    give     │
+  └────────────────────────────────────────────────────────────┘
+  test: could this sentence be copy-pasted to another company?
+        if yes, it is flattery, not an answer. delete and redo.</div>
+
+  <div class="prose">
+    <p>To get the "specific about them," spend twenty minutes before the interview: read the product, the engineering blog, recent funding or launches, and the actual job description. Find one concrete thing, a technical problem they are clearly solving, a product direction, a stack choice, and build your answer around it. For a company building an LLM product, for instance: <em>"You are building agentic features into a real product, and the hard part there is exactly what I have lived, retrieval quality and evaluation at production scale, so I would be useful on day one rather than ramping into the problem space."</em> That sentence cannot be reused for a different company, which is the whole point.</p>
+  </div>
+
+  <h2>5 &middot; German-market nuance</h2>
+  <div class="prose">
+    <p>You are interviewing in Germany, and register matters more here than in the US. The rule is to match the company type, and when in doubt, lean formal, because in the German market overly casual is a more common rejection cause than overly formal.</p>
+  </div>
+
+  <table>
+    <tr><th>Company type</th><th>Register</th><th>In practice</th></tr>
+    <tr><td><b>AI-first / startup / scale-up / multinational with English process</b></td><td>Warmer, still professional</td><td>Genuine enthusiasm is welcome; you can say a role excites you. Most of your target queue is here.</td></tr>
+    <tr><td><b>Traditional Mittelstand / pharma / manufacturing / insurance / banking / public sector</b></td><td>Strictly formal</td><td>Structured, measured, no casual openers. Credentials and reliability land hard.</td></tr>
+  </table>
+
+  <div class="callout concept">
+    <span class="label">Two things that travel well in Germany regardless of register</span>
+    <p>First, <strong>academic credentials carry real weight here</strong>: a Best Outgoing Student award, a Grade 1.4, and a JURIX 2024 Best Student Paper land harder in a German room than in a US one, so foreground them naturally. Second, <strong>work authorization is a non-issue for you</strong>: you hold an EU Blue Card with full work authorization, so if it ever comes up, state it in one calm sentence and move on. It is a strength to mention proactively for traditional firms, because it removes the first thing a recruiter worries about for a non-EU candidate.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>6 &middot; The best questions to ask back</h2>
+  <div class="prose">
+    <p>"Do you have questions for us?" is graded. A candidate with sharp, role-specific questions signals seriousness and seniority; "no, I think you covered everything" signals neither. Tailor the question to <em>who</em> is in the room, because each interviewer can answer different things well.</p>
+  </div>
+
+  <table>
+    <tr><th>Interviewer</th><th>Ask</th><th>Why it works</th></tr>
+    <tr><td><b>Hiring manager</b></td><td>"What does success look like at 30, 60, and 90 days, and what is the first hard problem I would own?"</td><td>Shows you think about impact and ramp, not just getting the offer.</td></tr>
+    <tr><td><b>Peer / future teammate</b></td><td>"How does the team catch regressions before users do?"</td><td>An engineer's question; surfaces their real eval/test maturity.</td></tr>
+    <tr><td><b>CTO / eng leader</b></td><td>"What is the most important AI bet the company is making, and what would prove it wrong?"</td><td>Strategic and intellectually honest; invites a real conversation.</td></tr>
+    <tr><td><b>Founder</b></td><td>"If I joined, what is the strongest reason I might regret it a year in?" (the anti-pitch)</td><td>Founders pitch reflexively; asking for the downside is disarming and tells you the truth.</td></tr>
+  </table>
+
+  <div class="prose">
+    <p>The <strong>founder anti-pitch</strong> is the standout move. Asking "why might I <em>not</em> want to join?" does two things: it gets you an honest read on the real risks (runway, scope, chaos) that a polished pitch would hide, and it signals the kind of clear-eyed candidate founders actually want. Most people ask founders to sell harder; you ask them to be honest, which is rarer and more memorable.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Say each answer out loud and time it. These are set-pieces; they should sound effortless, which only happens after reps.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>Draft your career-arc answer in three beats (start, turn, now), then time it. If it runs past 90 seconds, what do you cut, and what must survive no matter what?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Cut the chronology and the job-by-job detail; nobody needs every responsibility at every role. What must survive: the <em>turn</em> (the thesis/JURIX moment that pulled you from data science toward building language systems) and the <em>now</em> (MaiQ, prototype-to-production, retrieval and evaluation), because those two beats carry the entire "why AI engineering, why now" message. The start can shrink to a single clause ("I came in through data science at Einbliq and Vay"). If you are over time, you are almost always over-narrating the start; compress it and let the turn and the present breathe. The answer must end pointing at the role, never trailing off in the past.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>You have a "why this company" answer drafted, but you are not sure it is specific enough. Apply the copy-paste test to it. What does failing the test reveal, and how do you fix a failing answer fast?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>The test: could you paste this exact answer into an application to a different company and have it still make sense? If yes, it is flattery, not an answer, and it will score zero however warmly you deliver it. The fix is to inject one concrete, company-specific fact you can only know from research, a product detail, an engineering-blog post, a recent launch or funding round, a specific technical problem they are solving, and then bridge it to a specific thing you have done. "You are scaling agentic features in a real product" plus "which is the exact retrieval-and-evaluation work I shipped at MaiQ" passes, because neither half transfers to a random other employer. If you cannot find a specific fact, you have not done the twenty minutes of research yet; do that first.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>You are interviewing at a traditional German manufacturer adopting AI, and separately at a Berlin AI-first scale-up. The same "why this company" content, delivered identically, would underperform at one of them. How do you adjust, and which adjustment goes where?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>The facts stay the same; the register changes. At the <em>Berlin scale-up</em>, warmth and genuine enthusiasm are assets, so it is fine to say a role excites you and to bold one such phrase; the danger there is sounding stiff and corporate. At the <em>traditional manufacturer</em>, lean formal: structured, measured, credentials forward, no casual openers, and proactively state your EU Blue Card work authorization since it removes a worry a traditional firm will have about a non-EU hire. The meta-rule is when unsure, lean formal, because in the German market over-casual is the more common rejection cause. Same story, two registers, matched to the room.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's Interview Mastery slice. These are the set-pieces; rehearse them with Claude (protocol #3) until they are automatic.</p>
+  <ul class="q-list">
+    <li>Walk me through your career and why AI engineering, why now.
+      <div class="a">Key: a forward-looking arc to production AI (data science &rarr; thesis/JURIX turn &rarr; MaiQ shipping + evaluation), ending pointed at the role.</div></li>
+    <li>Why do you want to work at this company specifically?
+      <div class="a">Key: one researched specific about them + one specific about you; must fail the copy-paste-to-another-company test.</div></li>
+    <li>What are the best questions to ask back, and how do they vary by interviewer?
+      <div class="a">Key: HM &rarr; success at 30/60/90 + first hard problem; peer &rarr; how they catch regressions; CTO &rarr; the biggest AI bet + what disproves it; founder &rarr; the anti-pitch.</div></li>
+    <li>Tell me about your biggest failure.
+      <div class="a">Key: an honest gap you owned, not a humblebrag; the lasting fix is to the process that let it hide; ends on a transferable learning.</div></li>
+    <li>Tell me about a time you disagreed with a teammate.
+      <div class="a">Key: a defensible technical disagreement resolved by evidence (run the experiment); relationship intact because data settled it.</div></li>
+    <li>Where do you see yourself in a few years?
+      <div class="a">Key: deeper ownership of production AI systems; growth toward senior scope; framed as continuation of the arc, concrete not grandiose.</div></li>
+    <li>Why are you leaving your current role?
+      <div class="a">Key: pull toward the new opportunity, never trash the old one; "running toward" the role's scope, stated calmly.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (15&ndash;20 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Pick one real company from your Notion tracker that you would genuinely apply to. Spend ten minutes researching: product, any engineering blog, recent news, and the JD. Then open Claude (protocol #3): <em>"You are the hiring manager at [company]. Ask me 'why do you want to work here?' and then push back if my answer is generic or could apply to any company. Grade how specific and how grounded-in-my-experience it is, out of 10."</em> Iterate until you pass the copy-paste test and score 9+. Save the final answer in that company's folder; it is now ready to reuse and adapt.</p>
+    <p class="muted" style="font-size:13.5px">Pair this with your career-arc answer from Practice 1; together they are the two set-pieces every behavioral round opens with.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your arc is a clean story</span>
+    <p>Your trajectory tells itself well, which is a real advantage in this round: data science at Einbliq and Vay, a research turn through the JURIX 2024 award-winning thesis on hybrid retrieval (knowledge graphs with Sentence-BERT, on the Japanese Civil Code), and now shipping production AI on MaiQ with a sharp focus on retrieval and evaluation. That is not a collection of jobs; it is momentum from measuring systems to building them, and it lands the "why now" answer for you. Two German-market specifics to use without hesitation: your academic credentials (Best Outgoing Student, Grade 1.4, JURIX) carry extra weight in a German room, and your EU Blue Card means work authorization is never a worry to raise defensively, it is a one-sentence strength.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>The behavioral round is roughly half the decision, so prepare it like the technical rounds. Delete the five anti-patterns, especially the "we" wall, which hides exactly the contribution you are being scored on. Your career arc is a three-beat forward story ending at the role, and "why this company" must name a researched specific that fails the copy-paste test. Match register to company type and lean formal when unsure; in Germany your credentials and EU Blue Card are quiet strengths. Finally, ask back, and save the founder anti-pitch for when you want the truth.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d67">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: the finale, a full self-run mock interview loop, then you are ready.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d66-system-design-playbook.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 66 &middot; System design mock playbook</div></a>
+    <a data-nav="next" class="next" href="d68-capstone-mock-loop.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 68 &middot; Capstone &mdash; a full mock loop</div></a>
+  </div>
+
+  <div class="foot">Module 11 &middot; Interview Mastery &middot; Day 67 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

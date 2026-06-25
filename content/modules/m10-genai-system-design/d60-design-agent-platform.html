@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 60 · Design an agent platform (MaiQ-style)</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 10 &middot; GenAI System Design</span>
+    <span class="pill">Day 60</span>
+    <span class="pill">75 min</span>
+    <span class="diff" title="Difficulty: advanced"><i class="on"></i><i class="on"></i><i class="on"></i></span>
+  </div>
+
+  <h1>Design an agent platform (MaiQ-style)</h1>
+  <p class="lede">Yesterday's RAG assistant answered questions. Today's system lets users build and run their own agents inside a multi-tenant product. This is the design behind MaiQ's Skill Store and Apaleo's Agent Hub, and it is the one design in this module you have actually shipped. We take it through the full framework, with the security model front and center.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Design a multi-tenant agent / skill platform end to end using the seven-beat framework.</li>
+      <li>Build a tool registry and enforce per-tenant scoping in code, never trusting the model with isolation.</li>
+      <li>Specify conversational skill authoring plus a Skill Store / marketplace for sharing agents.</li>
+      <li>Lock down third-party skills: signed manifests, sandboxed per-invocation credentials, static analysis + eval + human review for high-risk scopes.</li>
+      <li>Operate it: circuit breakers per skill, prompt/version management, tracing, and cost budgets.</li>
+    </ul>
+  </div>
+
+  <h2>What an agent platform actually is</h2>
+  <div class="prose">
+    <p>A single agent (Module 4) is an LLM that decides which tools to call in a loop. An agent <em>platform</em> is the infrastructure that lets many users, across many tenants, define new agents and new tools safely, run them, and share them. The hard part is not the ReAct loop. The hard part is that you are now executing user-authored behavior with access to tools that can read data and take actions, inside a building shared by other paying customers.</p>
+    <p>So the dominant concern flips from "is the answer good" (RAG) to "is this safe and isolated" (platform). When you frame the problem, lead with that, it signals you understand the real risk surface.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"An agent platform is three layers: a <strong>tool registry</strong> of capabilities with declared scopes, a <strong>runtime</strong> that executes an agent's tool calls under tenant-scoped, sandboxed credentials enforced in code, and an <strong>authoring + distribution</strong> layer (conversational skill authoring plus a Skill Store) for users to build and share agents. Every security decision is made in code at the tool boundary; the model is never trusted to enforce isolation or permissions." That single sentence is the whole design.</p>
+  </div>
+
+  <h2>1 &middot; Clarify (functional + non-functional)</h2>
+  <div class="prose">
+    <p>Pin scope before drawing. The questions that move this design:</p>
+    <ul>
+      <li><strong>Who authors agents?</strong> End users in chat (conversational authoring), developers via SDK, or both? MaiQ-style means non-technical users compose agents from existing tools in natural language.</li>
+      <li><strong>What can tools do?</strong> Read-only data access, or write actions (send email, create ticket, charge)? Write actions raise the stakes and force approval gates and idempotency.</li>
+      <li><strong>First-party vs third-party tools.</strong> Are all tools built by you, or can outside developers publish skills others install? Third-party code is the whole security problem, treat it as untrusted.</li>
+      <li><strong>Tenancy + sharing.</strong> Multi-tenant, and can a skill authored in one tenant be published to a marketplace and installed by another? That crosses a trust boundary.</li>
+      <li><strong>Latency, cost, reliability.</strong> Is a slow or failing skill allowed to degrade the whole product? (No, hence circuit breakers and budgets.)</li>
+    </ul>
+    <p>Assume for this walkthrough: conversational authoring for end users plus an SDK for developers, tools that include both reads and writes, a marketplace where third-party skills can be published and installed across tenants, strict multi-tenant isolation, and a hard requirement that one bad skill cannot take down the platform or leak another tenant's data.</p>
+  </div>
+
+  <h2>2 &middot; Estimate (back of envelope)</h2>
+  <div class="prose">
+    <p>Size the registry and the run volume so you pick the right datastore and know where the cost lives.</p>
+  </div>
+  <div class="diagram">  Tenants            ~5,000          Users          ~100,000
+  Tools in registry  ~500 first-party + growing third-party   → small table, fits anywhere
+  Skills (agents)    ~10 / active tenant                       ≈ tens of thousands of definitions
+  Skill runs         say 5 runs/user/day × 100k                ≈ 500,000 runs/day
+                     each run = 3-8 LLM calls (agent loop) + several tool calls
+  LLM calls          ~2-4M / day  → this is the cost center, budgets per tenant are mandatory
+  Run records        500k/day × retained 90d ≈ 45M trace rows → time-series / OLAP-friendly store
+  Concurrency        peak maybe ~1-2k concurrent runs → runtime must isolate + cap per tenant</div>
+  <div class="prose">
+    <p>Headline decisions you verbalize: the tool/skill registry is tiny relational data (Postgres), but the run/trace volume is large and append-heavy (a tracing backend like Langfuse/LangSmith or a columnar store), and with millions of agent LLM calls per day, <strong>per-tenant cost budgets</strong> are a first-class feature, not an afterthought. You just justified two storage choices and a budget system from arithmetic.</p>
+  </div>
+
+  <h2>3 &middot; High-level architecture</h2>
+  <div class="prose">
+    <p>Draw three planes: <strong>authoring</strong> (how agents get created), <strong>runtime</strong> (how they execute safely), and <strong>governance</strong> (review, tracing, budgets). The security boundary, where code enforces scope, runs right through the runtime.</p>
+  </div>
+
+  <div class="diagram">  ══════════════ AUTHORING ══════════════        ══════════ DISTRIBUTION ══════════
+   user in chat ─▶ ┌──────────────────┐           ┌──────────────────────────────┐
+   "make an agent  │ CONVERSATIONAL    │           │  SKILL STORE / MARKETPLACE   │
+    that..."       │ SKILL AUTHORING   │──publish─▶│  signed manifest · scopes ·  │
+   dev SDK ──────▶ │ → skill manifest  │           │  reviews · install per tenant│
+                   │ (tools, scopes,   │◀─install──│  (cross-tenant trust boundary)│
+                   │  prompt, version) │           └──────────────────────────────┘
+                   └────────┬─────────┘                      │ HIGH-RISK scope?
+                            │ before publish:                ▼
+                            │  STATIC ANALYSIS + EVAL + HUMAN REVIEW (gate)
+   ═══════════════════════ RUNTIME (per invocation) ═══════════════════════════════
+                            ▼
+   trigger ─▶ ┌──────────────┐   ┌───────────────┐   ┌────────────────────────────┐
+              │ AGENT LOOP    │──▶│ TOOL REGISTRY  │──▶│  TOOL EXECUTION            │
+              │ (ReAct, plan) │   │ lookup + schema│   │  ★ SCOPE CHECK IN CODE      │
+              │ LLM picks tool│◀──│ validate args  │   │  ★ tenant-scoped, sandboxed │
+              └──────┬───────┘    └───────────────┘   │     per-invocation creds    │
+                     │             ▲                   │  ★ idempotency · approval   │
+                     │             │ circuit breaker   │     gate on writes          │
+                     │             │ OPEN? skip skill  └─────────────┬──────────────┘
+                     ▼             │                                 │
+   ═══════════════ GOVERNANCE (always on) ════════════════════════════▼═════════════
+   ┌──────────────────────────────────────────────────────────────────────────────┐
+   │ TRACING span tree · per-skill circuit breaker · PER-TENANT COST BUDGET ·       │
+   │ PROMPT + VERSION MGMT (pin skill@version) · audit log of every tool call       │
+   └──────────────────────────────────────────────────────────────────────────────┘</div>
+
+  <div class="prose">
+    <p>Read it once: a user authors a skill in chat (or SDK), which compiles to a signed <em>manifest</em> declaring exactly which tools and scopes it needs; publishing to the marketplace runs static analysis, eval, and human review for risky scopes; at runtime the agent loop picks a tool, the registry validates the call, and tool execution enforces tenant scope and sandboxed credentials <em>in code</em>; governance wraps everything with tracing, per-skill circuit breakers, version pinning, and per-tenant budgets. The starred lines are where the platform is actually made safe.</p>
+  </div>
+
+  <h2>4 &middot; Data model</h2>
+  <div class="prose">
+    <p>Four entities carry the platform: the tool catalog, the skill (an agent) and its versions, the per-tenant installation/grant, and the run record. The grant table is where authorization lives, separate from the model.</p>
+  </div>
+  <pre><code><span class="tok-c">-- the capability catalog: what a tool is and the scope it requires</span>
+<span class="tok-k">CREATE TABLE</span> tool (
+  tool_id      uuid <span class="tok-k">PRIMARY KEY</span>,
+  name         text,                    <span class="tok-c">-- action-verb name</span>
+  json_schema  jsonb,                   <span class="tok-c">-- typed params, validated before exec</span>
+  scopes       text[],                  <span class="tok-c">-- e.g. {crm.read} or {billing.write}</span>
+  risk         text                     <span class="tok-c">-- 'read' | 'write' | 'high'</span>
+);
+
+<span class="tok-c">-- a skill = an authored agent, versioned and signed</span>
+<span class="tok-k">CREATE TABLE</span> skill_version (
+  skill_id     uuid,
+  version      int,
+  manifest     jsonb,                   <span class="tok-c">-- tools used, scopes, prompt, author</span>
+  signature    text,                    <span class="tok-c">-- signed: tamper-evident, verified at install</span>
+  status       text,                    <span class="tok-c">-- draft | in_review | approved | deprecated</span>
+  <span class="tok-k">PRIMARY KEY</span> (skill_id, version)
+);
+
+<span class="tok-c">-- the authorization record: which tenant granted which scopes to which skill</span>
+<span class="tok-k">CREATE TABLE</span> skill_grant (
+  tenant_id    uuid,
+  skill_id     uuid,
+  version      int,                     <span class="tok-c">-- pinned: installs a specific version</span>
+  granted_scopes text[],                <span class="tok-c">-- the actual permission ceiling, in DATA not prompt</span>
+  <span class="tok-k">PRIMARY KEY</span> (tenant_id, skill_id)
+);
+
+<span class="tok-c">-- append-heavy run log for tracing, cost, audit</span>
+<span class="tok-k">CREATE TABLE</span> skill_run (
+  run_id       uuid <span class="tok-k">PRIMARY KEY</span>,
+  tenant_id    uuid, skill_id uuid, version int,
+  tool_calls   jsonb,                   <span class="tok-c">-- name, args, result, latency per call</span>
+  tokens       int, cost_usd numeric, status text, started_at timestamptz
+);</code></pre>
+  <div class="prose">
+    <p>The load-bearing idea: <code>skill_grant.granted_scopes</code> is the permission ceiling and it lives in the database, checked in code on every tool call. The skill's prompt may <em>request</em> a tool, but if the grant does not include that scope for this tenant, the tool execution layer refuses, regardless of what the model produced. Authorization is data, enforced by code, never an instruction.</p>
+  </div>
+
+  <h2>5 &middot; Deep-dive: the tool registry and per-tenant scoping in code</h2>
+  <div class="prose">
+    <p>This is the heart of the design and where you spend your time. The single rule, stated as bluntly as possible: <strong>never trust the model to enforce isolation, scope, or permissions.</strong> The LLM proposes a tool call; code disposes. The execution path on every single tool call:</p>
+    <ol>
+      <li><strong>Validate the call against the schema.</strong> Registry checks the tool exists and the arguments match its typed JSON schema. A hallucinated tool name or schema-violating args is rejected before anything runs (bad args are more common than bad names).</li>
+      <li><strong>Check the scope against the grant, in code.</strong> Load <code>granted_scopes</code> for this <code>(tenant_id, skill)</code> and verify the tool's required scopes are a subset. No match, no execution. This is the line that prevents privilege escalation.</li>
+      <li><strong>Mint a sandboxed, per-invocation credential.</strong> The tool runs with a short-lived, narrowly-scoped credential issued for <em>this</em> call and this tenant, not a broad service key. The credential expires in seconds and can only touch this tenant's data. A leaked or misused credential has a tiny blast radius.</li>
+      <li><strong>Enforce idempotency and approval on writes.</strong> Write tools (create, charge, delete) require an idempotency key so an agent retry loop cannot fire the action twice, and high-risk writes route through an approval gate (the agent drafts the action, a human approves, then it executes via a framework interrupt).</li>
+    </ol>
+  </div>
+  <pre><code><span class="tok-c"># the tool boundary: code enforces what the model only requested</span>
+<span class="tok-k">def</span> <span class="tok-f">execute_tool</span>(call, ctx):              <span class="tok-c"># ctx = {tenant_id, skill_id, run_id}</span>
+    tool = registry.get(call.name)
+    <span class="tok-k">if</span> tool <span class="tok-k">is None</span>:
+        <span class="tok-k">raise</span> ToolNotFound(call.name)         <span class="tok-c"># hallucinated tool</span>
+    validate(call.args, tool.json_schema)    <span class="tok-c"># schema gate</span>
+
+    grant = grants.get(ctx.tenant_id, ctx.skill_id)
+    <span class="tok-k">if not</span> <span class="tok-f">set</span>(tool.scopes) &lt;= <span class="tok-f">set</span>(grant.granted_scopes):
+        <span class="tok-k">raise</span> ScopeDenied(tool.scopes)        <span class="tok-c"># ★ authorization in CODE</span>
+
+    <span class="tok-k">if</span> tool.risk == <span class="tok-s">"high"</span> <span class="tok-k">and not</span> ctx.approved:
+        <span class="tok-k">return</span> request_human_approval(call, ctx)  <span class="tok-c"># approval gate</span>
+
+    cred = mint_scoped_credential(ctx.tenant_id, tool.scopes, ttl=30)  <span class="tok-c"># sandboxed</span>
+    <span class="tok-k">if</span> breaker.is_open(call.name):
+        <span class="tok-k">raise</span> SkillUnavailable(call.name)     <span class="tok-c"># circuit breaker</span>
+    <span class="tok-k">return</span> tool.run(call.args, cred, idempotency_key=ctx.run_id)</code></pre>
+
+  <div class="callout warning">
+    <span class="label">The one mistake that fails the interview</span>
+    <p>Saying "the system prompt tells the agent only to use tools for its own tenant" is an instant red flag. Prompts are not a security boundary: the model is non-deterministic and prompt injection in a retrieved document or a tool result can redirect it. Every isolation and permission decision is enforced in code at the tool boundary, with the model treated as an untrusted caller. Say this explicitly and you flip a red flag into a green one.</p>
+  </div>
+
+  <h2>6 &middot; Conversational authoring, the Skill Store, and third-party safety</h2>
+  <div class="prose">
+    <p><strong>Conversational skill authoring.</strong> A user describes the agent they want ("watch this CRM list and draft a follow-up when a deal stalls"); the platform turns that into a structured skill manifest: the tools it will call, the scopes it needs, its prompt, and a version. The user composes from the existing tool catalog in natural language, so no code, but the output is a strict, validated artifact, not free text. That artifact is what gets reviewed, signed, and run.</p>
+    <p><strong>The Skill Store / marketplace.</strong> Authored skills can be published so other tenants install them. Installing a third-party skill crosses a trust boundary (its author is not the installer), so the platform cannot run it on faith. The safeguards, in order of when they fire:</p>
+    <ul>
+      <li><strong>Signed manifests.</strong> The manifest is cryptographically signed so it is tamper-evident; the runtime verifies the signature at install and refuses anything altered after review. You install the exact bytes that were approved.</li>
+      <li><strong>Static analysis at publish.</strong> Before a skill is listed, scan its manifest and any author-supplied code for dangerous patterns (unexpected scope requests, network egress, secret access). Cheap, automatic, catches the obvious.</li>
+      <li><strong>Eval at publish.</strong> Run the skill against a behavioral test suite to check it does what it claims and does not misbehave, before it can reach other tenants.</li>
+      <li><strong>Human review for high-risk scopes.</strong> A skill requesting read-only, low-risk scopes can auto-approve; a skill requesting <code>billing.write</code> or PII access goes to a human reviewer. Tier the gate by risk so you do not bottleneck safe skills, and you never auto-ship a dangerous one.</li>
+    </ul>
+    <p>This exact pattern, signed manifests, sandboxed per-invocation credentials, static analysis plus eval plus human review for risky scopes, and circuit breakers per skill, is the marketplace security model. It is also literally what shipped in MaiQ's Skill Store.</p>
+  </div>
+
+  <h2>7 &middot; Trade-offs (name what you give up)</h2>
+  <table>
+    <tr><th>Decision</th><th>You gain</th><th>You give up</th></tr>
+    <tr><td>Scope checks in code, not prompt</td><td>Real security boundary, testable, audit-able</td><td>More plumbing; the model cannot "self-serve" new capabilities</td></tr>
+    <tr><td>Per-invocation sandboxed creds</td><td>Tiny blast radius on leak/misuse</td><td>Credential-minting latency, more moving parts</td></tr>
+    <tr><td>Human review for high-risk skills</td><td>No dangerous skill ships unseen</td><td>Slower publish; needs reviewer capacity, so tier by risk</td></tr>
+    <tr><td>Supervisor/registry routing of tools</td><td>Debuggable, one place to govern</td><td>Extra hop and latency vs direct calls</td></tr>
+    <tr><td>Conversational authoring</td><td>Non-technical users build agents</td><td>Must constrain output to a validated manifest, not free code</td></tr>
+    <tr><td>Per-skill circuit breakers</td><td>One bad skill cannot sink the platform</td><td>A flapping skill gets cut off, some good calls dropped during cooldown</td></tr>
+  </table>
+
+  <h2>8 &middot; Operations: breakers, versioning, tracing, budgets</h2>
+  <div class="prose">
+    <p><strong>Circuit breakers per skill.</strong> Each skill (and each downstream tool) gets its own breaker: Closed (allow, count failures) &rarr; Open (fail fast for a cooldown when error rate spikes) &rarr; Half-open (let one probe through; success closes it). Per-skill isolation means a misbehaving third-party skill trips its own breaker without taking down the rest of the platform.</p>
+    <p><strong>Prompt and version management.</strong> Every skill is pinned to a specific version at install (<code>skill@version</code>), so a tenant's running agents do not change underfoot when the author publishes an update; upgrades are an explicit, reviewable action. Prompts are versioned artifacts you can roll back, never edited live in production.</p>
+    <p><strong>Tracing and audit.</strong> Emit a span tree per run: the agent's reasoning steps, every tool call with its arguments, result, tokens, cost, and latency, plus an immutable audit log of who ran what against which tenant's data. This is both your debugging surface (right answer on the wrong trajectory is still a bug) and your compliance surface.</p>
+    <p><strong>Per-tenant cost budgets.</strong> With millions of agent LLM calls a day, an unbounded or runaway agent loop is a financial incident. Each tenant has a token/cost budget; the runtime meters spend per run and per tenant and cuts off or throttles when a budget is exhausted, so one looping skill cannot run up an unbounded bill.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: a third-party skill, authored to executed</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>A developer publishes a "Stale Deal Nudger" skill: it reads a tenant's CRM and, when a deal has not moved in 14 days, drafts a follow-up email. <b>Author:</b> conversational/SDK authoring compiles it to a manifest declaring scopes <code>{crm.read, email.draft}</code>, signs it, sets status <code>in_review</code>. <b>Publish gate:</b> static analysis sees only read + draft (no <code>email.send</code>, no billing), eval confirms it drafts sensibly; because the scopes are low-risk, it auto-approves to the Store. <b>Install:</b> tenant <code>acme</code> installs <code>skill@3</code>; the runtime verifies the signature and writes a <code>skill_grant</code> with <code>granted_scopes = {crm.read, email.draft}</code>. <b>Run:</b> the agent loop tries to call <code>email.send</code> (the model improvised an escalation). Code checks the grant, sees <code>email.send</code> is not granted, and refuses, the model's overreach is denied at the tool boundary. The legitimate <code>email.draft</code> call runs under a 30-second credential scoped to acme's mailbox, the breaker is closed, the run logs 4 LLM calls and 6 tool calls with full cost, and the draft lands for a human to send. No prompt was trusted to keep acme's data or a dangerous action in check; code did.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">The 11-point AI-design checklist, agent-platform flavor</span>
+    <p>Same checklist as d59, retargeted: 1. <b>Authoring</b> (conversational + SDK &rarr; validated manifest) &middot; 2. <b>Tool registry</b> (typed schema, scopes, risk) &middot; 3. <b>Routing</b> (registry/supervisor, ~10-20 tools sweet spot) &middot; 4. <b>Per-tenant scope + isolation IN CODE</b> &middot; 5. <b>Sandboxed per-invocation credentials</b> &middot; 6. <b>Guardrails</b> (schema validation, approval gates, idempotency on writes) &middot; 7. <b>Marketplace safety</b> (signed manifests, static analysis, eval, human review by risk) &middot; 8. <b>Eval + tracing</b> (output + trajectory, span tree, audit) &middot; 9. <b>Cost budgets per tenant</b> &middot; 10. <b>Reliability</b> (circuit breaker per skill, retries/fallback) &middot; 11. <b>Version + prompt management</b> (pin skill@version, rollback).</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Answer each out loud as if whiteboarding, then compare.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>An engineer proposes: "We give every agent the same broad service credential and put 'only access tenant X' in the system prompt. It is simpler." Tear this down and give the correct design in two sentences.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>It is unsafe on two axes. First, a prompt is not a security boundary: the model is non-deterministic and prompt injection (in a retrieved doc or a tool result) can redirect it to use that broad credential against another tenant, so isolation must be enforced in code at the tool boundary, not requested in text. Second, a broad service credential means any leak or misuse touches every tenant, a catastrophic blast radius. The correct design: authorization lives in a per-tenant grant checked in code on every tool call, and each call runs under a short-lived credential scoped to exactly that tenant and that tool, so a compromise affects one call for one tenant. The model proposes; code authorizes and scopes.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>You open a marketplace so third-party developers can publish skills others install. Walk through everything that fires between "developer hits publish" and "another tenant's agent executes a tool from that skill."</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p><b>At publish:</b> the skill compiles to a manifest (tools, scopes, prompt, version); static analysis scans for dangerous patterns (unexpected scopes, egress, secret access); an eval suite checks behavior; if the requested scopes are high-risk (writes, billing, PII) it routes to human review, otherwise it can auto-approve; on approval the manifest is cryptographically signed and listed. <b>At install:</b> the installing tenant's runtime verifies the signature (refusing anything tampered post-review), pins a specific version, and writes a <code>skill_grant</code> recording exactly which scopes that tenant authorizes. <b>At execution:</b> the agent proposes a tool call; code validates args against the schema, checks the tool's scopes are a subset of the grant, mints a per-invocation tenant-scoped credential, applies idempotency/approval on writes, and checks the per-skill circuit breaker before running. Every step is code-enforced; the model is treated as untrusted throughout.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>One popular third-party skill starts erroring intermittently and its retries are spiking latency and cost for everyone. What in your design contains the damage, and what is the longer-term fix?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Containment is the <strong>per-skill circuit breaker</strong>: that skill's breaker trips Open on the error-rate spike and fails its calls fast for a cooldown, so the misbehaving skill stops consuming runtime and dragging down latency for unrelated skills and tenants. The <strong>per-tenant cost budget</strong> also caps the financial bleed from retry loops. Half-open then lets a single probe through to detect recovery before fully reopening traffic. Longer term: pin and freeze the bad version, alert the author, surface the failure in tracing (the span tree shows which tool call fails and why), and require the fixed version to pass eval again before it can be re-published, since a new version is a reviewable, re-evaluated artifact, not a silent live edit.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's GenAI System Design slice. Drill the keys, then expand each into a full whiteboard walkthrough.</p>
+  <ul class="q-list">
+    <li>Design a multi-tenant LLM / agent platform (MaiQ / Apaleo style).
+      <div class="a">Key: tool registry, per-tenant scoping in code, prompt/version management, eval + tracing, cost budgets, sandboxed skills with human review for high-risk scopes.</div></li>
+    <li>Design an agent marketplace / Skill Store.
+      <div class="a">Key: signed manifests, sandboxed per-invocation credentials, static analysis + eval + human review for risky scopes, circuit breakers per skill; conversational authoring &rarr; validated manifest.</div></li>
+    <li>How do you enforce per-tenant isolation and permissions in an agent platform?
+      <div class="a">Key: never in the prompt; a per-tenant grant checked in code at the tool boundary + short-lived scoped credentials; the model proposes, code authorizes.</div></li>
+    <li>How do you safely run third-party / user-authored skills?
+      <div class="a">Key: signed tamper-evident manifests, static analysis + eval at publish, human review tiered by scope risk, sandboxed creds, per-skill circuit breakers, pinned versions.</div></li>
+    <li>How do you handle a large tool space without wrong tool picks?
+      <div class="a">Key: tool retrieval (embed descriptions, top 5-10) or categorical/registry routing; ~10-20 tools is the sweet spot; validate every call against the schema.</div></li>
+    <li>How do you make tool execution safe for write actions?
+      <div class="a">Key: idempotency keys so retries do not double-fire, classify read vs write, approval gate (framework interrupt) for high-risk writes: draft &rarr; human approves &rarr; execute.</div></li>
+    <li>How do you keep one bad skill from taking down the platform?
+      <div class="a">Key: per-skill circuit breaker (Closed/Open/Half-open), per-tenant cost budgets, version pinning, tracing to localize the failing call.</div></li>
+    <li>How do you evaluate and observe an agent platform?
+      <div class="a">Key: output correctness (LLM-judge) + tool-call accuracy + trajectory eval; span tree per run with tokens/cost/latency and an immutable audit log.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (20&ndash;25 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Build the tool boundary in miniature. Define two tools as Python functions with typed argument models and a <code>scopes</code> list each (one <code>read</code>, one <code>high</code>-risk <code>write</code>). Build a tiny registry and an <code>execute_tool</code> wrapper that, on every call, validates args against the schema, checks the tool's scopes are a subset of a hardcoded per-tenant grant, and rejects otherwise. Then drive it with a <a href="https://docs.claude.com/en/docs/agents-and-tools/tool-use/overview">Claude tool-use</a> loop (or <a href="https://langchain-ai.github.io/langgraph/">LangGraph</a> with an interrupt) where the model picks tools, and deliberately prompt it to call the write tool without the grant, confirm your code, not the model, blocks it. Add a per-skill failure counter that opens a breaker after three errors. You have just built the security core of an agent platform.</p>
+    <p class="muted" style="font-size:13.5px">Stretch: add an approval interrupt on the write tool so high-risk actions pause for a y/n before executing, the human-in-the-loop gate.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>This is the one design in the module you literally shipped. At MaiQ you built the Skill Store, where users author, share, and run their own agents directly in chat through conversational skill authoring, exactly the authoring-plus-distribution layer in step 6. When this question comes up, do not recite theory: walk the framework, then say "I shipped this at MaiQ, the Skill Store lets non-technical users compose agents in chat, and the part I would emphasize is that every scope and isolation decision is enforced in code at the tool boundary, never in the prompt, because the model is an untrusted caller." Few candidates have built a real agent platform, so this is your single strongest system-design credibility moment, lean on it hard. Tie it back to your evaluation and tracing discipline (the LLM-as-judge framework) to show you operate these systems, not just sketch them.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>An agent platform is authoring plus a safe runtime plus governance, and the entire design hangs on one rule: never trust the model to enforce isolation, scope, or permissions, those decisions live in code at the tool boundary. The tool registry validates calls, the grant table is the permission ceiling, and per-invocation sandboxed credentials keep the blast radius tiny. A Skill Store needs signed manifests, static analysis, eval, and human review tiered by scope risk, with per-skill circuit breakers, version pinning, tracing, and per-tenant cost budgets in operations. You shipped exactly this in MaiQ, so answer it as an operator. Tomorrow we put one entry point in front of all the LLM traffic these agents generate.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d60">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: one front door for every LLM call, the gateway at scale.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d59-design-rag-assistant.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 59 &middot; Design a production RAG assistant</div></a>
+    <a data-nav="next" class="next" href="d61-design-llm-gateway.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 61 &middot; Design an LLM gateway at scale</div></a>
+  </div>
+
+  <div class="foot">Module 10 &middot; GenAI System Design &middot; Day 60 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

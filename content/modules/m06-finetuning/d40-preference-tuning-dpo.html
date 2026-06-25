@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 40 · Preference tuning (RLHF, DPO)</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 6 &middot; Fine-tuning &amp; Model Adaptation</span>
+    <span class="pill">Day 40</span>
+    <span class="pill">50 min</span>
+    <span class="diff" title="Difficulty: advanced"><i class="on"></i><i class="on"></i><i class="on"></i></span>
+  </div>
+
+  <h1>Preference tuning (RLHF, DPO)</h1>
+  <p class="lede">SFT teaches a model the form of a good answer. It cannot easily teach "this answer is better than that one" when both are well-formed. Preference tuning is how models learn tone, helpfulness, and safety from human judgment, and DPO is the modern way to do it without the reinforcement-learning machinery.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Explain why preference tuning exists where SFT runs out of road.</li>
+      <li>Describe the RLHF pipeline conceptually: reward model from human rankings, then RL/PPO.</li>
+      <li>Explain DPO: optimize directly on preference pairs, no separate reward model or RL loop.</li>
+      <li>Say in one line what RFT / RLVR adds (verifiable rewards).</li>
+      <li>Judge when a product team would ever do preference tuning itself (rarely).</li>
+    </ul>
+  </div>
+
+  <h2>Where SFT runs out of road</h2>
+  <div class="prose">
+    <p>SFT trains on (instruction &rarr; ideal response) pairs, so it teaches the model to imitate good answers. But "good" is often not a single target you can demonstrate. For an open-ended request there are many well-formed responses, and what separates a great one from a merely acceptable one is <em>preference</em>: this is more helpful, that one is too verbose, this one refuses politely, that one is subtly unsafe. You cannot easily write the one ideal response, but a human can reliably say <strong>which of two responses is better</strong>.</p>
+    <p>That comparative signal is exactly what preference tuning consumes. Instead of "here is the right answer," the data is "here are two answers; the human preferred this one." Optimizing the model to produce more of what humans prefer, and less of what they reject, is what gives chat models their characteristic tone, helpfulness, and safety behavior, the layer SFT alone cannot reliably install.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"SFT teaches the model to imitate good answers; preference tuning teaches it to <strong>prefer the better of two answers</strong> when both are plausible. The signal is comparative, a human ranks responses, and the model is optimized toward the preferred ones. RLHF does this with a learned reward model plus reinforcement learning; DPO does it directly on the preference pairs with no reward model and no RL loop, which is simpler and more stable." That framing shows you understand both the why and the two ways to do it.</p>
+  </div>
+
+  <h2>1 &middot; The RLHF pipeline, conceptually</h2>
+  <div class="prose">
+    <p><strong>RLHF (Reinforcement Learning from Human Feedback)</strong> was the original recipe behind the first wave of strong chat models. You do not need the RL math; you need the three stages and what each is for.</p>
+  </div>
+
+  <div class="diagram">  STAGE 1  SFT base
+           Start from a model already supervised-fine-tuned to follow instructions.
+                 │
+                 ▼
+  STAGE 2  REWARD MODEL (RM)
+           • Sample several responses to each prompt.
+           • Humans RANK them (best → worst), producing preference pairs.
+           • Train a separate model to PREDICT a scalar "human preference" score
+             for any (prompt, response). The RM has now distilled human taste
+             into something you can query millions of times.
+                 │
+                 ▼
+  STAGE 3  RL OPTIMIZATION (PPO)
+           • Let the policy (the LLM) generate responses.
+           • The reward model scores them; RL (commonly PPO) updates the policy
+             to maximize that reward.
+           • A KL penalty keeps the policy from drifting too far from the SFT
+             model, so it does not "reward-hack" into degenerate text.
+                 │
+                 ▼
+           Aligned chat model (tone, helpfulness, safety, refusal behavior)</div>
+
+  <div class="prose">
+    <p>The genius and the pain are both here. The reward model lets you scale human judgment to far more examples than humans could ever label directly. But the pipeline is <strong>complex and finicky</strong>: you are training and serving a second model (the RM), running reinforcement learning (notoriously unstable), tuning a KL penalty, and constantly watching for <em>reward hacking</em>, where the policy finds high-reward outputs the RM scores well but humans would actually dislike. Getting RLHF to converge well is real expertise.</p>
+  </div>
+
+  <h2>2 &middot; DPO: skip the reward model and the RL loop</h2>
+  <div class="prose">
+    <p><strong>Direct Preference Optimization (DPO)</strong> asks: do we actually need a separate reward model and a reinforcement-learning loop to move the model toward preferred responses? Its answer is no. DPO derives a loss that optimizes the language model <em>directly</em> on the preference pairs, the same (prompt, chosen, rejected) triples, treating the LLM itself as implicitly defining the reward. There is no separate reward model to train and serve, and no RL/PPO loop.</p>
+  </div>
+
+  <div class="diagram">  PREFERENCE DATA (same for both): (prompt, chosen ✓, rejected ✗)
+
+  RLHF                                  DPO
+  ────                                  ───
+  pairs → train REWARD MODEL            pairs → ONE supervised-style loss on the LLM
+            │                                    directly:
+            ▼                                    push P(chosen)  UP
+  policy + RM → RL / PPO loop                    push P(rejected) DOWN
+            │     (+ KL penalty,                 (a reference model anchors it so the
+            ▼      reward hacking risk)           policy does not drift; no RM, no RL)
+       aligned model                        aligned model
+
+  Two models, an RL loop, tuning.        One model, a stable training step.</div>
+
+  <div class="prose">
+    <p>Mechanically, DPO increases the probability the model assigns to the chosen response and decreases it for the rejected one, relative to a frozen reference model that keeps the update from wandering. The effect is the same goal as RLHF, align the model to human preference, reached with a single, stable, supervised-style training step. That is why DPO has become the default preference-tuning method for most teams: it removes the two hardest parts of RLHF (training a reward model, running RL) while keeping the comparative signal that makes preference tuning work.</p>
+  </div>
+
+  <div class="callout warning">
+    <span class="label">Nuance, so you do not oversell DPO</span>
+    <p>DPO is simpler and more stable, but it is not strictly "RLHF but always better." RLHF's separate reward model can generalize the preference signal in ways a direct method sometimes does not, and at frontier scale the choice is an active engineering trade-off, not a settled win. The defensible interview line is: "DPO is the simpler, more stable default that most teams reach for; RLHF remains relevant where a reusable reward model or its generalization is worth the added complexity." Avoid claiming DPO universally beats RLHF.</p>
+  </div>
+
+  <h2>3 &middot; One line on RFT / RLVR</h2>
+  <div class="prose">
+    <p>There is a newer branch worth a single sentence so the term does not surprise you. When the reward does not have to come from subjective human preference because correctness is <em>checkable</em>, math answers, code that passes tests, a verifiable constraint, you can use <strong>verifiable rewards</strong> instead of a learned reward model. This is the idea behind <strong>RFT (reinforcement fine-tuning)</strong> and <strong>RLVR (RL from verifiable rewards)</strong>: the signal is a programmatic check ("did it pass the unit test?"), which is cleaner and less hackable than a learned reward model and is part of why recent reasoning models improved on math and code. You will not implement this as a product engineer, but you should recognize that "verifiable reward" means the grader is a deterministic check, not a human or an RM.</p>
+  </div>
+
+  <h2>4 &middot; Would a product team ever do this? (Rarely)</h2>
+  <div class="prose">
+    <p>Be honest about scope, because this is where senior judgment shows. Preference tuning, RLHF or DPO, is overwhelmingly the work of <strong>model providers and labs</strong> building base chat models, not the work of teams building applications on top of them. As an application engineer you almost always inherit an already-preference-tuned model and steer it with prompting, RAG, and at most a small SFT/LoRA for form. The cases where a product team reaches for DPO itself are narrow:</p>
+    <ul>
+      <li>You have a strong, domain-specific notion of "better" that prompting and SFT cannot capture (e.g. a very particular house style or refusal policy), AND</li>
+      <li>You can collect real preference data, humans reliably ranking pairs of your model's outputs, at enough volume to be worth it.</li>
+    </ul>
+    <p>Even then, DPO (not full RLHF) is the realistic choice because it does not require standing up a reward model and an RL stack. The senior framing: "Preference tuning is mostly a provider concern; if a product team does it at all, it is DPO on real preference pairs for a specific alignment need that cheaper levers could not meet."</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: how a "too verbose, sometimes unsafe" assistant gets fixed</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>A lab's SFT model follows instructions but is wordy and occasionally gives an unsafe answer when both a safe and unsafe response are well-formed. Trace how preference tuning fixes what SFT could not.</p>
+  </div>
+  <div class="diagram">  PROBLEM: both responses are grammatical and on-topic; SFT has no way to
+           express "the concise, safe one is BETTER."
+
+  COLLECT  For many prompts, sample 2+ responses; humans pick the better one
+           (concise, helpful, safe) over the worse (verbose or unsafe).
+           → dataset of (prompt, chosen ✓, rejected ✗) pairs.
+
+  RLHF route                          DPO route (modern default)
+  ──────────                          ──────────
+  train RM on the rankings;           run DPO directly on the pairs:
+  RL-optimize the policy to            raise P(concise+safe), lower
+  maximize RM score, KL-anchored.      P(verbose+unsafe), reference-anchored.
+
+  RESULT   The model now SYSTEMATICALLY prefers concise, safe answers, not because
+           anyone wrote the single ideal answer, but because it absorbed the
+           comparative human signal. That is the exact gap SFT could not close.</div>
+  <div class="prose">
+    <p>The takeaway to carry: preference tuning is the answer to "make it prefer the better of two good answers," and DPO reaches that result without the reward-model-plus-RL apparatus. SFT shapes form; preference tuning shapes <em>judgment between forms</em>.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Say each answer out loud in full sentences, as if to an interviewer. Then open the solution and compare. The gap is your lesson.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>An interviewer asks: "If SFT already trains on good responses, why do we need preference tuning at all?" Answer crisply.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>SFT teaches the model to imitate a single demonstrated "ideal" response, but for open-ended requests there are many well-formed answers and "good" is comparative, more helpful, less verbose, safer, which you often cannot capture as one target to imitate. Preference tuning consumes exactly that comparative signal: humans rank responses, and the model is optimized to prefer the chosen over the rejected, which is how chat models acquire tone, helpfulness, and safety beyond what SFT installs. In one line: SFT teaches the form of a good answer; preference tuning teaches the model to choose the better of two good answers.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>Explain DPO versus RLHF to someone who knows RLHF. What two components does DPO remove, and what is the practical consequence? Then name one reason not to declare DPO strictly superior.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>DPO removes the two hardest pieces of RLHF: the separately trained reward model and the reinforcement-learning (PPO) loop. Instead of distilling preferences into an RM and then RL-optimizing against it, DPO derives a loss that optimizes the LLM directly on the (prompt, chosen, rejected) pairs, anchored to a frozen reference model, raising the probability of the chosen response and lowering the rejected. The practical consequence is a single, stable, supervised-style training step with no RL instability and no reward-hacking surface, which is why it is the default. The caveat: RLHF's separate reward model can generalize the preference signal in ways a direct method sometimes does not, so at frontier scale it remains a trade-off, not a clean win.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>A PM proposes: "Let's RLHF our support bot to make it nicer." You are an application team building on a provider's model. What is the senior response?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Push back gently: full RLHF means standing up a reward model and an RL training stack, which is provider/lab-scale work and almost never the right first move for an application team. Start far cheaper, prompting and a clear system persona usually move "niceness" a long way, and the model you are calling is already preference-tuned by its provider. If a specific tone genuinely cannot be reached that way and you can collect real preference data (humans ranking pairs of your bot's outputs) at volume, the realistic technique is DPO, not RLHF, because it skips the reward model and RL loop. The framing: exhaust prompting and small SFT/LoRA first, and only consider DPO for a specific alignment need that cheaper levers cannot meet.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's Module 6 slice and common 2026 screens. Drill the one-line keys, then expand each into a 90-second answer with Claude using protocol prompt #2.</p>
+  <ul class="q-list">
+    <li>What is DPO and how does it differ from RLHF?
+      <div class="a">Key: DPO optimizes directly on preference pairs with no separate reward model or RL loop; simpler and more stable than RLHF.</div></li>
+    <li>Why does preference tuning exist on top of SFT?
+      <div class="a">Key: SFT imitates one good answer; preference tuning learns to prefer the better of two plausible answers (tone, helpfulness, safety).</div></li>
+    <li>Walk through the RLHF pipeline.
+      <div class="a">Key: SFT base &rarr; train a reward model from human rankings &rarr; RL (PPO) optimize the policy against it, KL-anchored to avoid reward hacking.</div></li>
+    <li>What two components does DPO remove, and what is the risk it trades for simplicity?
+      <div class="a">Key: removes the reward model and the RL/PPO loop; gains stability, but RLHF's RM can sometimes generalize preferences better.</div></li>
+    <li>What is reward hacking and how does RLHF guard against it?
+      <div class="a">Key: policy finds outputs the RM scores high but humans dislike; a KL penalty to the SFT reference keeps the policy from drifting into it.</div></li>
+    <li>What are RFT / RLVR in one line?
+      <div class="a">Key: preference signal replaced by a verifiable, programmatic reward (passes tests, correct math), cleaner and less hackable than a learned RM.</div></li>
+    <li>Would a product team running on a provider model do RLHF/DPO?
+      <div class="a">Key: rarely; mostly a provider/lab concern. If at all, DPO on real preference pairs for a specific alignment need cheaper levers cannot meet.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (15&ndash;20 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Generate preference data with your own hands so the abstraction becomes concrete. Take 5 prompts, ask a model for two responses each (vary temperature so they differ), and for every pair label which you prefer and one word why (concise / safer / more helpful). You have just built a tiny <code>(prompt, chosen, rejected)</code> dataset, the input to both RLHF and DPO. Then read the TRL <a href="https://huggingface.co/docs/trl/main/en/dpo_trainer">DPO trainer</a> docs to see the exact data columns it expects (prompt / chosen / rejected) and confirm your hand-labeled set matches that shape.</p>
+    <p class="muted" style="font-size:13.5px">Stretch: skim the abstract of the DPO paper (Rafailov et al., "Direct Preference Optimization") for the "your language model is secretly a reward model" framing in the authors' words. See <a href="../../tools.html">Tools &amp; Claude</a> for access.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>You can speak to this honestly from the consumer side, which is exactly the right altitude for an application engineer. At MaiQ you build on already preference-tuned models and steer behavior with prompting, retrieval, and evaluation rather than retraining alignment yourself, and that is the correct call: the interview win is showing you know preference tuning is largely a provider concern and that you would exhaust cheaper levers first. Where your experience genuinely connects is the data instinct: your LLM-as-judge evaluation framework is itself a form of turning human-style preference into a measurable signal, the same comparative-judgment idea that powers DPO, so when an interviewer goes deep on RLHF versus DPO you can ground your understanding in "I build judges that score better-versus-worse outputs, which is the same kind of preference signal these methods consume." That keeps you credible without overclaiming you have run RLHF in production.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>Preference tuning exists because SFT imitates one good answer but cannot express that the better of two plausible answers is preferred. RLHF trains a reward model from human rankings, then RL-optimizes the policy against it with a KL anchor, powerful but complex and unstable. DPO reaches the same goal directly on the (prompt, chosen, rejected) pairs with no reward model and no RL loop, which is why it is the modern default, though not a strict universal win over RLHF. RFT/RLVR swaps human preference for verifiable rewards, and for application teams preference tuning is rarely the right lever, DPO at most, only for a specific alignment need.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d40">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: the Module 6 lab &mdash; design a complete, honest fine-tuning plan for a real MaiQ-style scenario.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d39-lora-qlora.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 39 &middot; LoRA &amp; QLoRA</div></a>
+    <a data-nav="next" class="next" href="d41-finetuning-lab.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 41 &middot; Lab &mdash; design a fine-tuning plan</div></a>
+  </div>
+
+  <div class="foot">Module 6 &middot; Fine-tuning &amp; Model Adaptation &middot; Day 40 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

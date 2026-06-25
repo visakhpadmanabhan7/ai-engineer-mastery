@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 46 · Deployment &amp; CI/CD for LLM apps</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 7 &middot; LLMOps &amp; Serving</span>
+    <span class="pill">Day 46</span>
+    <span class="pill">50 min</span>
+    <span class="diff" title="Difficulty: intermediate"><i class="on"></i><i class="on"></i><i></i></span>
+  </div>
+
+  <h1>Deployment &amp; CI/CD for LLM apps</h1>
+  <p class="lede">An LLM feature is software, so it deserves containers, versioning, and a CI gate, plus one twist: a prompt change is a behavior change with no compiler to catch it. Today you build the pipeline and the reliability primitives that keep it from breaking in production.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Containerize an LLM app and manage config and secrets cleanly.</li>
+      <li>Treat prompts and tool definitions as versioned code (semver, tagged per call).</li>
+      <li>Design a CI/CD gate that runs a golden set and blocks on regression before canary.</li>
+      <li>Place the reliability primitives, timeout, retry with backoff and jitter, circuit breaker, fallback chain, in the call path.</li>
+      <li>Handle provider 429s correctly so a rate limit does not become an outage.</li>
+    </ul>
+  </div>
+
+  <h2>1 &middot; Containerize the app</h2>
+  <div class="prose">
+    <p>An LLM app is mostly ordinary backend code: an API server that orchestrates model calls, retrieval, and tools. So you ship it like any service, in a <strong>Docker</strong> container for reproducibility across machines. The LLM-specific notes are small but matter: the model weights are usually not in your image (you call a hosted API), so the image stays light; pin dependency versions so a silently updated SDK does not change behavior; and keep the container stateless so it scales horizontally (Module 8), with state in a database or cache.</p>
+    <p><strong>Config and secrets</strong> are kept out of the image entirely. API keys, model ids, and tunables come from environment variables or a secrets manager injected at runtime, never baked into the build or committed to git. This lets you promote the same image through dev, staging, and prod by changing config, and rotate a leaked key without rebuilding.</p>
+  </div>
+
+  <pre><code><span class="tok-c"># a light FastAPI image; no model weights, no secrets baked in</span>
+<span class="tok-k">FROM</span> python:3.12-slim
+<span class="tok-k">WORKDIR</span> /app
+<span class="tok-k">COPY</span> requirements.txt .
+<span class="tok-k">RUN</span> pip install --no-cache-dir -r requirements.txt   <span class="tok-c"># pinned versions</span>
+<span class="tok-k">COPY</span> . .
+<span class="tok-c"># ANTHROPIC_API_KEY, MODEL_ID, etc. injected at runtime, not here</span>
+<span class="tok-k">CMD</span> [<span class="tok-s">"uvicorn"</span>, <span class="tok-s">"app:app"</span>, <span class="tok-s">"--host"</span>, <span class="tok-s">"0.0.0.0"</span>, <span class="tok-s">"--port"</span>, <span class="tok-s">"8000"</span>]</code></pre>
+
+  <h2>2 &middot; Prompts and tools are code</h2>
+  <div class="prose">
+    <p>The defining discipline of LLMOps: a prompt is not a string buried in a function, it is a versioned artifact. Changing a prompt changes the system's behavior just as surely as changing code, but there is no type checker to catch a regression, so you impose the structure yourself:</p>
+    <ul>
+      <li><strong>Prompts as code.</strong> Store prompts (and tool definitions) in version control, reviewed via pull request like any change, not edited live in a console where no one sees the diff.</li>
+      <li><strong>Semantic versioning.</strong> Give each prompt a version (e.g. <code>summarize_v2.3</code>). A wording tweak bumps the patch; a structural change bumps the minor or major.</li>
+      <li><strong>Tag every call.</strong> Log the prompt version, model id, and temperature alongside each request (Module 5). When quality moves, you can answer "which prompt version and model produced this?" instead of guessing.</li>
+    </ul>
+    <p>This is what makes the rest possible: if a prompt is a tagged, versioned artifact, you can run it against a test set in CI, roll it back like code, and attribute a production regression to a specific change.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"I treat prompts and tool definitions as versioned code: in source control, changed via PR, semver-tagged, and logged on every call with the model id and temperature. A prompt edit is a behavior change with no compiler to catch regressions, so the discipline that replaces the compiler is a golden-set CI gate plus per-call version tagging for attribution."</p>
+  </div>
+
+  <h2>3 &middot; The prompt CI/CD gate</h2>
+  <div class="prose">
+    <p>Because there is no compiler, the safety net is an automated <strong>evaluation gate</strong> in CI. When a pull request changes a prompt, a tool, or the model, the pipeline runs the change against a <strong>golden set</strong> (a curated set of representative inputs with expected outputs or rubric scores, Module 5) and <strong>blocks the merge if quality regresses</strong> past a threshold. Only after passing does the change roll out, and even then to a small slice first.</p>
+  </div>
+
+  <div class="diagram">  PR changes a prompt / tool / model
+        │
+        ▼
+  ┌──────────── CI GATE ────────────┐
+  │ run golden set (N cases)         │
+  │ score: correctness / faithfulness/│
+  │        format / cost / latency    │
+  │ compare vs baseline (main)        │
+  └───────────────┬─────────────────┘
+        regression?│
+            ┌──────┴───────┐
+          YES              NO
+           │                │
+        BLOCK merge      merge → CANARY (e.g. 5% traffic)
+        (report diff)        │ watch online metrics + guardrails
+                             ├─ healthy → ramp to 100%
+                             └─ regression → auto-rollback</div>
+
+  <div class="prose">
+    <p>Two non-obvious points. First, the gate scores more than correctness: format adherence, faithfulness, and even cost and latency are regressions worth blocking on, a prompt that is 5% more accurate but doubles tokens may not be a win. Second, passing CI is necessary but not sufficient, because offline eval cannot fully predict live behavior (Module 5), so you still <strong>canary</strong>: release to a small percentage, watch online metrics and guardrails, and ramp up only if healthy, with automatic rollback if not.</p>
+  </div>
+
+  <h2>4 &middot; Reliability primitives in the call path</h2>
+  <div class="prose">
+    <p>You are calling a remote service that can be slow, rate-limited, or briefly down. Four primitives wrap every external LLM (or tool) call so a hiccup does not cascade:</p>
+    <ul>
+      <li><strong>Timeout.</strong> Never wait forever. Bound each call so a hung request fails fast instead of holding a worker.</li>
+      <li><strong>Retry with backoff and jitter.</strong> On a transient failure, retry, but wait exponentially longer each time (backoff) and add randomness (jitter) so many clients do not retry in lockstep and hammer the recovering service (the thundering herd). Cap the number of attempts.</li>
+      <li><strong>Circuit breaker.</strong> If failures pile up, stop calling for a cooldown: Closed (normal, counting failures) trips to Open (fail fast, do not call) after a threshold, then Half-open (let one probe through; success closes the circuit, failure re-opens it). This protects both you and the struggling dependency.</li>
+      <li><strong>Fallback chain.</strong> When the primary path fails or the breaker is open, degrade gracefully: try a secondary model or provider, serve a cached answer, or return a clear "temporarily unavailable" rather than a stack trace.</li>
+    </ul>
+    <p>Crucially, only retry <strong>idempotent</strong> calls. Retrying a read is safe; blindly retrying a write can double-charge or duplicate a record (Module 4), so writes need idempotency keys before they are eligible for retry.</p>
+  </div>
+
+  <pre><code><span class="tok-k">import</span> random, time
+<span class="tok-k">from</span> anthropic <span class="tok-k">import</span> Anthropic, APIStatusError
+
+client = Anthropic()  <span class="tok-c"># reads ANTHROPIC_API_KEY from env</span>
+
+<span class="tok-k">def</span> <span class="tok-f">call_with_retry</span>(make_call, attempts=4, base=0.5, timeout=30):
+    <span class="tok-k">for</span> i <span class="tok-k">in</span> range(attempts):
+        <span class="tok-k">try</span>:
+            <span class="tok-k">return</span> make_call(timeout=timeout)
+        <span class="tok-k">except</span> APIStatusError <span class="tok-k">as</span> e:
+            <span class="tok-k">if</span> e.status_code == <span class="tok-n">429</span> <span class="tok-k">and</span> i &lt; attempts - <span class="tok-n">1</span>:
+                retry_after = float(e.response.headers.get(<span class="tok-s">"retry-after"</span>, <span class="tok-n">0</span>))
+                wait = max(retry_after, base * <span class="tok-n">2</span>**i) + random.uniform(<span class="tok-n">0</span>, <span class="tok-n">0.3</span>)  <span class="tok-c"># backoff + jitter</span>
+                time.sleep(wait)
+                <span class="tok-k">continue</span>
+            <span class="tok-k">raise</span>
+    <span class="tok-c"># on exhaustion: caller triggers the fallback chain (smaller model / cache)</span></code></pre>
+
+  <h2>5 &middot; Handling provider 429s</h2>
+  <div class="prose">
+    <p>A <code>429 Too Many Requests</code> means you hit a rate limit, not that anything is broken. The correct response is specific: <strong>respect the <code>Retry-After</code> header</strong> if the provider sends one (it tells you how long to wait), otherwise fall back to exponential backoff with jitter; <strong>cap attempts</strong> so you do not retry forever; and <strong>only retry idempotent calls</strong>. If 429s persist, that is a capacity signal, route some traffic to a secondary model, smooth bursts with a client-side token-bucket limiter, or queue. Treating a 429 as a hard failure turns a recoverable throttle into a user-facing outage; treating it as "wait and retry sensibly" keeps the feature up.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: ship a prompt change safely</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>You improve the system prompt for a summarization endpoint. Trace it from edit to production.</p>
+    <ul>
+      <li><strong>Edit as code:</strong> bump <code>summarize_v2.2 → v2.3</code> in the repo, open a PR. A reviewer sees the prompt diff like any code change.</li>
+      <li><strong>CI gate:</strong> the pipeline runs v2.3 against the golden set of 60 representative documents, scoring faithfulness, format, length, and cost vs the v2.2 baseline. v2.3 improves faithfulness but its summaries run 25% longer (cost regression). The gate flags it; you tighten the length instruction and rerun until cost is within bounds and faithfulness still wins.</li>
+      <li><strong>Canary:</strong> merge, deploy the new container image (same image, version comes from config), route 5% of traffic to v2.3, and watch online faithfulness sampling and the cost-per-request guardrail.</li>
+      <li><strong>Ramp or roll back:</strong> metrics hold, so ramp 5% → 25% → 100%. Every request is tagged <code>prompt=summarize_v2.3</code>, so if a problem surfaces later you can attribute and roll back to v2.2 instantly.</li>
+      <li><strong>In the call path the whole time:</strong> each model call has a timeout, retries 429s with backoff and jitter, and falls back to a smaller model if the breaker trips, so a provider hiccup during the rollout does not look like a bad deploy.</li>
+    </ul>
+    <p>This is the LLMOps loop: prompts as code, a golden-set gate that blocks regressions including cost, a canary because offline eval is not the last word, and reliability primitives that keep the rollout legible.</p>
+  </div>
+
+  <h2>Why this matters for you as an AI engineer</h2>
+  <div class="callout key">
+    <span class="label">This is the "Ops" in LLMOps</span>
+    <p>Plenty of people can write a good prompt once. The senior skill is shipping prompt changes <em>repeatedly and safely</em>: versioned artifacts, a CI gate that catches regressions before users do, a canary because the gate is not infallible, and a call path that survives 429s and brief outages. When an interviewer asks "how do you deploy LLM changes without breaking production?", this lesson is the whole answer, and it is exactly the operational maturity that separates a demo from a product.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Say each answer out loud in full sentences, as if to an interviewer. Then open the solution and compare. The gap is your lesson.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>A teammate edited the production system prompt directly in the provider console to fix a bug. It worked, but two days later quality dropped and no one can tell what changed. What practices were missing, and what do you put in place?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Two practices were missing: prompts as versioned code and per-call version tagging. Editing live in a console leaves no diff, no review, and no record, so a later regression cannot be attributed or rolled back. Put in place: store prompts in version control with a semver, change them only via PR (so the diff is reviewed and runs the CI golden-set gate), and tag every request with the prompt version, model id, and temperature. Now a quality drop is traceable to a specific version and reversible by redeploying the previous one. The console edit also bypassed the regression gate entirely, which is how the bad change reached users.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>Your service starts returning errors to users whenever the LLM provider throttles you with 429s. Walk through how you would make the service resilient to rate limits without dropping requests on the floor.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Treat 429 as "wait and retry", not as a failure. Respect the <code>Retry-After</code> header when present, otherwise back off exponentially with jitter, and cap the attempts so you do not retry indefinitely; only retry idempotent calls. Add a client-side token-bucket limiter to smooth bursts so you stop exceeding the limit in the first place, and a circuit breaker so that if the provider is sustainedly overloaded you fail fast for a cooldown instead of piling on. Finally, a fallback chain, route to a secondary model or serve a cached answer when the primary is throttled, so users get a degraded-but-working response instead of an error. Persistent 429s are a capacity signal to add routing or queueing.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>Your golden-set CI gate passes a new prompt with a higher correctness score, so you ship it to 100% immediately. Two failures follow: a tool-call format the golden set never covered breaks downstream, and cost jumps. What two process changes prevent this next time?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>First, do not ship straight to 100%, canary. Offline eval cannot cover every live input distribution (the uncovered tool-call format proves it), so release to a small slice, watch online metrics and guardrails, and ramp only if healthy with automatic rollback. Second, the gate must score more than correctness: add format adherence and a cost (and latency) check to the golden-set comparison, so a correctness gain that breaks structure or doubles tokens is flagged as a regression rather than passing. Together: a multi-dimensional gate catches the cost and format issues offline, and the canary catches whatever the gate's dataset missed before it hits everyone.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's LLMOps and System Design slices and common 2026 screens. Drill the one-line keys, then expand each into a 90-second answer with Claude using protocol prompt #2.</p>
+  <ul class="q-list">
+    <li>How do you do CI/CD for prompts?
+      <div class="a">Key: prompts as versioned code via PR, semver, run a golden set in CI, block on regression (incl. cost/format), then canary with auto-rollback.</div></li>
+    <li>How do you handle 429s from a provider?
+      <div class="a">Key: respect Retry-After, exponential backoff + jitter, cap attempts, only retry idempotent calls; persistent 429s → routing/queue/limiter.</div></li>
+    <li>What is a circuit breaker and what are its states?
+      <div class="a">Key: Closed (allow, count failures) → Open (fail fast, cooldown) → Half-open (one probe; success closes, failure re-opens).</div></li>
+    <li>Why version prompts, and what do you log per call?
+      <div class="a">Key: a prompt edit is a behavior change with no compiler; semver it and log prompt version + model + temperature for attribution and rollback.</div></li>
+    <li>Why canary if the golden-set gate already passed?
+      <div class="a">Key: offline eval can't cover the live input distribution, tool latency, or concurrency; canary catches what the dataset missed before full rollout.</div></li>
+    <li>What reliability primitives wrap an external LLM call?
+      <div class="a">Key: timeout, retry with backoff+jitter, circuit breaker, fallback chain; retry only idempotent calls.</div></li>
+    <li>How do you keep secrets and config out of an LLM container image?
+      <div class="a">Key: inject API keys/model ids via env vars or a secrets manager at runtime; pin deps; keep the image stateless so it scales horizontally.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (15&ndash;20 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Take a small FastAPI app with one Claude-powered endpoint and add the deployment scaffolding. (1) Write a slim Dockerfile that reads <code>ANTHROPIC_API_KEY</code> and <code>MODEL_ID</code> from the environment, never baked in. (2) Move your prompt into a <code>prompts/</code> file with a version string, and log that version on every request. (3) Wrap the model call with a timeout and a retry that backs off with jitter on 429 (respect <code>Retry-After</code>), using the Anthropic <a href="https://docs.claude.com/en/api/errors">errors</a> reference for status codes. (4) Write a tiny "golden set" of 5 input/expected pairs and a script that fails (exit non-zero) if any case regresses, the seed of a CI gate. Run it locally as if it were a pre-merge check.</p>
+    <p class="muted" style="font-size:13.5px">Wire the golden-set script into GitHub Actions later so it runs on every PR. See <a href="../../tools.html">Tools &amp; Claude</a> for API setup.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>This lesson sits right on your stack: MaiQ is a FastAPI service, you took features from prototype to production, and your LLM-as-judge evaluation framework is precisely the engine a golden-set CI gate runs on. The strong interview move is to connect them: "I built an LLM-as-judge evaluation framework, which is exactly what you wire into a CI gate so a prompt change is scored against a golden set before it merges, and tagged per call so a regression is attributable and reversible." Your 37% cost reduction also shows why the gate must score cost, not just correctness, because you treated cost as a first-class metric. That is the operational maturity, evaluation plus disciplined rollout, that this lesson formalizes.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>An LLM app ships like any service, containerized, stateless, secrets injected at runtime, with one twist: prompts and tools are versioned code because a prompt edit is an uncaught behavior change. The compiler you do not have is replaced by a CI gate that runs a golden set and blocks on regression (including cost and format), followed by a canary because offline eval is not the last word. Wrap every external call with a timeout, retry with backoff and jitter, a circuit breaker, and a fallback chain, and retry only idempotent calls. Handle 429s by respecting Retry-After and backing off, so a rate limit degrades gracefully instead of becoming an outage.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d46">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: the Module 7 lab, take a naive feature and cut its cost and latency with measurements.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d45-guardrails-safety.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 45 &middot; Guardrails &amp; safety</div></a>
+    <a data-nav="next" class="next" href="d47-optimization-lab.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 47 &middot; Lab &mdash; cut cost &amp; latency</div></a>
+  </div>
+
+  <div class="foot">Module 7 &middot; LLMOps &amp; Serving &middot; Day 46 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,95 @@
+"""AI Engineer Mastery — FastAPI application entrypoint."""
+from __future__ import annotations
+
+import logging
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from sqlalchemy import func, select
+
+from .config import BACKEND_DIR, settings
+from .database import SessionLocal, init_db
+from .models import Lesson, Question, User
+from .routers import analytics, auth, lessons, notes, progress, review, tutor
+from .security import hash_password
+from .services import srs
+from .services.ai import ai_available, provider_info
+from .services.ingest import ingest_all
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+log = logging.getLogger("app")
+
+FRONTEND_DIR = BACKEND_DIR.parent / "frontend"
+
+
+async def ensure_seed_user() -> None:
+    if not settings.seed_email:
+        return
+    async with SessionLocal() as db:
+        u = (await db.execute(select(User).where(User.email == settings.seed_email))).scalar_one_or_none()
+        if u is None:
+            db.add(User(
+                email=settings.seed_email, display_name="Visakh",
+                hashed_password=hash_password(settings.seed_password),
+            ))
+            await db.commit()
+            log.info("seeded default user %s", settings.seed_email)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await init_db()
+    async with SessionLocal() as db:
+        try:
+            await ingest_all(db)
+        except Exception:
+            log.exception("content ingest failed (app still starts)")
+    await ensure_seed_user()
+    info = provider_info()
+    log.info("ready — srs=%s ai=%s(%s) db=%s", srs.engine_name(), info["provider"], info["model"],
+             "postgres" if settings.is_postgres else "sqlite")
+    yield
+
+
+app = FastAPI(title="AI Engineer Mastery API", version="1.0.0", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["X-Session-Id"],
+)
+
+for r in (auth.router, lessons.router, progress.router, review.router,
+          tutor.router, analytics.router, notes.router):
+    app.include_router(r)
+
+
+@app.get("/api/health")
+async def health():
+    return {"status": "ok"}
+
+
+@app.get("/api/meta")
+async def meta():
+    async with SessionLocal() as db:
+        lessons_n = (await db.execute(select(func.count(Lesson.id)))).scalar() or 0
+        questions_n = (await db.execute(select(func.count(Question.id)))).scalar() or 0
+    return {
+        "lessons": lessons_n,
+        "questions": questions_n,
+        "srs_engine": srs.engine_name(),
+        "ai_enabled": ai_available(),
+        "ai": provider_info(),
+        "db": "postgres" if settings.is_postgres else "sqlite",
+    }
+
+
+# Serve the frontend (mounted last so /api/* wins). html=True serves index.html at /.
+if FRONTEND_DIR.is_dir():
+    app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")

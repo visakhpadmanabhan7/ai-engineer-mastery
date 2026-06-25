@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 54 · The ML system design framework</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 9 &middot; ML System Design</span>
+    <span class="pill">Day 54</span>
+    <span class="pill">55 min</span>
+    <span class="diff" title="Difficulty: intermediate"><i class="on"></i><i class="on"></i><i></i></span>
+  </div>
+
+  <h1>The ML system design framework</h1>
+  <p class="lede">A generic system design interview asks "build a service." An ML system design interview asks "build a service whose behavior is <em>learned from data and decays over time</em>." That second clause changes everything, and it is the whole reason this module exists.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Name the four things ML system design adds on top of generic system design.</li>
+      <li>Walk the eight-stage ML framework out loud in order, without notes.</li>
+      <li>Turn a vague product ask ("reduce churn", "show better results") into a precise ML problem.</li>
+      <li>Choose a business metric, then a model metric, then a proxy metric, and explain why all three exist.</li>
+      <li>Recognize when the answer is "do not use ML" and say so confidently.</li>
+    </ul>
+  </div>
+
+  <h2>1 &middot; Why ML system design is its own thing</h2>
+  <div class="prose">
+    <p>You already have a system design methodology from Module 8: clarify, estimate, sketch, deep-dive the bottleneck, name trade-offs, talk ops. All of that still applies. ML system design is that methodology plus four concerns a normal CRUD service never has to think about:</p>
+    <ul>
+      <li><strong>The logic is learned, not written.</strong> You cannot read the code to know what it will do. You can only measure it on data. So evaluation is not a phase, it is the spec.</li>
+      <li><strong>Data is a first-class dependency.</strong> A web service depends on a database; an ML service depends on the <em>distribution</em> of its inputs and labels. When that distribution shifts, the service silently gets worse with no error in the logs.</li>
+      <li><strong>It decays.</strong> A correct deterministic service stays correct. A correct model rots as the world moves away from its training data. "Ship and forget" is a bug.</li>
+      <li><strong>There is no single right answer, only a metric you are optimizing.</strong> Two reasonable models can both be "correct" and differ wildly on the number that matters to the business.</li>
+    </ul>
+    <p>So the interviewer is listening for whether you treat the model as a living component with a feedback loop, or as a black box you call once. The framework below is how you signal the former.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"Generic system design moves bytes reliably; ML system design moves <em>predictions</em> reliably, and predictions are learned from a data distribution that drifts. So on top of the usual scale and latency story, I add four things: a labeled-data plan, an offline plus online evaluation story, a serving choice driven by latency and freshness, and a monitoring plus retraining loop. The model is a component with a half-life, not a constant."</p>
+  </div>
+
+  <h2>2 &middot; The eight-stage framework</h2>
+  <div class="prose">
+    <p>This is the spine of every answer in this module. Memorize the order; in an interview you literally narrate it top to bottom, pausing to deep-dive wherever the interviewer leans in.</p>
+  </div>
+
+  <div class="diagram">  ┌── 1. OBJECTIVE ───────────────────────────────────────────────┐
+  │   fuzzy product ask  →  precise ML task  →  business metric    │
+  │   "reduce churn"     →  binary classification: will user      │
+  │                          churn in 30d?     →  retention %     │
+  └───────────────────────────────┬───────────────────────────────┘
+                                  ▼
+  2. DATA & LABELS     where do (x, y) pairs come from? how fresh? how clean?
+                       implicit (clicks) vs explicit (thumbs) vs human-labeled
+                                  ▼
+  3. FEATURES          what signal feeds the model? offline + online,
+                       same transform both sides  (→ Day 55, feature store)
+                                  ▼
+  4. MODEL CHOICE      baseline first (heuristic / logistic reg) → tree
+                       ensemble → deep net only if the data justifies it
+                                  ▼
+  5. OFFLINE EVAL      fixed holdout / temporal split; pick the metric that
+                       matches the task (AUC, NDCG, RMSE…); beat the baseline
+                                  ▼
+  6. SERVING           batch (precompute) vs online (per-request) vs stream
+                       driven by latency budget + freshness  (→ Day 56)
+                                  ▼
+  7. MONITORING        data drift · prediction drift · perf vs delayed labels
+                       + RETRAINING triggers (scheduled / drift)  (→ Day 57)
+                                  ▼
+  8. FEEDBACK LOOP     predictions shape user behavior, which becomes the next
+                       training data; watch for loops that poison themselves
+                                  └──────────────► back to stage 2</div>
+
+  <div class="prose">
+    <p>Notice the arrow at the bottom curls back to stage 2. That loop is what makes it a <em>system</em> and not a one-shot model. Stages 5 through 8 are where most of the senior signal lives, because juniors stop at "train a model that gets high accuracy" and never address serving, drift, or the loop.</p>
+  </div>
+
+  <h2>3 &middot; Stage 1 is the whole interview: framing the ask</h2>
+  <div class="prose">
+    <p>Most candidates rush past the objective to talk about models. Do the opposite. The single highest-leverage move is converting a fuzzy product ask into a crisp ML problem, because every later choice falls out of it. Run the ask through three questions:</p>
+    <ul>
+      <li><strong>What is being predicted, exactly?</strong> Name the task type: binary or multiclass classification, regression, ranking, recommendation, anomaly detection, generation. "Show better search results" is <em>ranking</em>, not classification, and that one word changes your metric, your model, and your serving.</li>
+      <li><strong>What is the unit of prediction?</strong> Per user? Per user-item pair? Per session? Per request? This sets your data granularity and your QPS estimate.</li>
+      <li><strong>What decision does the prediction drive, and what is the cost of being wrong each way?</strong> A fraud model's false negative (let fraud through) costs differently from its false positive (block a real customer). That asymmetry decides your threshold and sometimes your whole metric.</li>
+    </ul>
+    <p>Only once the task is pinned do you talk about a business metric.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Concept</span>
+    <p>"Reduce churn" is not an ML problem. "Predict P(user churns in the next 30 days) per active user, so we can target the top decile with a retention offer, optimizing for net retained revenue" is an ML problem. The second sentence already tells you the task (binary classification), the unit (per active user), the action (retention offer to top decile), and the metric (retained revenue). Spend real time here.</p>
+  </div>
+
+  <h2>4 &middot; The three layers of metrics</h2>
+  <div class="prose">
+    <p>This trips up almost everyone, so be precise. You need three metrics, and they are not the same thing:</p>
+    <ul>
+      <li><strong>Business metric</strong> &mdash; the number the company actually cares about: retention, revenue, gross merchandise value, watch time, support tickets deflected. This is the truth, but it is slow and noisy and you cannot optimize a gradient against it.</li>
+      <li><strong>Model metric</strong> &mdash; the offline number you train and select on: AUC for classification, NDCG for ranking, RMSE for regression. Fast to compute, but only a <em>proxy</em> for the business metric.</li>
+      <li><strong>Online proxy metric</strong> &mdash; a fast live signal that correlates with the business metric but moves in hours not quarters: click-through rate, add-to-cart rate, session length. You watch this during an A/B test because true retention takes weeks.</li>
+    </ul>
+    <p>The senior insight is that these three can disagree, and when they do, the business metric wins. A model with higher NDCG that tanks revenue is a worse model. The interviewer is checking whether you understand that <em>offline metric gains do not automatically mean business wins</em>, which is exactly why you also run an online test (Day 57).</p>
+  </div>
+
+  <table>
+    <tr><th>Layer</th><th>Example</th><th>Speed</th><th>Used for</th></tr>
+    <tr><td><b>Business</b></td><td>Net retained revenue</td><td>Weeks / quarters</td><td>The real goal; the thing you defend the project with.</td></tr>
+    <tr><td><b>Model (offline)</b></td><td>AUC, NDCG, RMSE</td><td>Seconds</td><td>Training, model selection, gating a release.</td></tr>
+    <tr><td><b>Online proxy</b></td><td>CTR, add-to-cart, p95 latency</td><td>Hours</td><td>A/B test guardrails; early read on a live change.</td></tr>
+  </table>
+
+  <h2>5 &middot; When the answer is "no ML"</h2>
+  <div class="prose">
+    <p>A senior candidate is allowed, even expected, to say "we should not start with ML here." Reach for a heuristic or rules first when: the rule is simple and stable ("flag transactions over $10k from a new device"), you have no labels and no cheap way to get them, the cost of a wrong prediction is catastrophic and unexplainable, or the volume is tiny. ML earns its complexity only when the pattern is real, hard to hand-write, and you have (or can get) labeled data at scale. Always propose the <strong>baseline</strong> first: a heuristic or a logistic regression. It sets the bar every fancier model must clear, and half the time it is good enough to ship while you build the rest.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: "make the homepage feed more relevant"</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>Walk the first two stages of the framework on a real ask, the way you would at the whiteboard.</p>
+    <p><strong>Stage 1, objective.</strong> "More relevant feed" is fuzzy. Pin it: this is a <em>ranking</em> task. Unit of prediction = (user, item) pair. We predict P(user engages with item) and sort the feed by it. Business metric: engagement rate plus session length (and a guardrail that we do not tank diversity or long-term retention). Model metric offline: NDCG@10. Online proxy: click-through rate and dwell time.</p>
+    <p><strong>Stage 2, data and labels.</strong> Labels are <em>implicit</em>: a click or a long dwell is a positive, a skip is a (weak) negative. That is cheap and high-volume, which is great, but it is also biased, we only observe feedback on items we chose to show. Note the position bias (top items get more clicks regardless of quality) out loud; the interviewer wants to hear you flag it, because it pollutes both your training labels and your offline eval.</p>
+  </div>
+  <div class="prose">
+    <p>From those two stages alone, the rest of the design is half-decided: ranking task means a candidate-generation plus ranking architecture (Day 58), implicit labels mean you must handle position bias, and "feed" means low latency so you will precompute candidates and rank online (Day 56). The framework does the thinking for you.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Say each answer out loud in full sentences, as if to an interviewer. Then open the solution and compare. The gap is your lesson.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>A PM says "users complain our search is bad, build an ML model to fix it." Before writing a single line, what five clarifying questions reframe this into a designable ML problem?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>(1) What does "bad" mean, low relevance, slow, or no results? That decides whether this is even a model problem. (2) What is the task: are we <em>ranking</em> existing results better, or <em>classifying</em> intent, or doing semantic retrieval? (3) What is the unit, per query-document pair? (4) What labels exist, do we have click logs (implicit) or human relevance judgments (explicit)? (5) What is the business metric, search success rate, conversion, or query reformulation rate, and what is the online proxy we can watch in hours? Naming these reframes "fix search" into a ranking task with implicit labels, an NDCG offline metric, and a CTR proxy, which is now a thing you can design.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>Your new ranking model improves offline NDCG@10 from 0.41 to 0.47, a clear win. You ship it and three weeks later revenue is flat and session length dropped 2%. The model metric went up and the business metric went down. Name three concrete reasons this happens and what you do.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>This is the core "metrics disagree" lesson. Reasons: (1) <em>Proxy mismatch</em>, NDCG rewards putting clicked items on top, but optimizing for clicks can surface clickbait that hurts long-term engagement, the offline metric is not aligned with the business goal. (2) <em>Offline eval bias</em>, your test set was built from logs the <em>old</em> model generated, so it scores models that mimic the old behavior favorably (selection / feedback bias). (3) <em>Diversity collapse</em>, the new model over-personalizes and shows a narrow set, raising NDCG on seen items but reducing discovery, which lowers session length. What you do: trust the business metric and roll back; then add a diversity guardrail metric, fix the offline eval to use unbiased or interleaved data, and re-run as an online A/B (Day 57) rather than trusting offline gains. The lesson the interviewer wants: offline wins are necessary, not sufficient.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>You are asked to "detect fraudulent transactions." Argue for starting with a rules baseline instead of jumping to a gradient-boosted model, and say what the baseline buys you even if you do eventually build the model.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>A rules baseline (velocity checks, new-device-plus-high-amount, impossible-travel) ships in days, is fully explainable to compliance, has zero training-data dependency, and catches the obvious fraud immediately, which buys you time and a labeled stream of caught/missed cases to train on. Even after you build the boosted model, the baseline is your <em>floor</em>: any model that cannot beat the rules offline is not worth deploying, and the rules stay as a cheap first-pass filter and a fallback when the model is down. Senior framing: the rules generate labels and set the bar; ML earns its place only by clearly beating that bar on a metric (e.g. recall at a fixed false-positive budget) that reflects the asymmetric cost of fraud.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's Module 9 slice. Drill the one-line keys, then expand each into a 90-second answer with Claude using protocol prompt #2.</p>
+  <ul class="q-list">
+    <li>Walk through the ML system design framework.
+      <div class="a">Key: clarify the ML objective + business metric &rarr; data + labels &rarr; features &rarr; model &rarr; offline eval &rarr; serving (batch/online) &rarr; monitoring + retraining &rarr; feedback loop.</div></li>
+    <li>How is ML system design different from generic system design?
+      <div class="a">Key: same clarify/estimate/sketch/trade-off spine, plus a data+label plan, offline & online eval, a serving choice (latency vs freshness), and a monitoring+retraining loop, because the logic is learned and decays.</div></li>
+    <li>A PM gives you a fuzzy ask ("reduce churn"). How do you turn it into an ML problem?
+      <div class="a">Key: name the task (binary classification), the unit (per active user), the driven action (retention offer to top decile), and the business metric (retained revenue); every later choice falls out of this.</div></li>
+    <li>What is the difference between a business metric, a model metric, and a proxy metric?
+      <div class="a">Key: business = the real goal (retention/revenue, slow); model = the offline training/selection metric (AUC/NDCG, fast proxy); online proxy = a fast live signal (CTR) watched during A/B; when they disagree, business wins.</div></li>
+    <li>When would you recommend NOT using ML?
+      <div class="a">Key: simple stable rule, no labels and no cheap way to get them, catastrophic+unexplainable error cost, or tiny volume; always propose a heuristic/baseline first to set the bar.</div></li>
+    <li>Why is offline metric improvement not enough to ship a model?
+      <div class="a">Key: the model metric is only a proxy; offline test sets carry selection/feedback bias, and the proxy can misalign with the business metric, so you must confirm with an online A/B and guardrails.</div></li>
+    <li>What makes an ML system a "system" rather than just a model?
+      <div class="a">Key: the feedback loop, serving, monitoring, and retraining stages; predictions shape future data, so it must be operated as a living component with a half-life, not called once.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (15&ndash;20 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Pick one product ask you have actually seen ("recommend the next track", "auto-tag support tickets", "flag risky payments"). Open a blank doc and write the eight framework stages as headings. Fill stage 1 in full: task type, unit of prediction, business metric, model metric, online proxy, and the cost of each kind of error. Then ask Claude (see <a href="../../tools.html">Tools &amp; Claude</a>) to play a senior interviewer and poke holes in your stage 1 only, using a prompt like <em>"You are an ML staff engineer. Here is my problem framing. Ask me three sharp clarifying questions a real interviewer would ask before accepting it."</em> Iterate until the framing survives the questions. You will reuse this doc in the Day 58 lab.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>The "metrics disagree" lesson is not abstract for you. On MaiQ you did not pick a retrieval change because a single accuracy number went up, you built an <strong>LLM-as-judge evaluation framework</strong> and ran <strong>11+ retrieval and chunking experiments</strong> specifically to measure a <em>trade-off</em>: you cut inference cost 37% while accepting only a 2% retrieval-quality drop. That is exactly stage 5 plus stage 1 thinking, you defined the metric that mattered (cost against a quality floor), measured candidates against it, and chose on the business trade-off rather than a vanity score. When an interviewer asks you to "design an ML system," lead with that instinct: pin the objective and the metric first, then measure everything against it.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>ML system design is generic system design plus four things: learned logic you can only measure, data as a first-class dependency, decay over time, and a metric you optimize instead of one right answer. The framework is eight stages, objective, data, features, model, offline eval, serving, monitoring/retraining, feedback loop, and you narrate it in order. Stage 1 is the whole interview: convert the fuzzy ask into a precise task, unit, and metric, and every later choice falls out. Keep three metrics straight, business, model, proxy, and when they disagree the business metric wins. And know when to say "no ML, ship a baseline first."</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d54">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: features are the heart of ML systems, and the feature store that keeps train and serve honest.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="../m08-system-design-fundamentals/d53-sd-fundamentals-lab.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 53 &middot; System design fundamentals lab</div></a>
+    <a data-nav="next" class="next" href="d55-feature-stores-pipelines.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 55 &middot; Feature stores &amp; training pipelines</div></a>
+  </div>
+
+  <div class="foot">Module 9 &middot; ML System Design &middot; Day 54 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

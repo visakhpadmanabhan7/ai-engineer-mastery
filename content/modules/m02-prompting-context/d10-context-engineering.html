@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 10 · Context engineering</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 2 &middot; Prompting &amp; Context</span>
+    <span class="pill">Day 10</span>
+    <span class="pill">60 min</span>
+    <span class="diff" title="Difficulty: intermediate"><i class="on"></i><i class="on"></i><i></i></span>
+  </div>
+
+  <h1>Context engineering</h1>
+  <p class="lede">Prompt engineering writes the contract once. Context engineering decides, on every single turn, what information to place in the window, in what order, and at what cost. This is the discipline that separates a clever demo from a production system, and most production failures are context failures, not model failures.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Draw the line between prompt engineering (static contract) and context engineering (dynamic supply chain).</li>
+      <li>Name everything that can go in the context window and decide its order.</li>
+      <li>Balance the three competing sources: retrieval, conversation history, and tool results.</li>
+      <li>Apply compression and summarization to stay within budget without losing signal.</li>
+      <li>Decide where a rule belongs: system prompt, tool, few-shot, metadata, or retrieval.</li>
+    </ul>
+  </div>
+
+  <h2>Prompt engineering vs context engineering</h2>
+  <div class="prose">
+    <p>Hold the distinction precisely, because it is the most common interview question in this module:</p>
+    <ul>
+      <li><strong>Prompt engineering</strong> is designing the <em>static contract</em>: the system message, the persona, the output format, the constraints, the few-shot examples. You write it once and it governs every turn. That was Days 7 to 9.</li>
+      <li><strong>Context engineering</strong> is assembling, <em>per turn, at runtime</em>, the full set of tokens the model sees: the static contract <em>plus</em> the retrieved passages, the relevant conversation history, the results of tools the model just called, and any metadata, all selected, ordered, and trimmed to fit the budget.</li>
+    </ul>
+    <p>The prompt is the recipe; the context is the actual ingredients delivered fresh for this specific request. A flawless recipe fails if you hand the cook the wrong ingredients, stale ones, or too many to fit on the counter. That is why the field's hard-won lesson is blunt.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Concept</span>
+    <p>The context window is the model's entire world for one call. It has no memory beyond it and no access to anything you did not put in it. So engineering an LLM application is mostly engineering its context: deciding what enters the window, in what order, and what gets dropped to make room. Get that right and a mid-tier model shines; get it wrong and the best model on earth answers the wrong question.</p>
+  </div>
+
+  <h2>What goes in the window, and in what order</h2>
+  <div class="prose">
+    <p>A production context is assembled from layered parts. A typical, sensible order, top to bottom of the window:</p>
+  </div>
+
+  <div class="diagram">  ┌──────────────────────────── CONTEXT WINDOW (one call) ─────────────────────────────┐
+  │  1. SYSTEM / contract        persona, rules, output format        ← stable, written once │
+  │  2. TOOL definitions         names + schemas + when-to-use         ← stable per app       │
+  │  3. FEW-SHOT examples        2-5 demos pinning format/edge cases   ← stable               │
+  │  ─────────────────────────────────────────────────────────────────────────────────────  │
+  │  4. RETRIEVED knowledge      top-k chunks for THIS query           ← dynamic (RAG, Mod 3) │
+  │  5. CONVERSATION history     prior turns (often summarized/pruned) ← dynamic              │
+  │  6. TOOL results             outputs of tools the model just ran   ← dynamic              │
+  │  7. CURRENT user message      the actual request + its inputs       ← dynamic, LAST        │
+  └────────────────────────────────────────────────────────────────────────────────────────┘
+   Order matters: stable instructions first (cacheable + governing), the live request last.</div>
+
+  <div class="prose">
+    <p>Two ordering principles do real work here:</p>
+    <ul>
+      <li><strong>Stable first, volatile last.</strong> Putting the unchanging contract and tool definitions at the top makes them cacheable (Module 7's prompt caching pays off exactly when the prefix is stable) and keeps the governing instructions in the authoritative position. The fresh, per-request content goes at the bottom, closest to where generation begins.</li>
+      <li><strong>Mind the middle.</strong> Models attend most reliably to the beginning and the end of a long context and can under-weight material buried in the middle (the "lost in the middle" effect). So the most important retrieved passage should not be the seventh of twelve chunks, it should sit where the model actually reads it. Retrieve less and rank better rather than dumping everything in.</li>
+    </ul>
+  </div>
+
+  <h2>The three competing supplies: retrieval, history, tool results</h2>
+  <div class="prose">
+    <p>The window is finite, and three dynamic sources all want space in it. Context engineering is largely the art of arbitrating among them:</p>
+    <ul>
+      <li><strong>Retrieval</strong> brings in external, current, authoritative knowledge the model lacks (Module 3). The risk is volume: retrieve too much and you crowd out everything else and trigger the lost-in-the-middle problem.</li>
+      <li><strong>Conversation history</strong> keeps the exchange coherent (the model only "remembers" what is in the window). The risk is unbounded growth: a long chat eventually fills the budget with old turns that are no longer relevant.</li>
+      <li><strong>Tool results</strong> inject live data the model just fetched (an API response, a database row, a search result). The risk is bloat: a raw JSON blob from an API can be enormous and mostly irrelevant.</li>
+    </ul>
+    <p>When they collide, you do not get to keep all three at full size. The senior skill is deciding, per turn, the right slice of each: how many chunks, how much history, which fields of the tool result. Get the allocation wrong and a relevant fact gets squeezed out, which is, again, a context failure that looks like the model "not knowing" something it was never shown.</p>
+  </div>
+
+  <h2>Compression: fitting more signal in fewer tokens</h2>
+  <div class="prose">
+    <p>When the natural context exceeds the budget (or you simply want it leaner for cost and latency), you compress rather than truncate blindly:</p>
+    <ul>
+      <li><strong>Summarize history.</strong> Replace the oldest N turns with a short running summary of what was decided, keeping recent turns verbatim. The conversation stays coherent at a fraction of the tokens. Refresh the summary as the chat grows.</li>
+      <li><strong>Distill tool results.</strong> Do not paste a 4,000-token API response, extract the handful of fields the model needs and drop the rest before it enters the window.</li>
+      <li><strong>Rank and cut retrieval.</strong> Rerank retrieved chunks and keep only the top few that actually answer the query, rather than the full candidate set (this is reranking, Module 3).</li>
+      <li><strong>Prune, do not amputate.</strong> Blind truncation (chop the last 2,000 tokens) can cut the one passage that mattered. Compress with awareness of what is load-bearing.</li>
+    </ul>
+    <p>Compression is a quality-and-cost lever, not just a fit-it-in trick: a tight, well-ordered context is cheaper, faster, and frequently <em>more</em> accurate than a sprawling one, because the model is not distracted by noise.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"Prompt engineering is the static contract I write once; context engineering is the dynamic, per-turn supply chain that decides what actually enters the window, retrieval, history, tool results, and metadata, in what order, compressed to fit the budget. Most production failures are context failures: the model answered the wrong question because it was handed the wrong, stale, or buried context, not because the model was incapable." That single answer signals senior-level understanding.</p>
+  </div>
+
+  <h2>The rule-placement decision</h2>
+  <div class="prose">
+    <p>A recurring design question is "this rule or piece of information, where does it actually belong?" Putting it in the wrong place is a quiet, common cause of failure. The map:</p>
+  </div>
+
+  <table>
+    <tr><th>What it is</th><th>Where it belongs</th><th>Why</th></tr>
+    <tr><td>Persona, tone, output format</td><td><b>System prompt</b></td><td>Stable contract; the channel the model was aligned to obey.</td></tr>
+    <tr><td>A pattern hard to describe but easy to show</td><td><b>Few-shot examples</b></td><td>Demonstration beats prose for format and edge cases.</td></tr>
+    <tr><td>External data or an action to perform</td><td><b>A tool</b></td><td>Fetch/act at runtime; do not bake stale data into the prompt.</td></tr>
+    <tr><td>Filter by an attribute (date, owner, type)</td><td><b>Metadata filter</b></td><td>A data-layer constraint, faster and exact; do not make the LLM filter.</td></tr>
+    <tr><td>Per-tenant / per-user policy or knowledge</td><td><b>Retrieval</b>, not the prompt</td><td>Scales to many tenants; you cannot hardcode every tenant's rules in one system prompt.</td></tr>
+  </table>
+
+  <div class="prose">
+    <p>That last row is the senior insight interviewers fish for: a multi-tenant policy does not go in the system prompt (it would not scale and would leak across tenants), it is retrieved per tenant from a data store and injected into context for that request only. The general principle: stable behavior is a prompt concern, live or per-entity information is a context concern, and a hard attribute filter is a data-layer concern, never something you ask the model to enforce by good intentions.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: one assistant turn, assembled</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>A user in a long support chat asks: "Does <em>my</em> plan include the audit-log export, and how do I turn it on?" Trace how the context is engineered for this single call.</p>
+  </div>
+  <div class="diagram">  GIVEN: 30-turn history · a docs corpus · a billing API · this is tenant 'acme'
+
+  1. SYSTEM        support persona + format + "answer ONLY from provided context"   (stable, cached)
+  2. TOOLS         get_plan(account_id) schema                                       (stable, cached)
+  3. METADATA      filter retrieval to tenant='acme' AND product='audit'             (data layer)
+  4. RETRIEVAL     top-3 reranked doc chunks on "enable audit-log export"            (dynamic)
+  5. TOOL RESULT   get_plan('acme') → distilled to {tier:'pro', audit_export:true}   (distilled, not raw)
+  6. HISTORY       30 turns → 2-line summary + the last 2 turns verbatim             (compressed)
+  7. USER          "Does my plan include audit-log export, and how do I enable it?"  (last)
+  ───────────────────────────────────────────────────────────────────────────────────────
+  RESULT: grounded answer, "Yes, your Pro plan includes it; enable it under
+          Settings -> Audit -> Export", from the RIGHT plan, the RIGHT docs, in budget.</div>
+  <div class="prose">
+    <p>Notice everything that did <em>not</em> happen. The 30-turn history was not pasted whole (it was summarized). The billing API's full response was not dumped (only two fields survived). Retrieval was scoped to <em>this tenant's</em> audit docs by a metadata filter, not left to the model to figure out, and reranked to three chunks so the answer is not buried. Each decision is a context-engineering choice, and any one of them done wrong, wrong tenant's plan, irrelevant chunks, truncated history, produces a confidently wrong answer that an observer would misdiagnose as "the model hallucinated." It did not. It was fed bad context.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Answer out loud in full sentences, as if to an interviewer. Then open the solution and compare. The gap is your lesson.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>An interviewer asks you to distinguish prompt engineering from context engineering in under 30 seconds, then asks "why does the distinction matter operationally?" Give both.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Prompt engineering is the static contract you author once, system message, persona, format, constraints, examples. Context engineering is the dynamic, per-turn assembly of everything the model actually sees: retrieved chunks, conversation history, tool results, and metadata, selected, ordered, and compressed to fit the budget. Operationally it matters because most production failures are context failures, not prompt or model failures: the contract is fine, but the system retrieved the wrong passage, kept stale history, dumped a raw tool blob, or buried the key fact in the middle. So when an LLM feature misbehaves in production, you debug the context pipeline (what was actually in the window for that request) before you touch the prompt or swap the model. That is where the leverage is.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>A chat assistant works great for short conversations but degrades badly after ~40 turns: it forgets earlier decisions and starts contradicting itself. Diagnose it as a context problem and propose a fix that does not just "use a bigger model".</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>This is unbounded history overflowing the budget. As the conversation grows, either old turns get blindly truncated (so earlier decisions literally leave the window, hence the forgetting) or they crowd out the system contract and retrieval (hence the drift and contradictions). A bigger context window only delays the cliff and costs more, and it does not fix lost-in-the-middle. The real fix is history compression: keep the last few turns verbatim and replace older turns with a maintained running summary of decisions and key facts, refreshed as the chat grows. Optionally promote durable facts ("user is on the Pro plan", "they chose option B") to a structured memory you re-inject deliberately rather than relying on raw transcript. Now coherence is preserved at a fraction of the tokens, and the contract and retrieval keep their space. (Long-term memory designs come in Module 4.)</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>You are building a multi-tenant assistant where each customer has different access rules and different private docs. A teammate proposes encoding every tenant's rules in one large system prompt with "if tenant is X then...". Why is this wrong, and what is the right design?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>It is wrong on three counts. It does not scale (the system prompt grows without bound as tenants are added and burns tokens on every call), it is brittle (the model may apply the wrong tenant's rule or leak one tenant's policy into another's answer), and it puts a hard access constraint in the weakest place, the model's good intentions, instead of the data layer. The right design separates concerns: enforce access and isolation with a <em>metadata filter / per-tenant scoping in code</em> at the data layer so a tenant can only ever retrieve its own documents (never the LLM filtering), and inject that tenant's specific policy and knowledge via <em>retrieval</em> for the current request only. The system prompt holds the stable, tenant-agnostic persona and format. This is the rule-placement table in action: per-entity policy is a context-and-data concern, not a prompt concern.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's Prompting &amp; Context slice and common 2026 screens. Drill the one-line keys, then expand each into a 90-second answer.</p>
+  <ul class="q-list">
+    <li>Prompt engineering vs context engineering?
+      <div class="a">Key: prompt = static contract written once; context = dynamic per-turn supply chain (retrieved chunks, history, tool results, order, compression). Most prod failures are context failures.</div></li>
+    <li>Where should a rule live: system prompt, tool, few-shot, metadata, or retrieval?
+      <div class="a">Key: persona/format &rarr; system; hard-to-describe pattern &rarr; few-shot; external data/action &rarr; tool; filter-by-attribute &rarr; metadata; multi-tenant policy &rarr; retrieval, not prompt.</div></li>
+    <li>Why does the order of content in the context window matter?
+      <div class="a">Key: stable-first is cacheable and governing; models under-weight the middle (lost-in-the-middle), so the key passage must not be buried, request goes last.</div></li>
+    <li>The three dynamic sources compete for the window &mdash; how do you arbitrate?
+      <div class="a">Key: bound each per turn (top-k chunks, summarized history, distilled tool fields); a squeezed-out fact looks like the model "not knowing".</div></li>
+    <li>How do you keep a long conversation in budget without losing coherence?
+      <div class="a">Key: summarize old turns into a running summary, keep recent turns verbatim, promote durable facts to structured memory; do not blind-truncate.</div></li>
+    <li>An LLM feature gives a confidently wrong answer in production &mdash; where do you look first?
+      <div class="a">Key: the context pipeline, what was actually in the window for that request (wrong/stale/buried context), before touching the prompt or the model.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (15&ndash;20 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Read Anthropic's guide on <a href="https://docs.claude.com/en/docs/build-with-claude/context-windows">context windows</a> and the note on <a href="https://docs.claude.com/en/docs/build-with-claude/prompt-caching">prompt caching</a>. Then take a multi-turn chat you can script and implement a tiny context assembler: keep the last 3 turns verbatim, summarize everything older into 2-3 lines, and cap any "tool result" you inject to its essential fields. Log the token count of the assembled context per turn and watch it stay flat as the conversation grows, instead of climbing linearly. That flat line is context engineering working.</p>
+    <p class="muted" style="font-size:13.5px">No API key yet? Do the assembly logic on a saved transcript and compare token counts of "paste everything" vs "summarize + cap". See <a href="../../tools.html">Tools &amp; Claude</a> for access.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>Context engineering is the through-line of your production work on MaiQ. Your hybrid retrieval, BM25 plus dense embeddings fused with reciprocal rank fusion, exists to put the <em>right</em> chunks in the window, and your FastAPI ingestion service writing into pgvector is the supply side of that pipeline. Your 11+ retrieval and chunking experiments that cut inference cost 37% with only a 2% retrieval-quality drop are, precisely, context-engineering optimizations: you found leaner ways to supply the same signal. When an interviewer asks "what is context engineering and have you done it," you can answer the concept in 30 seconds and then ground it: "concretely, I tuned what enters the window, chunking, hybrid retrieval, ranking, and measured the cost-quality trade-off with an LLM-as-judge framework, which is how I cut inference cost without losing answer quality." That is the senior signal this topic is meant to demonstrate.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>Prompt engineering is the static contract; context engineering is the dynamic, per-turn supply chain that decides what actually reaches the window. The window is the model's whole world for one call, so what you put in it, in what order, and what you drop is the core engineering problem. Retrieval, history, and tool results compete for finite space, so bound and compress each, and remember that models under-weight the middle. Rules have a home: stable behavior in the prompt, live or per-tenant information in context and the data layer, never in the model's good intentions. And when something goes confidently wrong in production, look at the context first, because most failures are context failures.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d10">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: the reusable moves &mdash; prompt patterns, anti-patterns, and the first taste of prompt injection.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d09-structured-output.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 9 &middot; Structured output &amp; schemas</div></a>
+    <a data-nav="next" class="next" href="d11-prompt-patterns.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 11 &middot; Patterns &amp; anti-patterns</div></a>
+  </div>
+
+  <div class="foot">Module 2 &middot; Prompting &amp; Context Engineering &middot; Day 10 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 58 · Lab: design a ranking system</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 9 &middot; ML System Design</span>
+    <span class="pill">Day 58</span>
+    <span class="pill">120 min</span>
+    <span class="diff" title="Difficulty: advanced"><i class="on"></i><i class="on"></i><i class="on"></i></span>
+  </div>
+
+  <h1>Lab &mdash; design a ranking system</h1>
+  <p class="lede">Today you put the whole module to work. You will design a recommendation and ranking system end to end, exactly the kind of question asked for feed and e-commerce ranking roles (the trivago, Wolt, and eBay style of interview). Treat this as a 120-minute mock: attempt it yourself first, then check against the worked reference.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Take a ranking prompt from fuzzy ask to a defended architecture in one pass.</li>
+      <li>Explain the candidate generation &rarr; ranking &rarr; re-rank funnel and why it has three stages.</li>
+      <li>Choose features, offline metrics (NDCG), and online metrics (CTR) and keep them aligned.</li>
+      <li>Handle cold start for new users and new items concretely.</li>
+      <li>Serve it (precompute candidates, rank online) and monitor it for drift.</li>
+    </ul>
+  </div>
+
+  <h2>The prompt</h2>
+  <div class="callout example">
+    <span class="label">Interview prompt</span>
+    <p><em>"Design the ranking system for the personalized item feed on an e-commerce homepage. When a user opens the app, we show a scrollable feed of products. We have millions of products and millions of users. Make the feed relevant, fast, and able to handle brand-new users and brand-new products."</em></p>
+    <p>Set a 120-minute timer. Spend the first 45 minutes designing it yourself on paper or a whiteboard, walking the eight-stage framework from Day 54. Then read the reference design below and grade yourself with the checklist at the end. Resist reading ahead, the gap between your design and the reference is the entire value of this lab.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Reference design</h2>
+  <p class="muted">One correct path through the problem. Yours may differ in details, what matters is that you covered every stage and named your trade-offs.</p>
+
+  <h3>Stage 1 &mdash; Objective and metrics</h3>
+  <div class="prose">
+    <p>Pin the fuzzy ask. This is a <strong>ranking</strong> task: order a set of candidate products for a given user. Unit of prediction = (user, item) pair; we predict P(user engages with item) and sort by it. Clarify "engage", here it is a click leading to a meaningful action (add-to-cart or purchase), not a bare click, so we do not optimize for clickbait. Metrics in three layers:</p>
+    <ul>
+      <li><strong>Business:</strong> conversion / gross merchandise value per session, with a guardrail on session length and catalog diversity (do not collapse the feed).</li>
+      <li><strong>Model (offline):</strong> NDCG@10, a graded, position-discounted ranking metric, the right choice because position matters in a feed; also track recall@k for the candidate stage.</li>
+      <li><strong>Online proxy:</strong> click-through rate and add-to-cart rate, watched in an A/B test as a fast read before conversion data matures.</li>
+    </ul>
+  </div>
+
+  <h3>Stage 2 &mdash; Data and labels</h3>
+  <div class="prose">
+    <p>Labels are <strong>implicit</strong> from interaction logs: an add-to-cart or purchase is a strong positive, a click is a weak positive, a shown-but-skipped item is a (noisy) negative. Cheap and high-volume, but biased, you only observe feedback on items you chose to show, and there is <strong>position bias</strong> (top slots get clicks regardless of quality). Flag both out loud: they pollute training labels and any offline eval built from logs, and they are why you will need exploration (Day 57) and an online test, not just offline numbers.</p>
+  </div>
+
+  <h3>Stage 3 &mdash; The three-stage funnel (architecture)</h3>
+  <div class="prose">
+    <p>You cannot score millions of items per user per request, the compute does not fit a latency budget. So ranking systems are a funnel: cheaply cut the catalog down, then spend richer compute on a small set. Three stages:</p>
+  </div>
+
+  <div class="diagram">  millions of items
+        │
+  ┌─────▼──────────────────────────────────────────────────────────┐
+  │ 1. CANDIDATE GENERATION   (recall-oriented, cheap, fast)        │
+  │    millions → ~hundreds                                          │
+  │    · two-tower embeddings → ANN search in vector index          │
+  │    · + collaborative filtering / co-purchase                    │
+  │    · + recency / trending / business-rule sources               │
+  │    goal: get every plausibly-relevant item into the set         │
+  └─────┬──────────────────────────────────────────────────────────┘
+        │  ~500 candidates
+  ┌─────▼──────────────────────────────────────────────────────────┐
+  │ 2. RANKING   (precision-oriented, richer model, more features)  │
+  │    hundreds → ordered list                                       │
+  │    · gradient-boosted trees or a DNN scoring P(engage | u, i)   │
+  │    · full feature set: user, item, context, cross features      │
+  │    goal: order the candidates accurately                        │
+  └─────┬──────────────────────────────────────────────────────────┘
+        │  top ~50, scored
+  ┌─────▼──────────────────────────────────────────────────────────┐
+  │ 3. RE-RANK   (business logic / diversity / freshness)           │
+  │    · de-duplicate, enforce diversity (not 10 of one brand)      │
+  │    · inject business rules (sponsored, in-stock, margin)        │
+  │    · spread categories so the feed feels varied                 │
+  │    goal: a list that is relevant AND healthy for the business   │
+  └─────┬──────────────────────────────────────────────────────────┘
+        │
+   final feed to user</div>
+
+  <div class="prose">
+    <p>Why three stages and not one big model: each stage trades recall for precision at a different cost. Candidate generation is optimized to <em>not miss</em> anything relevant (high recall) cheaply over millions of items. Ranking is optimized to <em>order accurately</em> (high precision) over hundreds, where you can afford a heavier model and more features. Re-rank applies the things a pointwise score cannot express, diversity and business rules that depend on the <em>whole list</em>, not one item. Naming this split, and why, is the core of a strong ranking answer.</p>
+  </div>
+
+  <h3>Stage 4 &mdash; Features (and the feature store)</h3>
+  <div class="prose">
+    <p>Group features so you can speak to them cleanly:</p>
+    <ul>
+      <li><strong>User features:</strong> long-term preferences (category affinities, average order value, embedding from past behavior), demographics where available.</li>
+      <li><strong>Item features:</strong> category, price, brand, lifetime popularity, average rating, item embedding.</li>
+      <li><strong>Context features:</strong> time of day, device, day of week, current session activity.</li>
+      <li><strong>Cross features:</strong> user-category affinity, has-this-user-bought-this-brand, similarity(user embedding, item embedding), these often carry the most signal.</li>
+    </ul>
+    <p>Serve them through a <strong>feature store</strong> (Day 55): slow user/item aggregates from a batch pipeline, session-level signals from a streaming pipeline, and request-specific ones on demand, all behind one definition so training and serving stay consistent (no training-serving skew) and training rows use point-in-time joins (no leakage).</p>
+  </div>
+
+  <h3>Stage 5 &mdash; Offline evaluation</h3>
+  <div class="prose">
+    <p>Use a <strong>temporal split</strong>, train on earlier interactions, evaluate on later ones, never a random split, because a random split lets the model "see the future" and overstates performance. Primary offline metric: <strong>NDCG@10</strong> for the ranker (graded relevance, position-discounted), plus recall@k for the candidate stage (did the relevant items even make it into the candidate set?). Beat the current production model, and the baseline (a non-personalized "most popular" feed), on these before anything ships. Remember from Day 54: an offline win is necessary, not sufficient, position bias in the logged labels means offline NDCG can flatter a model, so confirm online.</p>
+  </div>
+
+  <h3>Stage 6 &mdash; Serving</h3>
+  <div class="prose">
+    <p>This is the hybrid pattern from Day 56. Split the work by what is knowable in advance:</p>
+    <ul>
+      <li><strong>Precompute (batch):</strong> user and item embeddings, the ANN index, and slow features run in offline pipelines on a cadence. Optionally precompute a candidate set per active user overnight for the common case.</li>
+      <li><strong>Online (per request):</strong> fetch the user's candidates (or run ANN live), pull features from the online store, run the ranker, apply re-rank rules, return the feed, all inside a latency budget (e.g. p99 &lt; 150 ms). Decompose that budget: feature fetch and ANN lookup usually dominate, not the ranker's forward pass.</li>
+    </ul>
+    <p>Cache aggressively (a user reopening the app within minutes can get a cached feed), and keep the heavy work in batch so the online path stays thin and fast.</p>
+  </div>
+
+  <h3>Stage 7 &mdash; Cold start</h3>
+  <div class="prose">
+    <p>The prompt explicitly demands this, so address it head-on, it is a favorite follow-up.</p>
+    <ul>
+      <li><strong>New user (no history):</strong> you cannot personalize from behavior yet, so fall back to non-personalized signals, popular/trending items, optionally segmented by anything you do know (geo, device, referral, a quick onboarding preference pick). Personalize fast as the first few interactions arrive (this is also where exploration pays off).</li>
+      <li><strong>New item (no interactions):</strong> it has no collaborative signal, so rely on its <em>content</em> features, category, price, brand, and especially its content-derived embedding, so it can be matched to users via the item-feature path even with zero clicks. Give new items a small exploration boost so they get shown enough to earn real engagement labels, otherwise they are invisible forever (the cold-start half of the feedback-loop problem from Day 57).</li>
+    </ul>
+  </div>
+
+  <h3>Stage 8 &mdash; Monitoring, retraining, and the loop</h3>
+  <div class="prose">
+    <p>Close the loop (Day 57). Monitor <strong>input drift</strong> (are user/item feature distributions shifting?), <strong>prediction drift</strong> (is the score distribution swinging?), and ranking quality against delayed conversion labels, plus guardrails (diversity, session length). Watch the <strong>feedback loop</strong>: a feed recommender will happily collapse toward popular items, so monitor catalog coverage and inject exploration to keep collecting unbiased labels. Retrain on a cadence (interaction data ages fast, so frequent retraining is normal) <em>or</em> on a drift trigger, always into a candidate that must clear the offline gate, then <strong>A/B test</strong> the change: consistent per-user assignment, CTR/add-to-cart plus guardrails, run to significance over full weekly cycles. Shadow first if a regression would be costly.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"A ranking system is a funnel: cheap candidate generation for recall over millions, a richer ranker for precision over hundreds, and a re-rank for diversity and business rules over the whole list. I serve it as mostly-precomputed (embeddings, index, candidates) with a thin online ranking step inside a latency budget, evaluate with NDCG offline and CTR online, handle cold start with popularity plus content features plus exploration, and close the loop with drift monitoring and A/B-gated retraining. The one thing I never skip: offline NDCG gains are confirmed with an online A/B before rollout."</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Self-assessment checklist</h2>
+  <p class="muted">Grade your own 45-minute design. Aim for at least 12 of 15. Every miss is a topic to revisit in this module.</p>
+  <div class="prose">
+    <ul>
+      <li>Did you <strong>reframe</strong> the fuzzy ask into a precise ranking task with a unit of prediction?</li>
+      <li>Did you define <strong>three metric layers</strong> (business, offline NDCG, online CTR) and note that they can disagree?</li>
+      <li>Did you identify labels as <strong>implicit</strong> and flag <strong>position bias</strong> / selection bias?</li>
+      <li>Did you propose the <strong>three-stage funnel</strong> (candidate generation &rarr; ranking &rarr; re-rank) and justify why three?</li>
+      <li>Did candidate generation use a <strong>cheap, recall-oriented</strong> method (embeddings + ANN, collaborative signals)?</li>
+      <li>Did the <strong>ranker</strong> use a richer model and a fuller feature set on the small candidate set?</li>
+      <li>Did <strong>re-rank</strong> handle diversity and business rules that a per-item score cannot?</li>
+      <li>Did you group <strong>features</strong> (user / item / context / cross) and route them through a <strong>feature store</strong>?</li>
+      <li>Did you call out <strong>training-serving skew</strong> and <strong>point-in-time</strong> correctness for the training data?</li>
+      <li>Did you use a <strong>temporal split</strong> for offline eval rather than random?</li>
+      <li>Did you design <strong>serving</strong> as precompute-heavy with a thin online step under a <strong>latency budget</strong>?</li>
+      <li>Did you decompose the latency budget and note <strong>I/O often dominates</strong> the model?</li>
+      <li>Did you handle <strong>cold start</strong> for both new users and new items, including exploration?</li>
+      <li>Did you set up <strong>drift monitoring</strong> and name the <strong>feedback loop</strong> risk (popularity collapse)?</li>
+      <li>Did you gate retraining on eval and <strong>A/B test</strong> the change with guardrails to significance?</li>
+    </ul>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; pressure-test the design</h2>
+  <p class="muted">These are the follow-up questions an interviewer fires after your initial design. Answer out loud, then reveal.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>The interviewer says: "Why not just train one big model that scores all million items per user? Why the funnel?" Defend the funnel on cost and on quality.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>On <strong>cost / latency</strong>: scoring a million items per user per request with a rich model is computationally impossible inside any reasonable latency budget, even a few milliseconds per item is hours of compute per request. The funnel exists so the expensive ranker only ever sees a few hundred candidates, while a cheap recall step (embedding ANN lookup) handles the million-to-hundreds cut in sub-millisecond time. On <strong>quality</strong>: the two stages have different objectives, candidate generation optimizes <em>recall</em> (do not miss anything relevant), ranking optimizes <em>precision</em> (order accurately), and you cannot maximize both with one model at one cost point. Re-rank then handles list-level concerns (diversity, business rules) that no per-item score can express. So the funnel is not a workaround, it is the right decomposition: match compute to the job at each stage. Bonus: it also lets each stage be developed, evaluated, and retrained independently.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>Your offline NDCG@10 improved nicely, but you suspect the gain is partly an artifact. Name two reasons offline ranking metrics over-report, and the single thing that resolves the doubt.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Reason one: <strong>position bias in the labels</strong>, your "positives" are clicks, and items shown at the top got clicked partly because they were on top, so a model that mimics the old model's top picks scores well on logged data without actually being better. Reason two: <strong>selection / feedback bias</strong>, the offline set only contains items the old system chose to show, so you are evaluating on a distribution the old model created, which flatters models that behave like it and is blind to items never surfaced. (A random train/test split makes it even worse by leaking future interactions.) The single thing that resolves it: an <strong>online A/B test</strong> with consistent per-user assignment and guardrail metrics, run to significance, on a small canary first if risky. Live traffic is the unbiased judge; offline NDCG is a necessary gate, not proof. This is the Day 54 "offline wins are necessary, not sufficient" lesson applied to ranking.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>Marketing adds 50,000 new products from a new supplier overnight. With your design, what happens to those products in the feed, and what do you change so they are not invisible for weeks?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>By default they are <strong>cold-start items</strong> with zero interactions, so any collaborative or click-based signal scores them near zero and they almost never surface, and because they never surface they never earn the engagement labels that would let them rank, a self-reinforcing invisibility (the cold-start side of the feedback loop). The fix has two parts. (1) <strong>Content-based cold start</strong>: rank these items through their <em>content</em> features and content-derived embeddings (category, price, brand, description), so they can be matched to interested users immediately without any clicks. (2) <strong>Exploration</strong>: give new items a deliberate boost or reserve a small fraction of feed slots for under-explored items, so they get enough impressions to collect real engagement labels and graduate into the normal ranker. Then monitor catalog coverage to confirm new items are actually being shown. Without exploration, the system optimizes itself into a stale catalog, exactly the loop Day 57 warned about.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Module 9 review &mdash; the questions you must own</h2>
+  <p class="muted">A short consolidation across the module. If any key surprises you, reread that day before moving to Module 10.</p>
+  <ul class="q-list">
+    <li>Walk through the ML system design framework end to end.
+      <div class="a">Key: objective + business metric &rarr; data + labels &rarr; features &rarr; model &rarr; offline eval &rarr; serving (batch/online) &rarr; monitoring + retraining &rarr; feedback loop.</div></li>
+    <li>How does ML system design differ from generic system design?
+      <div class="a">Key: adds learned-and-decaying logic, data as a first-class dependency, an offline+online eval story, a serving choice (latency vs freshness), and a monitoring+retraining loop.</div></li>
+    <li>Design a recommendation / ranking system.
+      <div class="a">Key: candidate generation (cheap recall) &rarr; ranking (richer features, precision) &rarr; re-rank (diversity / business rules); NDCG offline + CTR online; cold start; precompute candidates, rank online.</div></li>
+    <li>What is a feature store and what does it solve?
+      <div class="a">Key: one feature definition feeding consistent offline (training) and online (serving) values; prevents training-serving skew and guarantees point-in-time correctness.</div></li>
+    <li>What is training-serving skew and how do you prevent it?
+      <div class="a">Key: features/transforms differ between train and serve; share one transform definition across both paths and log the served feature vector.</div></li>
+    <li>Batch vs online inference, how do you decide?
+      <div class="a">Key: latency tolerance, freshness, and whether the input is knowable ahead; precompute when enumerable and slight staleness is fine, serve online when per-request or must be fresh.</div></li>
+    <li>How do you monitor an ML model in production?
+      <div class="a">Key: data drift, prediction drift, performance vs delayed labels, business metric; alert and trigger retraining; service uptime is not performance.</div></li>
+    <li>How do you A/B test a model change?
+      <div class="a">Key: consistent per-user assignment, guardrail metrics, run to significance over full cycles; shadow first for risky changes; gate the retrained candidate on eval before deploying.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (extended &mdash; 25 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Build a tiny two-stage ranker to feel the funnel. Take any small interactions dataset (MovieLens is the classic, grab the small version from <a href="https://grouplens.org/datasets/movielens/">grouplens.org/datasets/movielens</a>). (1) <strong>Candidate generation</strong>: compute simple item embeddings (e.g. matrix factorization with <code>scikit-learn</code>'s <code>TruncatedSVD</code> on the user-item matrix) and, for a target user, retrieve the top ~100 nearest items by cosine, that is your candidate set. (2) <strong>Ranking</strong>: train a small gradient-boosted classifier on (user, item) features to score P(interaction) and reorder those 100. (3) <strong>Evaluate</strong>: hold out the user's most recent interactions by time (a temporal split) and compute NDCG@10 on the reranked list versus a popularity baseline. You will have built, in miniature, the exact recall-then-precision funnel from the reference design. Ask Claude (see <a href="../../tools.html">Tools &amp; Claude</a>) to review your temporal split for leakage, that is the bug most people ship.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>The ranking funnel is structurally the same shape as the retrieval you ship every day on MaiQ. Your <strong>hybrid retrieval</strong>, BM25 plus dense embeddings fused with reciprocal rank fusion, is exactly a candidate-generation stage: cheap, recall-oriented, pulling the plausibly-relevant chunks out of a large corpus, with the ANN-style vector lookup running against <strong>pgvector</strong>. The "rank then re-rank for precision" idea maps directly onto how a strong RAG pipeline narrows and orders retrieved context before generation. And your evaluation discipline is the bridge to this module's hardest lesson: you did not trust a single number, you built an <strong>LLM-as-judge framework</strong> and ran <strong>11+ experiments</strong> to measure a quality-versus-cost trade-off (37% cost cut for a 2% quality drop), which is precisely the "offline gains must be measured against the real objective, not assumed" mindset that a ranking interview rewards. When you get the "design a ranking system" prompt, lead with the funnel, then ground the recall stage and the evaluation rigor in what you have actually built.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>A ranking system is a three-stage funnel, candidate generation (cheap, recall) shrinks millions to hundreds, ranking (richer, precision) orders them, and re-rank applies diversity and business rules to the whole list, because no single model can be cheap, precise, and list-aware at once. Feed it through a feature store to kill skew, evaluate with NDCG offline and CTR online while remembering offline wins are not proof, serve it precompute-heavy with a thin online step under a latency budget, handle cold start with content features plus exploration, and close the loop with drift monitoring and A/B-gated retraining. You have now walked the full Module 9 framework on a real problem, the exact muscle a feed or e-commerce ranking interview tests.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d58">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Next module: GenAI system design, starting with a production RAG assistant for company docs.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d57-monitoring-drift.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 57 &middot; Monitoring, drift &amp; retraining</div></a>
+    <a data-nav="next" class="next" href="../m10-genai-system-design/d59-design-rag-assistant.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 59 &middot; Design a RAG assistant</div></a>
+  </div>
+
+  <div class="foot">Module 9 &middot; ML System Design &middot; Day 58 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

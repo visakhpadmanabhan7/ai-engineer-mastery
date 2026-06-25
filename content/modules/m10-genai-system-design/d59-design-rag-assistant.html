@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 59 · Design a production RAG assistant</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 10 &middot; GenAI System Design</span>
+    <span class="pill">Day 59</span>
+    <span class="pill">75 min</span>
+    <span class="diff" title="Difficulty: advanced"><i class="on"></i><i class="on"></i><i class="on"></i></span>
+  </div>
+
+  <h1>Design a production RAG assistant</h1>
+  <p class="lede">This is the flagship GenAI design question and the model answer for the whole module. We take "design a RAG assistant over our company docs" from the opening clarifying question to operations, in the exact order an interviewer wants to hear it. Learn this walkthrough cold and the next four lessons become variations on a theme.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Drive a GenAI design from clarify &rarr; estimate &rarr; architecture &rarr; data model &rarr; deep-dive &rarr; trade-offs &rarr; ops without prompting.</li>
+      <li>Specify an ingestion pipeline: parse, parent-child chunk, embed, index, with incremental updates.</li>
+      <li>Design hybrid retrieval (BM25 + dense, RRF) with a reranker and a non-negotiable tenant filter.</li>
+      <li>Make generation grounded: citations, a citation guardrail, and refusal when context is weak.</li>
+      <li>Attach the eval, observability, and cost story, and recite the 11-point AI-design checklist.</li>
+    </ul>
+  </div>
+
+  <h2>The framework, made GenAI-specific</h2>
+  <div class="prose">
+    <p>Module 8 gave you the generic system-design spine. For a GenAI system the same seven beats apply, but the bottleneck and the failure modes move. In a URL shortener the hard part is keyspace and read scale. In a RAG assistant the hard part is <strong>retrieval quality</strong> and <strong>grounding</strong>: roughly 70 to 75 percent of bad answers are bad retrieval, not bad generation. So when you reach the deep-dive, go deep on retrieval, not on the LLM.</p>
+    <p>Say the structure out loud at the start so the interviewer knows you have a plan: "I will clarify scope and non-functionals, do a back-of-envelope estimate, sketch the high-level architecture, define the data model, deep-dive retrieval since that is where RAG lives or dies, name the trade-offs I am making, then cover eval, observability, and cost." Then execute it.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"A RAG assistant is two systems stitched together: an <strong>offline ingestion pipeline</strong> that turns documents into a searchable index, and an <strong>online query path</strong> that retrieves, reranks, and generates a grounded answer with citations. Most of the engineering risk is in retrieval quality and tenant isolation, not in the model call." Lead with that and you have framed the whole problem correctly.</p>
+  </div>
+
+  <h2>1 &middot; Clarify (functional + non-functional)</h2>
+  <div class="prose">
+    <p>Never start drawing boxes. Spend the first two minutes pinning scope. The questions below are the ones that actually change the design, grouped so you can rattle them off:</p>
+    <ul>
+      <li><strong>Corpus.</strong> How many documents, what formats (PDF, HTML, Confluence, tickets), how fresh must answers be, how often do docs change?</li>
+      <li><strong>Tenancy.</strong> Is this multi-tenant? Per-tenant data isolation is a hard requirement, not a nice-to-have, and it shapes the index design.</li>
+      <li><strong>Access control.</strong> Within a tenant, do users have different document permissions (some docs are HR-only)? That pushes filtering into the data layer.</li>
+      <li><strong>Latency + scale.</strong> Target p95? Expected queries per second at peak? Is streaming required?</li>
+      <li><strong>Quality bar + risk.</strong> Is a wrong answer embarrassing or dangerous? Must every claim be cited? Is a confident-but-unsupported answer worse than "I do not know"?</li>
+    </ul>
+    <p>For this walkthrough assume the answers: ~500k documents across one large org, multi-tenant SaaS, per-document ACLs exist, p95 under 3 seconds with streaming, citations mandatory, and "I do not know" is strongly preferred over a hallucinated answer. Those answers justify every later decision, so state them.</p>
+  </div>
+
+  <h2>2 &middot; Estimate (back of envelope)</h2>
+  <div class="prose">
+    <p>Do the arithmetic out loud. It shows you can size a system and it tells you which datastore survives. Two numbers matter most: <strong>vector count</strong> and <strong>vector storage</strong>.</p>
+  </div>
+  <div class="diagram">  Corpus        500,000 docs  ×  ~8 chunks/doc        ≈  4,000,000 chunks (child)
+  Embedding     1536-dim float32  =  1536 × 4 bytes    ≈  6 KB per vector
+  Vector store  4,000,000 × 6 KB                        ≈  24 GB  (raw, float32)
+                with int8 quantization (~1.5 KB)        ≈  6 GB   (fits in RAM easily)
+
+  Traffic       50 QPS peak  →  retrieval + rerank + 1 LLM call per query
+  LLM tokens    ~4k in (context) + ~400 out per answer
+  Cost/query    @ ~$5 / 1M in, ~$15 / 1M out  ≈  $0.02 + $0.006  ≈  ~$0.026 / query
+                50 QPS sustained ≈ 4.3M queries/day → order ~$100k/day IF uncached
+                → caching + routing is not optional, it is the cost story (step 7)</div>
+  <div class="prose">
+    <p>The headline takeaways you verbalize: at 4M vectors a single Postgres + <code>pgvector</code> instance is comfortably in range (the practical pgvector ceiling is roughly 10M before you reach for a dedicated store), and uncached generation cost is the thing that will get the project killed, so cost controls earn a first-class slot. You just turned vague "it should scale" hand-waving into two decisions.</p>
+  </div>
+
+  <h2>3 &middot; High-level architecture</h2>
+  <div class="prose">
+    <p>Now the picture. Draw it as two lanes: the <strong>offline ingestion</strong> lane that runs when documents change, and the <strong>online query</strong> lane that runs per request. Keep them visually separate, because they scale and fail independently.</p>
+  </div>
+
+  <div class="diagram">  ════════════════════ OFFLINE  (ingestion, runs on doc change) ════════════════════
+
+   sources ──▶ ┌──────────┐   ┌───────────┐   ┌──────────┐   ┌─────────────┐
+   (PDF, HTML, │  PARSE   │──▶│  CHUNK    │──▶│  EMBED   │──▶│  INDEX      │
+    Confluence,│ +clean   │   │ parent-   │   │ (batch)  │   │ pgvector +  │
+    tickets)   │ +OCR     │   │ child     │   │          │   │ BM25 (FTS)  │
+               └──────────┘   └───────────┘   └──────────┘   └─────────────┘
+                    │  metadata: tenant_id, doc_id, acl, source, updated_at, version
+                    ▼            (incremental: hash → only re-embed changed chunks)
+
+  ════════════════════ ONLINE  (query path, per request, p95 < 3s) ══════════════════
+
+   user query
+       │
+       ▼
+   ┌──────────┐   ┌──────────────────────────┐   ┌──────────┐   ┌──────────────┐
+   │ QUERY    │──▶│  RETRIEVE (hybrid)        │──▶│ RERANK   │──▶│ ASSEMBLE     │
+   │ rewrite? │   │  ┌─ BM25  (top 50) ─┐     │   │ cross-   │   │ context:     │
+   │ +tenant  │   │  │                  ├─RRF─┼──▶│ encoder  │   │ top-k parents│
+   │  +acl    │   │  └─ dense (top 50) ─┘     │   │ top 50→8 │   │ + citations  │
+   └──────────┘   │  ★ tenant_id & acl filter │   └──────────┘   └──────┬───────┘
+        ▲         │     applied IN THE QUERY   │                        │
+   cache hit?     └──────────────────────────┘                          ▼
+   (semantic)                                                    ┌──────────────┐
+        │                                                        │  GENERATE    │
+        │   ◀────────────  grounded answer + citations  ────────│  LLM, stream │
+        ▼                                                        │  cite-guard  │
+   ┌──────────────────────────────────────────────────────────┐ └──────┬───────┘
+   │ OBSERVABILITY: span tree (retrieve/rerank/LLM), tokens,    │        │
+   │ cost, latency per span · EVAL sample: faithfulness         │◀───────┘
+   └──────────────────────────────────────────────────────────┘</div>
+
+  <div class="prose">
+    <p>Walk it left to right once: a query arrives, you check the semantic cache, you run hybrid retrieval with the tenant and ACL filter pushed into the query, rerank the union, assemble the top parents into a context with citation markers, generate a streamed grounded answer, run the citation guardrail, and emit a full trace. Everything else is detail hung on this skeleton.</p>
+  </div>
+
+  <h2>4 &middot; Data model</h2>
+  <div class="prose">
+    <p>Two tables carry the system. Keep child chunks (small, good for embedding precision) separate from parents (larger, good context for the LLM). This is the parent-child pattern: <em>index small, return large.</em></p>
+  </div>
+  <pre><code><span class="tok-c">-- parents: the unit you actually feed the LLM (a section / page)</span>
+<span class="tok-k">CREATE TABLE</span> chunk_parent (
+  parent_id   uuid <span class="tok-k">PRIMARY KEY</span>,
+  doc_id      uuid <span class="tok-k">NOT NULL</span>,
+  tenant_id   uuid <span class="tok-k">NOT NULL</span>,        <span class="tok-c">-- isolation key, never optional</span>
+  acl         text[] <span class="tok-k">NOT NULL</span>,      <span class="tok-c">-- groups allowed to see this</span>
+  source_uri  text,                     <span class="tok-c">-- for the citation link</span>
+  title       text,
+  content     text,                     <span class="tok-c">-- full parent text</span>
+  updated_at  timestamptz,
+  version     int
+);
+
+<span class="tok-c">-- children: small, embedded, what retrieval searches over</span>
+<span class="tok-k">CREATE TABLE</span> chunk_child (
+  child_id    uuid <span class="tok-k">PRIMARY KEY</span>,
+  parent_id   uuid <span class="tok-k">REFERENCES</span> chunk_parent(parent_id) <span class="tok-k">ON DELETE CASCADE</span>,
+  tenant_id   uuid <span class="tok-k">NOT NULL</span>,
+  acl         text[] <span class="tok-k">NOT NULL</span>,      <span class="tok-c">-- denormalized for fast filtering</span>
+  content     text,
+  embedding   vector(1536),             <span class="tok-c">-- pgvector column</span>
+  tsv         tsvector                  <span class="tok-c">-- BM25-ish full-text search</span>
+);
+
+<span class="tok-c">-- the two indexes that make retrieval fast</span>
+<span class="tok-k">CREATE INDEX</span> ON chunk_child <span class="tok-k">USING</span> hnsw (embedding vector_cosine_ops);
+<span class="tok-k">CREATE INDEX</span> ON chunk_child <span class="tok-k">USING</span> gin (tsv);
+<span class="tok-k">CREATE INDEX</span> ON chunk_child (tenant_id);   <span class="tok-c">-- filter before/with the ANN scan</span></code></pre>
+  <div class="prose">
+    <p>Notice <code>tenant_id</code> and <code>acl</code> live on the child row even though they duplicate the parent. That denormalization lets the retrieval query filter without a join, which keeps the hot path fast. The cascade delete means removing a document cleans up its children automatically, which matters for the right-to-be-forgotten and re-index cases.</p>
+  </div>
+
+  <h2>5 &middot; Deep-dive: retrieval, because that is where RAG lives or dies</h2>
+  <div class="prose">
+    <p>This is where you spend your time. A senior answer treats retrieval as four sequenced decisions.</p>
+    <p><strong>Chunking.</strong> Parent-child by default. Embed child chunks of roughly 256 to 512 tokens with 10 to 20 percent overlap so the embedding is focused; return the parent so the LLM has enough surrounding context to answer. Fixed-size is cheap but slices through sentences; parent-child gives you precise retrieval and coherent context at once.</p>
+    <p><strong>Hybrid retrieval.</strong> Run BM25 (lexical, owns exact matches like error codes, product names, SKUs) and dense embeddings (semantic, owns paraphrase and synonymy) in parallel, each returning ~50 candidates, then fuse with Reciprocal Rank Fusion. RRF combines by <em>rank</em> not raw score, so you sidestep the score-scale mismatch between a BM25 number and a cosine similarity. Pure dense misses "the exact token the user typed"; pure lexical misses "they asked it a different way." Hybrid covers both.</p>
+  </div>
+  <pre><code><span class="tok-c"># RRF: rank-only fusion, scale-free, ~3 lines of the whole idea</span>
+<span class="tok-k">def</span> <span class="tok-f">rrf</span>(rankings, k=60):
+    scores = {}
+    <span class="tok-k">for</span> ranked_list <span class="tok-k">in</span> rankings:            <span class="tok-c"># [bm25_ids, dense_ids]</span>
+        <span class="tok-k">for</span> rank, doc_id <span class="tok-k">in</span> <span class="tok-f">enumerate</span>(ranked_list):
+            scores[doc_id] = scores.get(doc_id, 0) + 1 / (k + rank)
+    <span class="tok-k">return</span> <span class="tok-f">sorted</span>(scores, key=scores.get, reverse=<span class="tok-k">True</span>)</code></pre>
+  <div class="prose">
+    <p><strong>Reranking.</strong> Hybrid gives you ~50 to 100 candidates with decent recall but mediocre precision at the very top. A cross-encoder reads the (query, chunk) pair <em>jointly</em> and scores true relevance, so you rerank the union down to the 8 you will actually pass to the LLM. This is the single highest-leverage precision lever in RAG and it is cheap because N is small. Bi-encoders scale retrieval (you precompute embeddings); cross-encoders are too slow to run over the whole corpus but perfect for reranking a short list.</p>
+    <p><strong>The tenant + ACL filter is non-negotiable and lives in the query.</strong> You never retrieve broadly and then ask the LLM to ignore other tenants' documents. The filter is a <code>WHERE tenant_id = $1 AND acl &amp;&amp; $user_groups</code> predicate applied inside the retrieval query, so a document the user cannot see is never even a candidate. Isolation is a data-layer guarantee. An LLM-layer "please only use tenant X" instruction is a leak waiting to happen.</p>
+  </div>
+
+  <div class="callout warning">
+    <span class="label">The classic failure</span>
+    <p>Dropping the tenant filter under load (an optimization that "broadens recall") is how cross-tenant leaks happen. Treat the tenant predicate like a foreign-key constraint: it is part of the query's contract, it is tested, and it is never removed for performance. If you must speed up, add a per-tenant namespace or index, do not remove the filter.</p>
+  </div>
+
+  <h2>6 &middot; Grounded generation: citations and the citation guardrail</h2>
+  <div class="prose">
+    <p>Retrieval found the right passages. Generation must now answer <em>only</em> from them and prove it. Three mechanisms:</p>
+    <ul>
+      <li><strong>Numbered context.</strong> Assemble the reranked parents into the prompt with explicit source markers, for example <code>[1]</code>, <code>[2]</code>, each tied to a <code>source_uri</code>. Instruct the model to cite the marker after each claim and to answer only from the provided sources.</li>
+      <li><strong>Refusal when context is weak.</strong> If the top reranker score is below a threshold, or no chunk is relevant, the model should say "I do not have enough information in the documents to answer that." A grounded "I do not know" beats a confident fabrication, which you said in step 1 was the quality bar.</li>
+      <li><strong>Citation guardrail (post-generation check).</strong> After generation, verify the answer's claims are actually supported by the cited chunks. The cheap version checks that every citation marker the model used maps to a real retrieved source; the stronger version runs a fast faithfulness check (an NLI or LLM-as-judge pass) that flags any sentence not entailed by its cited context, and you either strip it or return a low-confidence warning.</li>
+    </ul>
+  </div>
+  <pre><code><span class="tok-c"># context assembly with citation markers (sketch)</span>
+<span class="tok-k">def</span> <span class="tok-f">build_context</span>(reranked):
+    blocks, sources = [], []
+    <span class="tok-k">for</span> i, ch <span class="tok-k">in</span> <span class="tok-f">enumerate</span>(reranked, 1):
+        blocks.append(<span class="tok-s">f"[{i}] {ch.content}"</span>)
+        sources.append({<span class="tok-s">"marker"</span>: i, <span class="tok-s">"uri"</span>: ch.source_uri})
+    system = (<span class="tok-s">"Answer ONLY from the numbered sources. Cite the [n] "</span>
+              <span class="tok-s">"after each claim. If the sources do not contain the "</span>
+              <span class="tok-s">"answer, say you do not know."</span>)
+    <span class="tok-k">return</span> system, <span class="tok-s">"\n\n"</span>.join(blocks), sources</code></pre>
+
+  <h2>7 &middot; Trade-offs (name what you give up)</h2>
+  <div class="prose">
+    <p>Seniors are graded on naming the cost of their choices, not on having a "best" answer. Say these unprompted:</p>
+  </div>
+  <table>
+    <tr><th>Decision</th><th>You gain</th><th>You give up</th></tr>
+    <tr><td>Add a reranker</td><td>Big precision jump at top-k</td><td>~50-200ms latency, an extra model dependency</td></tr>
+    <tr><td>Hybrid over pure dense</td><td>Exact-match recall (codes, names)</td><td>Two indexes to maintain, fusion tuning</td></tr>
+    <tr><td>pgvector over a dedicated store</td><td>Vectors next to relational data + ACLs, one DB, joins are free</td><td>Scaling ceiling ~10M; dedicated stores win past that</td></tr>
+    <tr><td>Parent-child chunking</td><td>Precise retrieval + coherent context</td><td>More moving parts, larger context tokens (cost)</td></tr>
+    <tr><td>Strict refusal threshold</td><td>Fewer hallucinations, higher trust</td><td>More "I do not know", some answerable queries declined</td></tr>
+  </table>
+
+  <h2>8 &middot; Eval, observability, cost (operations)</h2>
+  <div class="prose">
+    <p><strong>Eval.</strong> Two layers. Retrieval: a golden set of (question, ground-truth chunk) pairs scored by recall@k and MRR. Generation: faithfulness (does every claim trace to the context, the metric you trust most), answer relevancy, and contextual precision/recall, scored RAGAS-style by an LLM judge calibrated against human labels. Gate releases on these offline, then ship behind shadow mode and a per-user A/B with a faithfulness floor as a guardrail metric.</p>
+    <p><strong>Observability.</strong> Emit a span tree per request: a retrieval span, a rerank span, and an LLM span, each carrying tokens, cost, and latency, exported over OTLP to LangSmith or Langfuse. Log the prompt version, model, temperature, retrieved doc IDs, and a hashed user/session, never raw PII. On a rolling sample, score live faithfulness so quality regressions surface before users complain.</p>
+    <p><strong>Cost.</strong> From step 2 this is the existential risk, so attack it deliberately: embed once and cache (never re-embed unchanged chunks), prompt-cache the stable system + instruction prefix (Anthropic prompt caching bills cached input at roughly a tenth), semantic-cache near-duplicate queries, route easy queries to a cheaper model, and keep top-k tight. This is exactly the lever set that cuts RAG cost ~30 percent without a quality hit.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: one query end to end</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>User in tenant <code>acme</code> (groups: <code>eng</code>, <code>all</code>) asks: <em>"What is the retry policy for error code E-4021 in the billing service?"</em></p>
+    <p><b>1. Cache.</b> Semantic cache miss (novel query). <b>2. Retrieve.</b> BM25 nails <code>E-4021</code> (exact token, dense alone would have struggled); dense pulls passages about "retry" and "backoff" that never say the code. The query carries <code>WHERE tenant_id='acme' AND acl &amp;&amp; '{eng,all}'</code>, so an HR-only doc that mentions the code is never a candidate. RRF fuses both lists. <b>3. Rerank.</b> A cross-encoder pushes the one paragraph that actually states "E-4021 retries 3x with exponential backoff" to rank 1. <b>4. Assemble.</b> Top 8 parents with markers <code>[1]..[8]</code>. <b>5. Generate.</b> Streamed answer: "E-4021 triggers up to three retries with exponential backoff <code>[3]</code>." <b>6. Guardrail.</b> The cited <code>[3]</code> chunk entails that sentence, so it passes; the trace records 3.9k input tokens, 1 LLM call, 2.1s, and a faithfulness sample of 1.0.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">The 11-point AI-design checklist (recite at the end of any GenAI design)</span>
+    <p>Run this list to prove you covered the surface. It is the checklist behind every Module 10 answer:</p>
+    <p>1. <b>Ingestion</b> (parse, chunk, embed, incremental update) &middot; 2. <b>Retrieval</b> (hybrid + fusion) &middot; 3. <b>Reranking</b> &middot; 4. <b>Tenant / ACL isolation in the data layer</b> &middot; 5. <b>Grounded generation + citations</b> &middot; 6. <b>Guardrails</b> (citation / faithfulness / refusal) &middot; 7. <b>Eval</b> (offline golden set + online A/B) &middot; 8. <b>Observability</b> (span tree, tokens, cost, latency) &middot; 9. <b>Cost controls</b> (caching, routing, top-k) &middot; 10. <b>Latency budget</b> (streaming, parallel retrieval) &middot; 11. <b>Failure handling</b> (provider retry/fallback, empty-retrieval path).</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Answer each out loud as if whiteboarding, then compare. The gap is your lesson.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>Your RAG assistant returns fluent but wrong answers about 20 percent of the time. Before touching the prompt or swapping models, how do you localize whether the problem is retrieval or generation, and what is your first fix?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Split the pipeline and measure each half. Take the failing questions, look at the <em>retrieved context</em> for each: if the correct passage was never retrieved, it is a retrieval problem (most likely, ~70-75 percent of cases); if the right passage was in context but the answer ignored or contradicted it, it is a generation/grounding problem. For retrieval failures, check recall@k on a golden set first, then the usual suspects in order: chunking (are answers split across chunk boundaries?), missing reranker, and top-k too low. The first fix is almost always adding or improving the reranker and verifying chunk boundaries, because that lifts precision at the top where the LLM reads. Only after retrieval is healthy do you tighten the grounding prompt and add the citation guardrail. Fixing generation while retrieval is broken is treating a symptom.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>Product wants the assistant to support 5,000 tenants, each with strict data isolation. A teammate proposes one shared index with a <code>tenant_id</code> field in the prompt so the LLM only uses the right docs. What is wrong, and what do you propose instead?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Putting isolation in the prompt is unsafe: the LLM is non-deterministic and an attacker (or a bad retrieval) can surface another tenant's chunk that the model then summarizes, leaking data across a trust boundary. Isolation must be a <strong>data-layer constraint</strong>. Progression by scale: (1) a mandatory metadata filter, <code>WHERE tenant_id = $1</code>, applied inside the retrieval query so other tenants' rows are never candidates, this covers most cases; (2) per-tenant namespaces / partitions for stronger blast-radius control and faster filtered scans; (3) per-tenant indexes for the largest or most sensitive tenants. The model never decides who sees what; the query does. And the tenant predicate is tested like a constraint and never dropped for performance.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>Finance flags that the assistant's monthly LLM bill is unsustainable. List four levers in priority order and the one quality risk to watch on each.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>In rough priority: (1) <strong>Prompt caching</strong> of the stable system + instruction prefix, biggest lever, billed at roughly a tenth of normal input, risk is almost none if the prefix is genuinely static. (2) <strong>Semantic caching</strong> of near-duplicate queries, big on FAQ-style traffic, risk is serving a stale or wrong answer for personalized or time-sensitive queries, so set a conservative cosine threshold and exclude high-stakes intents. (3) <strong>Model routing</strong>, send easy/short queries to a cheaper model and reserve the strong model for hard ones, risk is mis-routing a hard query, so gate routing on a confidence or complexity signal. (4) <strong>Tighter top-k and smaller context</strong>, fewer tokens per call, risk is dropping a chunk that contained the answer, so validate recall@k stays flat after the cut. You did exactly this kind of measured trimming at MaiQ.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's GenAI System Design slice. Drill the one-line keys, then expand each into a full whiteboard walkthrough using protocol prompt #3.</p>
+  <ul class="q-list">
+    <li>Design a production RAG assistant for company docs.
+      <div class="a">Key: ingestion (parse, parent-child chunk, embed) &rarr; hybrid retrieval + rerank + tenant filters &rarr; grounded generation with citations &rarr; eval (faithfulness) + observability + cost controls; recite the 11-point checklist.</div></li>
+    <li>Walk through your GenAI system-design methodology.
+      <div class="a">Key: clarify (scale, tenancy, latency, risk) &rarr; estimate (vectors, storage, cost/query) &rarr; architecture (offline + online lanes) &rarr; data model &rarr; deep-dive retrieval &rarr; trade-offs &rarr; ops (eval, observability, cost).</div></li>
+    <li>Where do most RAG answers go wrong, and how do you localize it?
+      <div class="a">Key: ~70-75% is retrieval, not generation; inspect retrieved context per failure, measure recall@k, fix chunking / reranker / top-k before touching the prompt.</div></li>
+    <li>How do you enforce multi-tenant isolation in a RAG system?
+      <div class="a">Key: data-layer filter (tenant_id + ACL) inside the query &rarr; namespaces &rarr; per-tenant index; never filter via the prompt, never drop the filter for performance.</div></li>
+    <li>How do you make generation grounded and prove it?
+      <div class="a">Key: numbered context + cite [n] per claim, refuse when top score is weak, post-gen citation/faithfulness guardrail that flags unsupported sentences.</div></li>
+    <li>What capacity numbers do you bring to a RAG design?
+      <div class="a">Key: 1536-dim float32 &asymp; 6 KB/vector (~1.5 KB int8), pgvector comfortable to ~10M vectors, GPT-4-class ~ $5/1M in and ~$15/1M out, aim ~90% cache hit on hot reads.</div></li>
+    <li>How do you cut RAG cost ~30% without losing quality?
+      <div class="a">Key: prompt caching (biggest), semantic cache, model routing, lower top-k, embed once, smaller generator, all validated against a faithfulness/recall floor.</div></li>
+    <li>How do you evaluate a RAG system end to end?
+      <div class="a">Key: retrieval (recall@k, MRR on a golden set) + generation (faithfulness, answer relevancy, contextual precision/recall, LLM-judge) gated offline, then shadow + A/B with a faithfulness guardrail.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (20&ndash;25 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Sketch this design on paper, then make it concrete. Stand up <a href="https://github.com/pgvector/pgvector">pgvector</a> locally, create the two-table schema above, and ingest five of your own PDFs with parent-child chunking. Write one retrieval query that applies a <code>tenant_id</code> filter and does a hybrid BM25 + vector lookup fused by RRF, then pass the top 8 parents to a <a href="https://docs.claude.com/en/docs/build-with-claude/overview">Claude</a> call that answers with <code>[n]</code> citations. Finally, add the cheap citation guardrail: assert every <code>[n]</code> the model emitted maps to a retrieved source, and have the model refuse when nothing relevant comes back. You now have the spine of the model answer running on your laptop.</p>
+    <p class="muted" style="font-size:13.5px">Stretch: add a cross-encoder reranker between fusion and assembly (e.g. a small reranker model) and measure recall@5 before and after on ten hand-written questions.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>This is the design you ship at MaiQ, so answer it from experience, not theory. Your ingestion runs through a FastAPI service that writes into pgvector; your retrieval is hybrid BM25 plus dense embeddings fused with RRF; your evaluation is an LLM-as-judge framework, and your 11+ retrieval and chunking experiments cut inference cost 37 percent with only a 2 percent retrieval-quality drop, which is the cost-control beat of step 8 made real. When the interviewer asks this question, walk the framework, then drop in: "I have built exactly this in production, and the lesson was that disciplined evaluation is what lets you cut cost aggressively without guessing whether quality held." That turns a textbook design into a credibility moment.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>A RAG assistant is an offline ingestion lane plus an online query lane, and the deep-dive always belongs to retrieval because that is where most answers go wrong. Hybrid retrieval plus a reranker gives recall and precision; the tenant and ACL filter lives in the data layer and is never dropped. Grounded generation means numbered citations, refusal on weak context, and a post-generation faithfulness guardrail. Close every GenAI design with the 11-point checklist and the cost story, and you sound like someone who has run one in production. This is the model answer; the next four lessons reuse this exact skeleton.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d59">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: design a multi-tenant agent / skill platform, the system you actually shipped.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="../m09-ml-system-design/d58-ml-sd-lab.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 58 &middot; ML system design lab</div></a>
+    <a data-nav="next" class="next" href="d60-design-agent-platform.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 60 &middot; Design an agent platform (MaiQ-style)</div></a>
+  </div>
+
+  <div class="foot">Module 10 &middot; GenAI System Design &middot; Day 59 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Deploy (free) — AI Engineer Mastery</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<div class="topbar"><div class="inner">
+  <span class="brand"><span class="dot"></span> AI Engineer Mastery</span>
+  <nav class="navlinks">
+    <a href="index.html">Overview</a>
+    <a href="architecture.html">Architecture</a>
+    <a href="deploy.html" class="active">Deploy</a>
+    <a href="https://github.com/visakhpadmanabhan7/ai-engineer-mastery">GitHub</a>
+  </nav>
+</div></div>
+
+<div class="wrap wrap-wide">
+
+  <div class="hero">
+    <div class="eyebrow">Documentation &middot; ship it for $0</div>
+    <h1>Deploy it free</h1>
+    <p class="lede">The recommended free stack is <strong>Render</strong> for the app, <strong>Groq</strong> for the LLM (free tier, no credit card), and <strong>Render Postgres</strong> or <strong>Neon</strong> for the database. Total cost: <strong>$0</strong>.</p>
+    <div class="meta-row" style="margin-top:18px">
+      <span class="pill gold">Render</span>
+      <span class="pill teal">Groq &middot; no card</span>
+      <span class="pill">Render Postgres / Neon</span>
+      <span class="pill violet">$0 total</span>
+    </div>
+    <div class="meta-row" style="margin-top:16px">
+      <a class="btn primary" href="#step1">Get a Groq key &rarr;</a>
+      <a class="btn ghost" href="#envvars">Jump to env vars</a>
+      <a class="btn ghost" href="architecture.html">How it works</a>
+    </div>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Why it just ships</span>
+    <p>The app is self-contained and deploy-ready: the 68 lessons are baked into the image, it honors <code>$PORT</code>, it converts host <code>postgres://</code> URLs to asyncpg automatically, and it falls back to JSON embeddings if a host's Postgres lacks pgvector. <strong>No code changes are needed to go live.</strong></p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>The free stack at a glance</h2>
+  <div class="grid cols-3">
+    <div class="panel">
+      <h4 style="color:var(--gold)">1 &middot; Render</h4>
+      <p class="muted" style="font-size:14.5px">Hosts the Docker web service. A one-click Blueprint reads <code>render.yaml</code> and provisions the service plus a free Postgres. The free plan sleeps after 15 min idle.</p>
+    </div>
+    <div class="panel">
+      <h4 style="color:var(--teal)">2 &middot; Groq</h4>
+      <p class="muted" style="font-size:14.5px">Powers the AI tutor on a free tier with no credit card. Roughly 30 requests/min, plenty for a single learner. Swap in Claude or any OpenAI-compatible host later.</p>
+    </div>
+    <div class="panel">
+      <h4 style="color:var(--violet)">3 &middot; Postgres</h4>
+      <p class="muted" style="font-size:14.5px">Render Postgres (free, ~30-day) for a quick demo, or Neon (free, persistent, pgvector) for longevity. Set <code>DATABASE_URL</code> and you are done.</p>
+    </div>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2 id="step1">Step 1 &mdash; get a free Groq key</h2>
+  <p>Go to <a href="https://console.groq.com">console.groq.com</a>, open <b>API Keys</b>, and click <b>Create</b>. No credit card is required. The free tier allows about 30 requests per minute, which is plenty for one learner.</p>
+  <pre><code><span class="tok-c"># the key looks like this — keep it secret, paste it into the host's dashboard</span>
+GROQ_API_KEY=gsk_...</code></pre>
+
+  <h2 id="step2">Step 2 &mdash; deploy the app on Render</h2>
+  <p>Two paths. <b>Option A</b> is the one-click Blueprint and is the easiest. <b>Option B</b> is the manual Docker web service if you want full control over each setting.</p>
+
+  <h3>Option A &mdash; one-click Blueprint (easiest)</h3>
+  <p>The repo ships a <code>render.yaml</code> that provisions the web service <strong>and</strong> a free Postgres for you, wiring <code>DATABASE_URL</code> in automatically and generating <code>JWT_SECRET</code>.</p>
+  <table>
+    <tr><th>Step</th><th>Action</th></tr>
+    <tr><td><b>1</b></td><td>Push the <code>learning-app/</code> folder to its own GitHub repo.</td></tr>
+    <tr><td><b>2</b></td><td>In the Render dashboard, choose <b>New &rarr; Blueprint</b> and select the repo. Render reads <code>render.yaml</code> and provisions the web service and a free Postgres.</td></tr>
+    <tr><td><b>3</b></td><td>When prompted, paste your <code>GROQ_API_KEY</code> (it is kept out of git via <code>sync: false</code>).</td></tr>
+    <tr><td><b>4</b></td><td>Open the URL Render assigns. Sign in with <b>visakh@local / learn</b>, then create your own account from the login page.</td></tr>
+  </table>
+
+  <div class="callout concept">
+    <span class="label">What the Blueprint sets for you</span>
+    <p>From <code>render.yaml</code>: a Docker web service on the <code>free</code> plan with health check <code>/api/health</code>, a generated <code>JWT_SECRET</code>, <code>LLM_PROVIDER=groq</code>, the tutor and judge models (<code>llama-3.3-70b-versatile</code> / <code>llama-3.1-8b-instant</code>), a free Postgres 16 named <code>mastery-db</code>, and <code>DATABASE_URL</code> bound to that database's connection string. You only supply <code>GROQ_API_KEY</code>.</p>
+  </div>
+
+  <h3>Option B &mdash; manual Docker web service</h3>
+  <ol class="prose" style="font-family:var(--sans)">
+    <li>In Render, choose <b>New &rarr; Web Service</b>, connect the repo, and set <b>Runtime: Docker</b>.</li>
+    <li>Add the environment variables below.</li>
+    <li>Deploy.</li>
+  </ol>
+  <pre><code><span class="tok-c"># minimum env vars for a manual Render web service</span>
+LLM_PROVIDER=groq
+GROQ_API_KEY=gsk_...
+JWT_SECRET=<span class="tok-c"># any 32+ char random string</span>
+DATABASE_URL=<span class="tok-c"># from your database, see Step 3</span></code></pre>
+
+  <div class="callout warning">
+    <span class="label">Free service sleeps</span>
+    <p>The free web service <strong>sleeps after 15 minutes idle</strong>, and the first request after that takes about a minute to wake the container. This is normal for free hosting and does not affect your data.</p>
+  </div>
+
+  <h2 id="step3">Step 3 &mdash; the database</h2>
+  <p>Pick one. Render Postgres is the zero-effort demo option; Neon is the better choice if you want the data to stick around and to use pgvector for semantic features.</p>
+
+  <div class="grid cols-2">
+    <div class="panel">
+      <h4 style="color:var(--gold)">Render Postgres (free)</h4>
+      <p class="muted" style="font-size:14.5px">Provisioned automatically by the Blueprint, so it is the easiest path. Note that the free instance expires roughly 30 days after creation; recreate or upgrade it when it does.</p>
+      <span class="pill">free</span> <span class="pill">~30-day</span> <span class="pill">auto-wired</span>
+    </div>
+    <div class="panel">
+      <h4 style="color:var(--teal)">Neon (free, persistent, pgvector)</h4>
+      <p class="muted" style="font-size:14.5px">Recommended for longevity. Create a project at <a href="https://neon.tech">neon.tech</a>, copy the connection string, and set <code>DATABASE_URL</code> plus <code>PG_SSL=true</code> on Render. Neon supports pgvector, so semantic features light up once you add embeddings.</p>
+      <span class="pill teal">free</span> <span class="pill teal">persistent</span> <span class="pill teal">pgvector</span>
+    </div>
+  </div>
+
+  <pre><code><span class="tok-c"># Neon: set these two on Render</span>
+DATABASE_URL=postgresql+asyncpg://USER:PASSWORD@HOST/dbname
+PG_SSL=true</code></pre>
+
+  <div class="callout warning">
+    <span class="label">Do not use SQLite in production</span>
+    <p>SQLite is <strong>not</strong> suitable on Render or any ephemeral host: the disk is wiped on every deploy and on sleep, so your accounts and progress would reset. SQLite is for zero-config local development only. Use Postgres in production.</p>
+  </div>
+
+  <h2 id="step4">Step 4 &mdash; verify</h2>
+  <p>Open <code>/api/meta</code> on your deployed URL. You should see your lesson and question counts, the SRS engine, and the active LLM provider. Then sign in and try the AI Tutor.</p>
+  <pre><code><span class="tok-c"># GET https://your-app.onrender.com/api/meta</span>
+{
+  <span class="tok-s">"srs_engine"</span>: <span class="tok-s">"FSRS-6"</span>,
+  <span class="tok-s">"lessons"</span>: <span class="tok-n">68</span>,
+  <span class="tok-s">"questions"</span>: <span class="tok-n">110</span>,
+  <span class="tok-s">"ai"</span>: { <span class="tok-s">"provider"</span>: <span class="tok-s">"groq"</span> }
+}</code></pre>
+
+  <h2 id="envvars">Environment variables</h2>
+  <p>Everything the app reads at startup. The Blueprint sets most of these for you; for a manual deploy, supply at least <code>GROQ_API_KEY</code>, <code>JWT_SECRET</code>, and <code>DATABASE_URL</code>.</p>
+  <table>
+    <tr><th>Variable</th><th>Example</th><th>What it does</th></tr>
+    <tr><td><code>LLM_PROVIDER</code></td><td><code>groq</code></td><td>Selects the tutor backend: <code>groq</code>, <code>anthropic</code>, or <code>auto</code> to auto-detect from whichever key is present.</td></tr>
+    <tr><td><code>GROQ_API_KEY</code></td><td><code>gsk_...</code></td><td>Groq key from console.groq.com. Also reused as the key when pointing at an OpenAI-compatible host.</td></tr>
+    <tr><td><code>GROQ_MODEL</code></td><td><code>llama-3.3-70b-versatile</code></td><td>The tutor model used for teaching, deepening, and mock interviews.</td></tr>
+    <tr><td><code>GROQ_JUDGE_MODEL</code></td><td><code>llama-3.1-8b-instant</code></td><td>The smaller, cheaper model used to grade answers (the judge half of the tutor/judge split).</td></tr>
+    <tr><td><code>ANTHROPIC_API_KEY</code></td><td><code>sk-ant-...</code></td><td>Claude key, used when <code>LLM_PROVIDER=anthropic</code> (Opus 4.8 tutor, Haiku judge).</td></tr>
+    <tr><td><code>OPENAI_BASE_URL</code></td><td><code>https://your-host/v1</code></td><td>Points the client at any OpenAI-compatible endpoint (OpenAI, Together, OpenRouter, local Ollama).</td></tr>
+    <tr><td><code>JWT_SECRET</code></td><td>any 32+ char string</td><td>Signs the JWT auth tokens. Keep it secret and stable; the Blueprint generates one.</td></tr>
+    <tr><td><code>DATABASE_URL</code></td><td><code>postgresql+asyncpg://...</code></td><td>The Postgres connection string. Host <code>postgres://</code> URLs are normalized to asyncpg automatically.</td></tr>
+    <tr><td><code>PG_SSL</code></td><td><code>true</code></td><td>Enables SSL on the database connection. Set <code>true</code> for Neon and most managed Postgres hosts.</td></tr>
+  </table>
+
+  <h2>Switching the LLM provider</h2>
+  <p>The tutor is provider-agnostic and degrades gracefully with no key (the rest of the app still works). Bring your own key and set <code>LLM_PROVIDER</code> with the matching variables.</p>
+  <div class="grid cols-3">
+    <div class="panel">
+      <h4 style="color:var(--teal)">Groq (free)</h4>
+      <p class="muted" style="font-size:14.5px">The default for hosting. Set <code>LLM_PROVIDER=groq</code> and <code>GROQ_API_KEY</code>. Uses <code>llama-3.3-70b-versatile</code> as tutor and <code>llama-3.1-8b-instant</code> as judge.</p>
+    </div>
+    <div class="panel">
+      <h4 style="color:var(--violet)">Anthropic (Claude)</h4>
+      <p class="muted" style="font-size:14.5px">Set <code>LLM_PROVIDER=anthropic</code> and <code>ANTHROPIC_API_KEY</code>. Uses Opus 4.8 as tutor and Haiku as judge, the same cost-aware split.</p>
+    </div>
+    <div class="panel">
+      <h4 style="color:var(--gold)">Any OpenAI-compatible</h4>
+      <p class="muted" style="font-size:14.5px">For OpenAI, Together, OpenRouter, or a local Ollama: keep <code>LLM_PROVIDER=groq</code>, set <code>GROQ_API_KEY</code> to that host's key, and point <code>OPENAI_BASE_URL</code> at it.</p>
+    </div>
+  </div>
+  <pre><code><span class="tok-c"># Groq — FREE, no credit card (https://console.groq.com)</span>
+LLM_PROVIDER=groq
+GROQ_API_KEY=gsk_...
+<span class="tok-c"># …or Claude</span>
+LLM_PROVIDER=anthropic
+ANTHROPIC_API_KEY=sk-ant-...
+<span class="tok-c"># …or ANY OpenAI-compatible host (OpenAI, Together, OpenRouter, local Ollama)</span>
+LLM_PROVIDER=groq
+GROQ_API_KEY=&lt;that host's key&gt;
+OPENAI_BASE_URL=https://your-host/v1</code></pre>
+
+  <h2>Alternatives</h2>
+
+  <h3>Fly.io</h3>
+  <p>Generous, but now requires a card on file. Run the interactive login first, then launch (it detects the Dockerfile), set your secrets, attach Postgres, and deploy.</p>
+  <pre><code><span class="tok-c"># run interactive login first</span>
+flyctl auth login
+
+flyctl launch                <span class="tok-c"># detects the Dockerfile</span>
+fly secrets set GROQ_API_KEY=... LLM_PROVIDER=groq JWT_SECRET=...
+fly postgres create
+fly postgres attach
+fly deploy</code></pre>
+
+  <h3>Railway / Northflank</h3>
+  <p>A similar Docker plus Postgres flow. Provision the service from the Dockerfile and set the same environment variables listed above.</p>
+
+  <h3>Local production stack</h3>
+  <p>To run the full stack on your own machine, Docker Compose brings up the API plus Postgres (with pgvector) plus Redis.</p>
+  <pre><code><span class="tok-c"># API + Postgres(pgvector) + Redis on your machine</span>
+GROQ_API_KEY=gsk_... docker compose up --build</code></pre>
+
+  <div class="callout connect">
+    <span class="label">Next step</span>
+    <p>Once it is live, read the <a href="architecture.html">architecture</a> to see how the FastAPI service, the FSRS-6 engine, and the provider-agnostic AI layer fit together, then extend it as the lab for the curriculum.</p>
+  </div>
+
+  <div class="foot">
+    AI Engineer Mastery &middot; <a href="index.html">Overview</a> &middot; <a href="architecture.html">Architecture</a> &middot;
+    <a href="https://github.com/visakhpadmanabhan7/ai-engineer-mastery">GitHub</a> &middot;
+    free stack: Render + Groq + Render Postgres / Neon = $0.
+  </div>
+
+</div>
+</body>
+</html>

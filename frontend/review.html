@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Review — AI Engineer Mastery</title>
+<link rel="stylesheet" href="assets/base.css">
+<link rel="stylesheet" href="assets/app.css">
+</head>
+<body>
+<div class="wrap" id="app">
+  <div class="muted-center" id="loading"><span class="spinner"></span> Loading your review queue…</div>
+</div>
+
+<script src="assets/api.js"></script>
+<script>
+if (!requireAuth()) { /* redirected */ }
+renderNav("review");
+
+let queue = null;   // current queue payload
+let items = [];     // queue.items
+let i = 0;          // current card index
+let reviewed = 0;   // cards graded this visit
+
+async function load() {
+  i = 0;
+  try {
+    const [q, stats] = await Promise.all([getReviewQueue(20), getReviewStats()]);
+    queue = q;
+    items = q.items || [];
+    render(stats);
+  } catch (e) {
+    document.getElementById("app").innerHTML = "Could not load: " + escapeHtml(e.message);
+  }
+}
+
+function header(stats) {
+  return `
+    <div class="hero" style="padding:24px 0 6px">
+      <div class="eyebrow">Spaced repetition</div>
+      <h1 style="font-size:1.9rem">Review</h1>
+      <p class="muted" style="margin:4px 0 0">
+        Scheduling: <b>${escapeHtml(queue.engine || "unknown")}</b>
+        &middot; ${stats.due_now} due now
+        &middot; ${stats.reviewed_today} reviewed today
+        &middot; ${stats.total_cards} total card${stats.total_cards === 1 ? "" : "s"}
+      </p>
+    </div>`;
+}
+
+function render(stats) {
+  const app = document.getElementById("app");
+
+  if (items.length === 0) {
+    app.innerHTML = `
+      ${header(stats)}
+      <div class="panel" style="max-width:680px; margin-top:18px">
+        <p style="margin:0 0 6px">You're all caught up. New cards unlock as you review.</p>
+        <a class="btn" href="index.html">&larr; Back to dashboard</a>
+      </div>`;
+    return;
+  }
+
+  if (i >= items.length) {
+    app.innerHTML = `
+      ${header(stats)}
+      <div class="panel" style="max-width:680px; margin-top:18px">
+        <p style="margin:0 0 6px">Session done &mdash; ${reviewed} reviewed.</p>
+        <div class="lesson-actions">
+          <button class="btn primary" onclick="load()">Review more</button>
+          <a class="btn" href="index.html">&larr; Dashboard</a>
+        </div>
+      </div>`;
+    return;
+  }
+
+  const item = items[i];
+  const topic = escapeHtml(item.question.topic || "General");
+  const prompt = escapeHtml(item.question.prompt || "");
+  const answer = escapeHtml(item.question.answer_key || "");
+
+  app.innerHTML = `
+    ${header(stats)}
+    <div class="flash">
+      <div class="flash-card">
+        <div class="flash-topic">${topic}</div>
+        <div class="flash-q">${prompt}</div>
+
+        <details class="solution" style="margin:6px 0 4px">
+          <summary>Answer out loud, then check</summary>
+          <div class="body">
+            <p class="muted" style="margin:0 0 10px">Say your answer aloud first. Then type it to grade yourself with the AI tutor.</p>
+            <textarea id="recall" placeholder="Type what you said out loud…"
+              style="width:100%; min-height:80px; padding:12px; border-radius:10px; border:1px solid var(--border-2); background:var(--bg-soft); color:var(--text); font:inherit; resize:vertical"></textarea>
+            <div class="lesson-actions" style="margin:10px 0 0">
+              <button class="btn" id="gradeBtn" onclick="gradeRecall()">Grade with AI</button>
+            </div>
+            <div id="gradeOut"></div>
+          </div>
+        </details>
+
+        <button class="btn primary" id="showBtn" onclick="showAnswer()">Show answer</button>
+
+        <div id="answerBox" style="display:none">
+          <div class="flash-a">
+            <span class="lab">Answer key</span>
+            ${answer}
+          </div>
+          <div class="rate-row">
+            <button class="rate again" onclick="rate(1)">Again <small>&lt;10 min</small></button>
+            <button class="rate hard"  onclick="rate(2)">Hard <small>soon</small></button>
+            <button class="rate good"  onclick="rate(3)">Good <small>on track</small></button>
+            <button class="rate easy"  onclick="rate(4)">Easy <small>longer</small></button>
+          </div>
+        </div>
+      </div>
+      <div class="review-progress">Card ${i + 1} of ${items.length}</div>
+    </div>`;
+}
+
+function showAnswer() {
+  const box = document.getElementById("answerBox");
+  const btn = document.getElementById("showBtn");
+  if (box) box.style.display = "";
+  if (btn) btn.style.display = "none";
+}
+
+async function rate(rating) {
+  const item = items[i];
+  const buttons = document.querySelectorAll(".rate");
+  buttons.forEach((b) => (b.disabled = true));
+  try {
+    await gradeCard(item.question.id, rating);
+    reviewed++;
+    i++;
+    if (i >= items.length) {
+      // queue exhausted: reload to pull any newly-due cards, else show summary
+      const fresh = await getReviewQueue(20);
+      if (fresh.items && fresh.items.length) {
+        queue = fresh;
+        items = fresh.items;
+        i = 0;
+      }
+    }
+    const stats = await getReviewStats();
+    render(stats);
+  } catch (e) {
+    toast(e.message);
+    buttons.forEach((b) => (b.disabled = false));
+  }
+}
+
+async function gradeRecall() {
+  const item = items[i];
+  const ta = document.getElementById("recall");
+  const out = document.getElementById("gradeOut");
+  const btn = document.getElementById("gradeBtn");
+  const answer = (ta && ta.value || "").trim();
+  if (!answer) {
+    toast("Type your answer first");
+    return;
+  }
+  btn.disabled = true;
+  out.innerHTML = `<p class="muted" style="margin:12px 0 0"><span class="spinner"></span> Grading…</p>`;
+  try {
+    const g = await tutorGrade(item.question.prompt, answer, { topic: item.question.topic });
+    out.innerHTML = `
+      <div class="grade">
+        <div class="score">${g.score}<small> / 10</small></div>
+        <p>${escapeHtml(g.feedback || "")}</p>
+        ${g.one_fix ? `<p><b>One fix:</b> ${escapeHtml(g.one_fix)}</p>` : ""}
+        ${g.model_answer ? `<p><b>Model answer:</b> ${escapeHtml(g.model_answer)}</p>` : ""}
+      </div>`;
+  } catch (e) {
+    out.innerHTML = "";
+    toast(e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+load();
+</script>
+</body>
+</html>

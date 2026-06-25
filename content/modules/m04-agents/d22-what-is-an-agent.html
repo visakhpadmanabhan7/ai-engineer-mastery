@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 22 · What is an agent, really?</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 4 &middot; Agents &amp; Tool Use</span>
+    <span class="pill">Day 22</span>
+    <span class="pill">50 min</span>
+    <span class="diff" title="Difficulty: foundational"><i class="on"></i><i></i><i></i></span>
+  </div>
+
+  <h1>What is an agent, really?</h1>
+  <p class="lede">"Agent" is the most overloaded word in AI right now. Today you get a definition precise enough to draw on a whiteboard, defend in an interview, and (the senior move) argue against when an agent is the wrong tool.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Define an agent in one sentence and contrast it cleanly with a chain.</li>
+      <li>Place any system on the agent spectrum, from chatbot to autonomous loop.</li>
+      <li>Draw the ReAct loop (Thought, Action, Observation) from memory.</li>
+      <li>Name the four situations where you should <em>not</em> reach for an agent.</li>
+      <li>Explain why "autonomy over control flow" is the line that actually matters.</li>
+    </ul>
+  </div>
+
+  <h2>The one-sentence definition</h2>
+  <div class="prose">
+    <p>An <strong>agent is an LLM that has autonomy over its own control flow</strong>: at each step it decides what to do next, which tool to call, and when it is done, by looping over its own outputs until the task is finished or a budget runs out. The model is not just generating text; it is steering the program.</p>
+    <p>Contrast that with a <strong>chain</strong>: a fixed pipeline that <em>you</em> wired up in advance. "Retrieve, then summarize, then translate" is a chain. The path is decided by the developer, the LLM just fills in each box. The difference is not how smart the model is; it is <em>who decides the next step</em>. In a chain, the code decides. In an agent, the model decides.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"A chain has a control flow the developer fixed at build time; an agent has a control flow the model chooses at run time. The defining property of an agent is autonomy over control flow: it decides the next action and which tool, in a loop, rather than running a path I hard-wired." Say that and the rest of the conversation gets easier.</p>
+  </div>
+
+  <h2>1 &middot; The agent spectrum</h2>
+  <div class="prose">
+    <p>"Agent" is not binary, it is a dial. Most production "AI features" sit lower on this dial than the marketing suggests, and that is usually correct engineering. Here is the spectrum, from least to most autonomy:</p>
+  </div>
+
+  <div class="diagram">  LESS autonomy ───────────────────────────────────────────────►  MORE autonomy
+
+  ┌──────────┐  ┌──────────┐  ┌──────────────┐  ┌────────┐  ┌────────────┐  ┌─────────────┐
+  │ chatbot  │  │ workflow │  │ tool-using   │  │ agent  │  │ multi-agent│  │ autonomous  │
+  │          │  │ / chain  │  │ LLM          │  │ (loop) │  │            │  │ open-ended  │
+  └──────────┘  └──────────┘  └──────────────┘  └────────┘  └────────────┘  └─────────────┘
+   reply to     dev-wired       calls ONE tool    LOOP:        many agents     no fixed goal,
+   one message  fixed steps     when asked, then  decides      coordinate,     sets its own
+   no tools     (you decide     returns (you      tool+step    handoffs        subgoals,
+   no loop      the path)       still decide      itself,      (Day 24)        runs for hours
+                                the loop)         until done
+       └── code decides path ──┘       └────────── model decides path ──────────────┘</div>
+
+  <div class="prose">
+    <p>The single most important boundary on that line is between <strong>tool-using LLM</strong> and <strong>agent</strong>. A tool-using LLM calls a tool when prompted and hands control straight back to your code: one hop, deterministic shape. An agent owns the <em>loop</em>: it can call a tool, read the result, decide it needs another tool, call that, and only stop when it judges the task done. The loop is the agent. Everything to the right (multi-agent, autonomous) is "more loops, more autonomy, more ways to go wrong."</p>
+    <p>A useful litmus test: <em>if you can draw the full execution path as a flowchart before running it, it is a chain or a tool-using LLM. If the path depends on what the model decides mid-run, it is an agent.</em></p>
+  </div>
+
+  <h2>2 &middot; The ReAct loop, the beating heart</h2>
+  <div class="prose">
+    <p>Almost every single agent you will build or read about is some version of <strong>ReAct</strong>: <em>Reason + Act</em>. The model interleaves three moves in a loop: a private <strong>Thought</strong> (reasoning about what to do), an <strong>Action</strong> (a tool call with arguments), and an <strong>Observation</strong> (the tool's result, fed back into context). Then it thinks again. The loop ends when the model emits a final answer instead of another action.</p>
+  </div>
+
+  <div class="diagram">                      ┌─────────────────────────────────────┐
+                      │            AGENT LOOP               │
+                      ▼                                     │
+  user goal ──►  ┌─────────┐                                │
+                 │ THOUGHT │  "I need today's revenue, I'll │
+                 │         │   query the sales DB first."   │
+                 └────┬────┘                                │
+                      ▼                                     │
+                 ┌─────────┐                                │
+                 │ ACTION  │  query_sales(date="today")     │
+                 └────┬────┘                                │
+                      ▼                                     │
+              [ runtime executes the tool ]                 │
+                      ▼                                     │
+                 ┌──────────────┐                           │
+                 │ OBSERVATION  │  → {"revenue": 41200}      │
+                 └──────┬───────┘  (appended to context) ───┘
+                        │
+                        ▼   model decides: enough? ── no ──► loop again
+                        │                            yes
+                        ▼
+                 ┌──────────────┐
+                 │ FINAL ANSWER │  "Revenue today is €41,200."  ■ stop
+                 └──────────────┘</div>
+
+  <div class="prose">
+    <p>Why is ReAct still the default after years of fancier proposals? Because it is <strong>simple and debuggable from the trace</strong>. The full reasoning is right there: every Thought, every tool call, every Observation, in order. When an agent does something dumb, you read the trace and see exactly where it went wrong (usually a bad Thought or a tool returning garbage). It is excellent for tasks needing a handful of tool calls. Its weakness shows up when there are many steps that could run in parallel, which is what pushes you toward Plan-Execute (Day 24).</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Concept</span>
+    <p>The "Observation" step is the part beginners forget. An agent is only useful because the result of an action <em>re-enters its context</em> and changes the next decision. An LLM that calls a tool but never reads the result back is not an agent, it is a one-shot function call. Feedback closing the loop is what makes it agentic.</p>
+  </div>
+
+  <h2>3 &middot; The analogy that makes it click</h2>
+  <div class="prose">
+    <p>Think of an agent as an <strong>intern with API access</strong>. You give the intern a goal ("find out why checkout conversion dropped this week") and a set of tools they are allowed to use (the analytics dashboard, the deploy log, Slack). The intern decides the order: maybe check the deploy log first, see a release went out Tuesday, then pull conversion by day, notice the drop lines up, then post a summary. You did not script those steps. You scoped the goal, handed over the tools, and trusted the loop.</p>
+    <p>The analogy also predicts the failure modes, which is why it is worth keeping: an intern with vague instructions wanders; an intern with a dangerous tool and no oversight can do real damage; an intern who never stops asks the same question forever. Those map exactly to under-specified goals, missing approval gates, and runaway loops. Hold the intern picture and most agent design decisions become common sense.</p>
+  </div>
+
+  <h2>4 &middot; When NOT to use an agent</h2>
+  <div class="prose">
+    <p>This is the section that separates a senior engineer from someone who just read an agent tutorial. Agents are <strong>slower, more expensive, less predictable, and harder to debug</strong> than a chain. You pay all of that for one thing: the ability to handle problems whose steps you cannot enumerate in advance. If you <em>can</em> enumerate the steps, an agent is the wrong tool. Reach for the simplest thing that works, then add autonomy only when a real requirement forces it.</p>
+  </div>
+
+  <div class="callout warning">
+    <span class="label">Do not use an agent when</span>
+    <p><b>The task is deterministic and the steps are known.</b> "Parse this invoice into fields X, Y, Z" is a chain (or a single structured-output call). Wrapping it in an agent adds latency, cost, and a new way to fail, for zero benefit.<br>
+    <b>Latency is tight.</b> An agent loop is several sequential LLM calls plus tool round-trips. If you need a sub-second reply, the loop is dead on arrival; use a single call or a cached path.<br>
+    <b>The whole thing fits in one prompt.</b> If a single well-built prompt (maybe with one tool call) solves it, you do not need a loop. Adding a loop is gold-plating.<br>
+    <b>It is safety-critical or irreversible.</b> Anything that moves money, deletes data, or sends to customers should be a constrained workflow with explicit approval gates, not a model freely choosing actions. Non-determinism plus irreversibility is a bad combination.</p>
+  </div>
+
+  <div class="prose">
+    <p>Flip side, agents <em>earn</em> their cost when: the number and order of steps genuinely depend on intermediate results, the task spans several distinct tool domains, or a human would naturally "figure it out as they go." Triage, research, multi-step data lookups, and open-ended assistants are good fits. "Convert A to B" is not.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: same task, chain vs agent</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>Task: <code>"What was our most-used feature last month, and is it mentioned in the latest release notes?"</code> Watch how the two designs differ.</p>
+  </div>
+  <div class="diagram">  CHAIN (you must know the path):
+    get_feature_usage(month="last") → pick top feature
+        → search_release_notes(feature) → format answer
+    Problem: what if "most-used" needs disambiguation? What if the
+    feature has two names? The fixed path cannot adapt; you'd hard-code
+    every branch yourself.
+
+  AGENT (model chooses the path):
+    Thought:  I need usage data first.
+    Action:   get_feature_usage(month="last")
+    Observ.:  top = "Skill Store", 9,400 invocations
+    Thought:  Now check if it's in the latest release notes.
+    Action:   search_release_notes(query="Skill Store")
+    Observ.:  1 hit, v2.4 notes
+    Thought:  I have both facts.
+    Final:    "Skill Store was most-used (9.4k uses); yes, it's in v2.4."</div>
+  <div class="prose">
+    <p>The agent shines because step two's <em>argument</em> ("Skill Store") was not knowable until step one ran, and the model adapts if usage data comes back ambiguous. But notice the agent did exactly two tool calls in a fixed-looking order, so a sharp reviewer would ask: did this really need an agent, or would a two-step chain have done? Often the honest answer is "a chain", and saying so is the senior signal. Reach for the agent only when the branching is real, not hypothetical.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Answer each out loud in full sentences, as if to an interviewer. Then open the solution and compare. The gap is your lesson.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>A teammate built a "support agent" that takes a ticket, retrieves the relevant doc, and drafts a reply, always in that exact order, every time. Is it an agent? Justify your answer using the definition, and say what it actually is.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>It is <strong>not</strong> an agent, it is a <strong>chain</strong> (or a tool-using LLM if the retrieval is exposed as a tool the model calls). The control flow is fixed by the developer: ticket → retrieve → draft, the same path on every ticket, with no point where the model decides the next step. The defining property of an agent, autonomy over control flow, is absent. Calling it an "agent" is a naming inflation that hides the real (and good) design. The senior reframe: "It is a deterministic chain, which is the right call here because the steps are always the same. If we later needed it to decide whether to escalate, query a second system, or ask a clarifying question based on the ticket, <em>that</em> branching is when it would become a genuine agent."</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>Your PM wants to "make the invoice parser an agent so it is smarter." The parser today takes a PDF and returns five fields with high accuracy. Talk them out of it (or into it) on engineering grounds.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Push back, on grounds, not vibes. Invoice parsing is a <strong>deterministic, scoped task with known output</strong>: it is the textbook case for <em>not</em> using an agent. A single structured-output call (schema-enforced) already does it accurately, cheaply, and predictably. Wrapping it in an agent loop would add multiple sequential LLM calls (higher latency and cost), introduce non-determinism into something that currently has a clean contract, and create new failure modes (the model "deciding" to do something other than extract). "Smarter" is not a requirement; it is a feeling. The right question is "what can the current parser <em>not</em> do that the business needs?" If the answer is "handle invoices that require looking up a vendor in another system, or routing exceptions to a human," <em>that</em> is real branching and would justify a small agent. Absent a concrete capability gap, keep the deterministic parser.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>Draw the ReAct loop from memory and label the three repeating steps. Then explain, in one sentence, what would happen if you removed the Observation step.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>The loop is <strong>Thought → Action → Observation → (back to Thought)</strong>, repeating until the model emits a final answer instead of an action. Thought = the model's private reasoning about what to do next; Action = a tool call with arguments; Observation = the tool's result fed back into the model's context. If you removed the Observation step, the model would call a tool but never see the result, so it could not use the outcome to inform its next decision, collapsing the agent into a sequence of blind, disconnected one-shot calls. Closing the loop with the Observation is exactly what makes it agentic rather than a fixed pipeline.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's Agents module. Drill the one-line keys, then expand each into a 90-second answer with Claude using protocol prompt #2.</p>
+  <ul class="q-list">
+    <li>What is an agent, and how is it different from a chain?
+      <div class="a">Key: agent = LLM has autonomy over control flow (decides next step + tool in a loop); chain = fixed, developer-wired pipeline.</div></li>
+    <li>When should you NOT use an agent?
+      <div class="a">Key: small/scoped/deterministic task, tight latency, expressible in a single prompt, or safety-critical. Knowing when not to is senior signal.</div></li>
+    <li>What is the ReAct loop and why is it still the single-agent default?
+      <div class="a">Key: interleaves Thought → Action → Observation; simple and debuggable from the trace; good for a handful of tool calls.</div></li>
+    <li>Place a chatbot, a RAG pipeline, and a research assistant on the agent spectrum.
+      <div class="a">Key: chatbot = no tools/loop; RAG pipeline = workflow/tool-using (dev-wired path); research assistant = agent (model owns the loop and tool order).</div></li>
+    <li>What single property most cleanly separates "agentic" from "not"?
+      <div class="a">Key: who decides the next step. Code decides → not an agent; the model decides at run time → agent. Autonomy over control flow is the line.</div></li>
+    <li>Why is "the model is very capable" not enough to call something an agent?
+      <div class="a">Key: capability is orthogonal; a brilliant model in a fixed pipeline is still a chain. It is the run-time control over the loop, not intelligence, that defines an agent.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (15&ndash;20 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Using the Anthropic <a href="https://docs.claude.com/en/docs/agents-and-tools/tool-use/overview">tool-use docs</a>, define one tool (e.g. <code>get_weather(city)</code> that returns a hard-coded dict) and give Claude a goal that needs it. Run the call and <strong>print the full message list after each turn</strong>. You will literally see the loop: the model emits a <code>tool_use</code> block (Action), you execute it and append a <code>tool_result</code> (Observation), then the model produces the final text. Now ask a question that needs <em>two</em> tool calls in sequence and watch the loop run twice. You have just built a minimal ReAct agent by hand and seen exactly where the autonomy lives.</p>
+    <p class="muted" style="font-size:13.5px">No API key yet? Trace it on paper: write a goal, decide which tool the model would pick, invent the Observation, and continue until "final answer." See <a href="../../tools.html">Tools &amp; Claude</a> to set up access.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>On MaiQ you shipped the <strong>Skill Store</strong>, where users author, share, and run their own agents directly in chat. That is the perfect interview anecdote for this lesson: you can explain that each user-authored skill is genuinely agentic (the model decides which tools to call and when, looping until the task is done), and that the platform's hard part was giving users that autonomy <em>safely</em>, which is exactly the "when not to let it run free" tension from section four. When asked "what is an agent," answer the definition in 30 seconds, then ground it: "I build a platform where non-engineers compose agents in chat, so I think about the autonomy-over-control-flow boundary every day, including where we deliberately keep things deterministic." That moves you from reciting a definition to having lived it.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>An agent is an LLM with autonomy over its control flow: it decides the next step and tool, in a loop, until done. A chain has a path the developer fixed; an agent has a path the model chooses. The spectrum runs chatbot → workflow → tool-using → agent → multi-agent → autonomous, and the agent boundary is "the model owns the loop." ReAct (Thought, Action, Observation) is the default because the trace is readable. The senior skill is knowing when <em>not</em> to use an agent: deterministic, scoped, tight-latency, or safety-critical work should stay a workflow. Think of an agent as an intern with API access, and most design choices fall out naturally.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d22">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: how tool / function calling actually works, and how to write a tool definition the model picks correctly.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="../m03-rag-retrieval/d21-rag-lab.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 21 &middot; RAG lab</div></a>
+    <a data-nav="next" class="next" href="d23-tool-calling.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 23 &middot; Tool / function calling</div></a>
+  </div>
+
+  <div class="foot">Module 4 &middot; Agents &amp; Tool Use &middot; Day 22 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

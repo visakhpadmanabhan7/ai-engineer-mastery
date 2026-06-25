@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Engineer Mastery — Documentation</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<div class="topbar"><div class="inner">
+  <span class="brand"><span class="dot"></span> AI Engineer Mastery</span>
+  <nav class="navlinks">
+    <a href="index.html" class="active">Overview</a>
+    <a href="architecture.html">Architecture</a>
+    <a href="deploy.html">Deploy</a>
+    <a href="https://github.com/visakhpadmanabhan7/ai-engineer-mastery">GitHub</a>
+  </nav>
+</div></div>
+
+<div class="wrap wrap-wide">
+
+  <div class="hero">
+    <div class="eyebrow">Documentation &middot; full-stack learning platform</div>
+    <h1>AI Engineer Mastery</h1>
+    <p class="lede">A production-shaped web app that turns a 68-lesson AI-engineering and system-design curriculum into a real product: accounts, a database, a spaced-repetition engine, weak-area analytics, and an in-app AI tutor that runs on <strong>any LLM provider you plug in</strong>. Built on the exact stack it teaches, so running and extending it <em>is</em> the lab.</p>
+    <div class="meta-row" style="margin-top:18px">
+      <span class="pill gold">FastAPI + async SQLAlchemy</span>
+      <span class="pill">Postgres / pgvector</span>
+      <span class="pill">FSRS-6</span>
+      <span class="pill teal">Groq / Claude / OpenAI-compatible</span>
+      <span class="pill">Docker</span>
+    </div>
+    <div class="meta-row" style="margin-top:16px">
+      <a class="btn primary" href="architecture.html">How it works &rarr;</a>
+      <a class="btn ghost" href="deploy.html">Deploy it free</a>
+      <a class="btn ghost" href="http://localhost:8000">Open the app (when running)</a>
+    </div>
+  </div>
+
+  <div class="callout connect">
+    <span class="label">Provenance</span>
+    <p>This app was extracted from Visakh Padmanabhan's resume-tailoring agent (<code>Resume-app</code>). The 68 lessons and the ~110-question interview bank (with answer keys) were authored there as a static study site and are <strong>bundled here in <code>content/</code></strong>, ingested into the database on startup. The repo stands alone.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>What you get</h2>
+  <div class="grid cols-3">
+    <div class="panel"><h4 style="color:var(--gold)">68-lesson curriculum</h4><p class="muted" style="font-size:14.5px">11 modules (LLM foundations &rarr; RAG &rarr; agents &rarr; evaluation &rarr; system design &rarr; interview mastery), rendered in-app with progress and streaks.</p></div>
+    <div class="panel"><h4 style="color:var(--teal)">FSRS-6 spaced repetition</h4><p class="muted" style="font-size:14.5px">The ~110-question bank, with answer keys, scheduled by the 2026 state-of-the-art algorithm. Daily review queue, 4-button grading, per-card memory state.</p></div>
+    <div class="panel"><h4 style="color:var(--violet)">AI tutor</h4><p class="muted" style="font-size:14.5px">Streamed Socratic teaching, scored mock interviews, and structured answer grading (score + the one fix + a model answer). Uses your notes as context.</p></div>
+    <div class="panel"><h4 style="color:var(--amber)">Active recall</h4><p class="muted" style="font-size:14.5px">On any card, type your answer first and let the AI grade it before you reveal the key.</p></div>
+    <div class="panel"><h4 style="color:var(--blue)">Analytics</h4><p class="muted" style="font-size:14.5px">Weak-area detection from graded attempts, strongest topics, a 30-day activity heatmap, streaks.</p></div>
+    <div class="panel"><h4 style="color:var(--green)">Runs anywhere</h4><p class="muted" style="font-size:14.5px">SQLite for zero-config local; Postgres + pgvector for production. Self-contained, $PORT-aware, deploys free.</p></div>
+  </div>
+
+  <h2>Bring your own key — any provider</h2>
+  <div class="callout key">
+    <span class="label">Pick one in backend/.env</span>
+    <p>The tutor is provider-agnostic and degrades gracefully with no key (the rest of the app still works).</p>
+  </div>
+  <pre><code><span class="tok-c"># Groq — FREE, no credit card (https://console.groq.com)</span>
+LLM_PROVIDER=groq
+GROQ_API_KEY=gsk_...
+<span class="tok-c"># …or Claude</span>
+LLM_PROVIDER=anthropic
+ANTHROPIC_API_KEY=sk-ant-...
+<span class="tok-c"># …or ANY OpenAI-compatible host (OpenAI, Together, OpenRouter, local Ollama)</span>
+LLM_PROVIDER=groq
+GROQ_API_KEY=&lt;that host's key&gt;
+OPENAI_BASE_URL=https://your-host/v1</code></pre>
+
+  <h2>Architecture at a glance</h2>
+  <div class="diagram">  Browser (vanilla JS, no build)  ──JSON / streamed──▶  FastAPI (async)
+   dashboard · review · tutor · mock                     │
+                                                          ├─▶  DB: Postgres+pgvector (SQLite local)
+                                  services: ai · srs(FSRS-6) · ingest · activity
+                                                          └─▶  LLM: Groq / Claude / OpenAI-compatible
+                                                                (Opus 4.8 or llama-3.3-70b = tutor,
+                                                                 Haiku or llama-3.1-8b = judge)</div>
+  <p><a href="architecture.html">Read the full architecture &rarr;</a></p>
+
+  <h2>Run it in 30 seconds</h2>
+  <pre><code><span class="tok-c"># local, zero external services</span>
+./run.sh
+<span class="tok-c"># open http://localhost:8000 — login: visakh@local / learn</span>
+
+<span class="tok-c"># or the full stack</span>
+GROQ_API_KEY=gsk_... docker compose up --build
+
+<span class="tok-c"># run the smoke test (16 assertions)</span>
+make test</code></pre>
+
+  <h2>The screens</h2>
+  <table>
+    <tr><th>Page</th><th>What it does</th></tr>
+    <tr><td><b>Dashboard</b></td><td>Today's lesson, streak, % complete, due-card count, the full 11-module path with checkboxes.</td></tr>
+    <tr><td><b>Lesson</b></td><td>The rendered lesson, mark-complete, per-lesson notes, and a "deepen" tutor chat.</td></tr>
+    <tr><td><b>Review</b></td><td>FSRS flashcards: question &rarr; reveal key &rarr; Again/Hard/Good/Easy. Optional AI grade of your spoken answer.</td></tr>
+    <tr><td><b>AI Tutor</b></td><td>Streamed chat: ask anything or deepen a concept; suggested prompts; multi-turn.</td></tr>
+    <tr><td><b>Mock</b></td><td>A scored mock interview, one escalating question at a time, with a "Score me" button.</td></tr>
+    <tr><td><b>Analytics</b></td><td>Weakest/strongest topics, 30-day heatmap, streaks.</td></tr>
+  </table>
+
+  <div class="foot">
+    AI Engineer Mastery &middot; <a href="architecture.html">Architecture</a> &middot; <a href="deploy.html">Deploy</a> &middot;
+    <a href="https://github.com/visakhpadmanabhan7/ai-engineer-mastery">GitHub</a> &middot;
+    curriculum + question bank originated in <code>Resume-app/learning-path</code>, bundled here in <code>content/</code>.
+  </div>
+
+</div>
+</body>
+</html>

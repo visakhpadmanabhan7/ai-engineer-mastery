@@ -1,0 +1,44 @@
+# Production-shaped local stack: API + Postgres(pgvector) + Redis.
+#   GROQ_API_KEY=gsk_... docker compose up --build      # free tutor via Groq
+#   ANTHROPIC_API_KEY=sk-ant-... docker compose up --build   # or Claude
+# Then open http://localhost:8000
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: learn
+      POSTGRES_PASSWORD: learn
+      POSTGRES_DB: learning
+    ports: ["5432:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U learn -d learning"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      DATABASE_URL: postgresql+asyncpg://learn:learn@db:5432/learning
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me-in-production-please-32b+}
+      LLM_PROVIDER: ${LLM_PROVIDER:-auto}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_MODEL: ${GROQ_MODEL:-llama-3.3-70b-versatile}
+      GROQ_JUDGE_MODEL: ${GROQ_JUDGE_MODEL:-llama-3.1-8b-instant}
+    ports: ["8000:8000"]
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:

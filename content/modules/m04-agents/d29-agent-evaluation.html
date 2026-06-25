@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 29 · Evaluating agents</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 4 &middot; Agents &amp; Tool Use</span>
+    <span class="pill">Day 29</span>
+    <span class="pill">60 min</span>
+    <span class="diff" title="Difficulty: advanced"><i class="on"></i><i class="on"></i><i class="on"></i></span>
+  </div>
+
+  <h1>Evaluating agents</h1>
+  <p class="lede">Evaluating an agent is harder than evaluating a single completion, because a right answer reached the wrong way is not a success, it is luck that will break under data shift. Today you learn the four eval layers, the τ-bench way of testing an agent against a simulated user and a written policy, the metrics you actually report in production, and how to debug a flaky agent by diffing trajectories.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Name the four agent eval layers and say what each one measures.</li>
+      <li>Explain why "right answer, wrong tool" is a bug rather than a feature.</li>
+      <li>Describe a τ-bench style evaluation: simulated user, real tools, written policy, final-state success.</li>
+      <li>List the production agent metrics worth a dashboard and what each tells you.</li>
+      <li>Debug a flaky agent by replaying and diffing failing vs passing trajectories.</li>
+      <li>Connect agent eval to the broader evaluation discipline of Module 5.</li>
+    </ul>
+  </div>
+
+  <h2>1 &middot; Why agent eval needs more than output scoring</h2>
+  <div class="prose">
+    <p>For a single completion you score the output and you are done. An agent is a <em>process</em>: it chose tools, ordered them, reacted to results, maybe recovered from an error, and was supposed to follow a policy along the way. Two runs can produce the same final answer while one followed the rules and the other got lucky by skipping a required step. If you only score the final answer, you will ship the lucky one and it will fail the moment the inputs shift. So agent eval is layered: you measure the answer <em>and</em> the path.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Concept</span>
+    <p>Evaluating an agent means evaluating a trajectory, not just an output. The final answer tells you <em>whether</em> it succeeded; the trajectory tells you <em>whether you can trust it to keep succeeding</em>. A correct answer on a wrong path is not a pass, it is unmeasured risk.</p>
+  </div>
+
+  <h2>2 &middot; The four eval layers</h2>
+  <div class="prose">
+    <p>Build them in order of effort. The first two are cheap and catch most regressions; the third is the senior layer; the fourth runs in production.</p>
+  </div>
+
+  <div class="diagram">  LAYER                         MEASURES                              TYPICAL METHOD
+  ─────────────────────────────────────────────────────────────────────────────────
+  1. Final-answer correctness   did the end result satisfy the goal?  LLM-as-judge / exact match
+  2. Tool-call accuracy         right tool, right args, each call?    compare vs expected calls
+  3. Trajectory eval            right tools, RIGHT ORDER, recovered,  step-by-step trace check
+                                policy followed? (the whole path)
+  4. Online / safety            real traffic: success, escalation,    live signals + sampled judge
+                                guardrail hits, harmful outputs</div>
+
+  <div class="prose">
+    <ul>
+      <li><strong>Layer 1, final-answer correctness.</strong> Did the end state or response satisfy the user's goal? Use an LLM-as-judge with a rubric for open-ended answers, or exact/programmatic match when there is ground truth. Necessary but not sufficient on its own.</li>
+      <li><strong>Layer 2, tool-call accuracy.</strong> For each step, did the agent pick the correct tool with correct, well-formed arguments? This catches hallucinated tool names, schema-violating args, and "used the wrong tool" mistakes. Cheap and high-signal; start here with layer 1.</li>
+      <li><strong>Layer 3, trajectory eval.</strong> The senior layer. Score the whole path: were the right tools used in the right order, did the agent recover when a step failed, and did it follow the written policy throughout (e.g. "verify shipment before refunding," "never expose another tenant's data")? This is what separates a robust agent from a lucky one.</li>
+      <li><strong>Layer 4, online and safety.</strong> In production you cannot run a golden set on live traffic, so you watch real signals: task success, human escalation rate, guardrail hits, and any harmful or off-policy outputs, with a judge sampling a slice. This catches the real input distribution your offline set never had.</li>
+    </ul>
+  </div>
+
+  <h2>3 &middot; "Right answer, wrong tool" is a bug, not a feature</h2>
+  <div class="prose">
+    <p>This is the line interviewers want to hear you say. If the agent produced the correct answer but used the wrong tool, queried the wrong data source, or skipped a required verification, that is a <strong>bug</strong>. The right answer on a wrong trajectory is luck: it happened to work on this input because the wrong path coincidentally landed somewhere correct, and it will break under the slightest data shift. A refund agent that returns the right amount <em>without</em> checking shipment status passed by accident; change the scenario to one where the item <em>did</em> arrive and the same path refunds incorrectly. Trajectory eval exists precisely to fail these "correct but lucky" runs.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"A right answer on the wrong trajectory is not a feature, it is luck that breaks under data shift. That is exactly why I do not stop at final-answer correctness, I add trajectory eval: right tools, right order, recovered from failures, policy followed. Output eval tells me it worked this time; trajectory eval tells me it will keep working." That answer maps directly onto the Notion bank's "right answer but wrong tool" and "output vs trajectory eval" questions.</p>
+  </div>
+
+  <h2>4 &middot; τ-bench style evaluation</h2>
+  <div class="prose">
+    <p>The hardest part of agent eval is realism: a static prompt-and-expected-answer dataset does not capture a multi-turn task where the agent has to ask for missing information, call real tools, and obey rules. The <strong>τ-bench (tau-bench)</strong> style addresses this with four ingredients:</p>
+    <ul>
+      <li>An <strong>agent under test</strong>, the system you are evaluating.</li>
+      <li>A <strong>simulated user</strong>, another LLM playing a customer with a goal and partial information, so the agent has to converse, clarify, and handle a realistic back-and-forth instead of a single clean prompt.</li>
+      <li><strong>Real tools</strong> against a sandboxed database or API, so tool calls have genuine effects and genuine failure modes.</li>
+      <li>A <strong>written policy</strong>, an explicit set of domain rules (e.g. airline or retail support rules) the agent is required to follow.</li>
+    </ul>
+    <p>The crucial design choice is the success criterion: a run passes when the <strong>final state of the database matches the expected state</strong>, not when the agent's prose looks good. Did the right order actually get cancelled, the correct refund actually posted, and nothing forbidden touched? Checking the world's end state rather than the chat transcript is what makes this a real test of agent behavior, and it also naturally penalizes "right-sounding answer, wrong action."</p>
+  </div>
+
+  <div class="diagram">  ┌─────────────┐   conversation    ┌──────────────────┐
+  │ simulated   │ ◄───────────────► │  agent under test │
+  │ user (LLM)  │   (multi-turn)     └────────┬─────────┘
+  └─────────────┘                             │ real tool calls
+                                              ▼
+                                   ┌────────────────────┐
+                                   │ sandboxed DB / API │  ◄── written policy governs allowed actions
+                                   └────────┬───────────┘
+                                            │
+                          SUCCESS = final DB state == expected state
+                                   (not "the reply reads well")</div>
+
+  <h2>5 &middot; Production agent metrics</h2>
+  <div class="prose">
+    <p>Offline eval gates releases; in production you watch a dashboard. The metrics that earn a place on it:</p>
+  </div>
+
+  <table>
+    <tr><th>Metric</th><th>What it tells you</th></tr>
+    <tr><td><b>Task success rate</b></td><td>The top-line, did the agent accomplish what the user wanted (end-state or judged).</td></tr>
+    <tr><td><b>Policy adherence</b></td><td>Fraction of runs that followed the written rules, the trajectory signal in production.</td></tr>
+    <tr><td><b>Tool-call efficiency</b></td><td>Tool calls (or steps) per task. Rising efficiency cost often means flailing or looping.</td></tr>
+    <tr><td><b>Recovery rate</b></td><td>When a step failed, how often did the agent recover and still succeed (vs giving up or looping).</td></tr>
+    <tr><td><b>p95 step latency</b></td><td>Tail latency per step. Agents multiply steps, so the tail dominates the user-felt wait.</td></tr>
+    <tr><td><b>Cost per task</b></td><td>Total tokens and tool cost per completed task. The number finance and your roadmap care about.</td></tr>
+  </table>
+
+  <div class="prose">
+    <p>Note the shape: task success and policy adherence are <em>quality</em>; tool-call efficiency, recovery rate, p95 step latency, and cost per task are <em>health and economics</em>. A senior dashboard shows both, because an agent that is getting more correct while quietly tripling its cost per task or its p95 latency is not actually improving.</p>
+  </div>
+
+  <h2>6 &middot; Debugging a flaky agent: replay and diff trajectories</h2>
+  <div class="prose">
+    <p>A flaky agent succeeds on a task sometimes and fails other times on similar input. Because the run is non-deterministic, you cannot reason about it from the code, you have to look at what actually happened. This is where the tracing you built on Day 28 pays off: every run is a recorded span tree you can <strong>replay</strong>.</p>
+    <p>The technique is comparative. Collect several <em>failing</em> runs and several <em>passing</em> runs of the same (or near-identical) task, then <strong>diff the trajectories</strong> step by step. The point where they diverge is your bug. Maybe the failing runs all chose a different tool at step 2, or rephrased the query in a way that returned nothing, or skipped a verification the passing runs performed, or entered a loop the passing runs avoided. Diffing turns "it is flaky" into "it fails specifically when it picks tool B at step 2 after an empty search," which is a fixable statement.</p>
+  </div>
+
+  <div class="diagram">  PASSING runs               FAILING runs
+  step1 search(q)  → hits     step1 search(q)  → hits
+  step2 get(id=42) → ok       step2 search(q2) → []        ◄── DIVERGENCE HERE
+  step3 answer     ✔          step3 search(q2) → []   (loop)
+                              step4 give up    ✘
+
+  Diff the traces → the first divergent step is the bug. Replay it in isolation, then fix.</div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"I debug a flaky agent by replaying it, not by re-reading the code, because the behavior is sampled. I pull several failing and several passing traces of the same task and diff the trajectories; the first divergent step is the root cause. That turns 'it is flaky' into a precise, reproducible statement I can fix." That is the senior, evidence-driven answer.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: catching a lucky pass</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>A return-handling agent is evaluated on "the customer wants to return order 5567." Final-answer eval (layer 1) says PASS, the agent produced "Return authorized, $120 refunded," which matches the expected refund. But layer 3 trajectory eval looks at the path and finds the agent <em>never called</em> <code>check_return_window</code>, which the written policy requires (returns only allowed within 30 days). On this particular order the item happened to be within the window, so the answer was correct, by luck. Trajectory eval FAILS the run because the policy step was skipped. That is the whole value of the layer: the output looked perfect, but the agent would refund an out-of-window return on the next input. Had you shipped on layer 1 alone, you would have shipped a policy violation that only surfaces on the inputs your golden set did not contain. Fix: make the verification step mandatory and re-run; confirm via trajectory eval that <code>check_return_window</code> now precedes every refund.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Say each answer out loud in full sentences, as if to an interviewer. Then open the solution and compare. The gap is your lesson.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>Your agent passes 95% on final-answer eval, and the team wants to ship. You push back and ask for trajectory eval first. Justify the push-back concretely, what could a high final-answer score still be hiding?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>A 95% final-answer score only proves the agent reached a correct end state on the eval inputs; it says nothing about <em>how</em>. It can be hiding lucky passes: runs that produced the right answer on a wrong trajectory, skipping a required policy step, querying the wrong data source, or using the wrong tool that happened to land somewhere correct for this input. Those runs are correct by coincidence and break under data shift, which the golden set does not cover. It can also hide policy violations that did not change the answer (exposing data, taking an unauthorized action) and brittle recovery (the agent looped or nearly failed but scraped a pass). Trajectory eval, right tools, right order, recovered, policy followed, fails exactly these "correct but lucky" and "correct but non-compliant" runs, so it is the layer that tells you the 95% will hold in production rather than collapse on the first unusual input. Ship on the trajectory-gated number, not the output-only one.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>Design a τ-bench style evaluation for a support agent that can look up orders, issue refunds, and update addresses, governed by a policy ("verify identity before any account change; refunds only within the return window"). What are the moving parts and what is the pass condition?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Four moving parts. (1) The agent under test, with its three real tools wired to a sandboxed database, so calls have genuine effects and failures. (2) A simulated user, an LLM given a goal and partial info (e.g. "you moved and want your address updated, and you want a refund on order 5567"), so the agent must converse, ask for the missing identity verification, and handle a realistic multi-turn exchange rather than a single clean prompt. (3) The written policy, encoded as the rules the run is graded against: identity must be verified before any account change, refunds only inside the return window. (4) Seeded scenarios with a known correct end state per scenario. The pass condition is that the <em>final database state matches the expected state</em>, the address changed only if identity was verified, the refund posted only if within the window, and nothing forbidden was touched, not that the agent's replies read well. Checking the world's end state, plus a trajectory check that the policy steps actually happened, is what makes this a real behavior test and naturally fails right-sounding answers that took a forbidden or skipped action.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>An agent succeeds on a task about 70% of the time and fails the rest, same kind of input. You have full tracing. Describe your debugging procedure and what a fix might look like.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Because the behavior is sampled, do not re-read the code, replay and diff. Collect several failing traces and several passing traces of the same (or near-identical) task. Walk them step by step and find the first point where the trajectories diverge: that divergent step is the root cause. Typical findings: the failing runs picked a different tool at some step, rephrased the query into one that returned empty, skipped a verification the passing runs performed, or entered a loop (repeated the same tool call) the passing runs avoided. Replay that step in isolation to confirm it reproduces, which converts "it is flaky" into a precise statement like "it fails when it issues a second search after an empty first result and loops." The fix depends on the divergence: if it is a bad/looping query, add loop detection and feed the empty result back so the agent varies its approach (Day 27); if it is wrong tool selection, tighten the tool descriptions or constrain the action space; if it is a skipped policy step, make that step mandatory in the graph. Then re-run the eval and confirm the failing mode no longer appears, ideally adding the reproduced case to the golden set so it cannot regress.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's Agents slice and common 2026 screens. Drill the one-line keys, then expand each into a 90-second answer with Claude.</p>
+  <ul class="q-list">
+    <li>How do you evaluate an agent?
+      <div class="a">Key: four layers, final-answer correctness (LLM-judge) + tool-call accuracy + trajectory eval + online/safety; start with the first two.</div></li>
+    <li>Right answer but wrong tool &mdash; bug or feature?
+      <div class="a">Key: bug; a right answer on a wrong trajectory is luck and breaks under data shift, which is why trajectory eval exists.</div></li>
+    <li>Output eval vs trajectory eval?
+      <div class="a">Key: output scores the final response; trajectory scores the path, right tools, right order, recovered, policy followed.</div></li>
+    <li>What is a τ-bench style evaluation?
+      <div class="a">Key: agent vs simulated user (LLM) + real tools on a sandboxed DB + written policy; success = final DB state matches expected, not "reply reads well."</div></li>
+    <li>What production metrics do you report for an agent?
+      <div class="a">Key: task success, policy adherence, tool-call efficiency, recovery rate, p95 step latency, cost per task, quality plus health/economics.</div></li>
+    <li>How do you debug a flaky agent?
+      <div class="a">Key: replay, do not re-read code; diff failing vs passing trajectories; the first divergent step is the root cause; reproduce, fix, add to golden set.</div></li>
+    <li>What is tool-call accuracy and what does it catch?
+      <div class="a">Key: right tool with correct, well-formed args per step; catches hallucinated tool names and schema-violating arguments, cheap and high-signal.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (15&ndash;25 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Write a tiny tool-call-accuracy eval (layer 2) for a two-tool agent. Define 4 to 5 scripted tasks, each with the <em>expected</em> sequence of (tool name, key args). Run the agent on each, capture its actual tool calls from the trace, and compute two numbers: tool-selection accuracy (did it call the expected tools) and argument validity (did the args parse and match). Print a per-task pass/fail table. Then add a minimal trajectory check on one task: assert that a required tool (e.g. a verification step) appears <em>before</em> the write tool, and watch it correctly fail a run that produced the right answer but skipped the step. See LangSmith's <a href="https://docs.smith.langchain.com/evaluation">evaluation docs</a> and the Anthropic <a href="https://docs.claude.com/en/docs/build-with-claude/tool-use/overview">tool use docs</a> for structured call capture.</p>
+    <p class="muted" style="font-size:13.5px">Stretch: add a layer-1 LLM-as-judge on the final answer and compare its verdict to your trajectory check on a deliberately "right answer, wrong path" task, see the judge pass it while the trajectory check fails it. That contrast is the whole lesson in one run.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>You already built the foundation this lesson rests on: an LLM-as-judge evaluation framework at MaiQ, used to make changes provable rather than assumed. The natural next sentence in an interview is that the same discipline extends from retrieval to agents, you do not trust a tool-using flow because the final answer looked right, any more than you trusted a retrieval change because a few queries seemed better. You measure the path. Tie it together: "I cut inference cost with measured experiments, not intuition, and the same evaluation mindset is exactly what agent eval demands, trajectory and policy adherence, not just the final answer." That positions your judge framework as the seed of agent evaluation without claiming you ran a τ-bench, which you did not, you can describe the method while grounding the credibility in the eval system you genuinely shipped.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>Agent eval is layered because an agent is a process, not a single output: final-answer correctness, tool-call accuracy, trajectory eval, and online/safety. A right answer on a wrong trajectory is a bug, luck that breaks under data shift, which is why trajectory eval (right tools, right order, recovered, policy followed) is the senior layer. τ-bench style tests put the agent against a simulated user with real tools and a written policy, and judge success by the final database state, not the prose. In production you watch task success, policy adherence, tool-call efficiency, recovery rate, p95 step latency, and cost per task. And you debug flakiness by replaying and diffing trajectories. Module 5 takes this evaluation discipline and makes it the whole job.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d29">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: the capstone, you build a real tool-using ReAct agent end to end, with guards and one eval.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d28-agent-reliability.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 28 &middot; Reliability &amp; guardrails</div></a>
+    <a data-nav="next" class="next" href="d30-agents-lab.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 30 &middot; Lab &mdash; a tool-using agent</div></a>
+  </div>
+
+  <div class="foot">Module 4 &middot; Agents &amp; Tool Use &middot; Day 29 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

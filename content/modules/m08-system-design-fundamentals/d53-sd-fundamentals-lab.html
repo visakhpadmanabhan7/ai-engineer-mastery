@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 53 · Lab — design a rate limiter</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 8 &middot; System Design Fundamentals</span>
+    <span class="pill">Day 53</span>
+    <span class="pill">90 min</span>
+    <span class="diff" title="Difficulty: intermediate"><i class="on"></i><i class="on"></i><i></i></span>
+  </div>
+
+  <h1>Lab &mdash; design a rate limiter</h1>
+  <p class="lede">The distributed rate limiter is the classic system design warm-up: small enough to finish in one interview, deep enough to test algorithms, distributed coordination, and failure thinking. Today you drive the full Module 8 methodology end to end on it, and walk away with a reference design and working token-bucket code.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Run the seven-step framework from Day 48 on a concrete problem, start to finish.</li>
+      <li>Choose between token bucket and sliding window and justify it.</li>
+      <li>Explain why the limiter check must be atomic, and implement it as a single Redis operation.</li>
+      <li>Reason about distributed coordination: shared state vs per-node limits and their trade-offs.</li>
+      <li>Decide fail-open vs fail-closed when the limiter's own backing store is down.</li>
+      <li>Sketch a token bucket in Python and read the Lua-style atomic check-and-decrement idea.</li>
+    </ul>
+  </div>
+
+  <div class="callout example">
+    <span class="label">How to run this lab</span>
+    <p>Spend the first 35 minutes attempting the design yourself on a blank page using the seven-heading template from Day 48 (Clarify, Estimate, Architecture, Data model, Deep-dive, Trade-offs, Ops), before reading the reference. Then compare against the worked design below and close the gaps. Finish with the code sketch and the review questions. Resist scrolling to the reference first, the value is in the gap between your design and this one.</p>
+  </div>
+
+  <h2>The prompt</h2>
+  <div class="prose">
+    <p>"Design a rate limiter for our public API. It must cap how many requests a client can make in a time window, work across our fleet of many API servers, add negligible latency, and degrade gracefully if its own infrastructure has problems." That is the whole prompt, deliberately open. Your job is to drive it.</p>
+  </div>
+
+  <h2>Step 1 &middot; Clarify</h2>
+  <div class="prose">
+    <p>Pin scope and the non-functional axes out loud before designing anything.</p>
+    <ul>
+      <li><strong>Granularity:</strong> what is the limit keyed on? Per-user (API key), per-IP, per-endpoint, or a combination? Assume per-API-key, with the ability to also limit per-endpoint (a tier you can layer).</li>
+      <li><strong>The limit:</strong> e.g. 100 requests per minute per key, with a burst allowance. Confirm whether short bursts above the steady rate are acceptable (they usually are).</li>
+      <li><strong>Scope:</strong> distributed across many stateless API servers (from Day 49), so the count cannot live in one server's memory, two servers must share a view of a key's usage.</li>
+      <li><strong>Latency:</strong> the limiter is on the hot path of every request, so its overhead must be ~1ms or less. This pushes the check into a fast in-memory store and forces it to be a single round trip.</li>
+      <li><strong>Behavior on limit:</strong> reject over-limit requests with HTTP 429 and a <code>Retry-After</code> header. Confirm whether to hard-reject or queue (reject is standard for an API limiter).</li>
+      <li><strong>Failure behavior:</strong> if the limiter's backing store is unavailable, do we fail-open (allow traffic, protect availability) or fail-closed (block, protect the backend)? This is a real decision, name it now and resolve it in the trade-offs.</li>
+    </ul>
+  </div>
+
+  <h2>Step 2 &middot; Estimate</h2>
+  <div class="prose">
+    <p>Size it so the storage and throughput choices are grounded. Say the API serves 50,000 requests per second at peak across the fleet, with, say, 1 million distinct active API keys in a window. The limiter must therefore do <strong>~50,000 check-and-update operations per second</strong>, each in about a millisecond, and hold counter state for ~1M keys. Per-key state is tiny (a count and a timestamp, tens of bytes), so 1M keys is on the order of tens of megabytes, trivially in-memory. The throughput number is the binding constraint: 50k ops/s of atomic counter updates is exactly what an in-memory store like Redis is built for, and it tells you a relational database on the hot path would be a mistake.</p>
+  </div>
+
+  <h2>Step 3 &middot; Choose the algorithm</h2>
+  <div class="prose">
+    <p>This is the deep-dive the problem is really about. Several algorithms exist; you should know the trade-offs and pick one with a reason.</p>
+  </div>
+  <table>
+    <tr><th>Algorithm</th><th>How it works</th><th>Trade-off</th></tr>
+    <tr><td><b>Fixed window</b></td><td>Count requests per fixed clock window (e.g. each minute); reset at the boundary.</td><td>Simple and cheap, but allows a <em>2x burst</em> straddling the boundary (full quota at :59 and again at :00).</td></tr>
+    <tr><td><b>Sliding window log</b></td><td>Store a timestamp per request; count those within the trailing window.</td><td>Exact and smooth, but stores every request timestamp, so memory grows with traffic. Expensive at scale.</td></tr>
+    <tr><td><b>Sliding window counter</b></td><td>Weighted blend of the current and previous fixed window's counts.</td><td>Approximates the sliding log cheaply (two counters), smooths the boundary burst. A common production pick.</td></tr>
+    <tr><td><b>Token bucket</b></td><td>A bucket refills at rate <em>r</em> tokens/sec up to capacity <em>C</em>; each request spends a token, reject if empty.</td><td>Allows controlled bursts up to <em>C</em>, smooth average rate, tiny state (tokens + last-refill timestamp). The default.</td></tr>
+    <tr><td><b>Leaky bucket</b></td><td>Requests enter a queue drained at a fixed rate; overflow is dropped.</td><td>Enforces a perfectly smooth output rate, but adds queueing/latency and no burst allowance.</td></tr>
+  </table>
+  <div class="prose">
+    <p><strong>Pick token bucket</strong> for this API. It allows the controlled bursts real clients need (a client that was idle can briefly exceed the steady rate, which is friendly and realistic), it enforces the correct long-run average, and its state is just two numbers per key, the token count and the last-refill time, which is cheap to store and cheap to update atomically. The sliding window counter is the strong runner-up if you want to forbid bursts and keep it smooth; mention it as the alternative and say what each costs (token bucket allows bursts up to C; sliding window counter smooths them away).</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"I would use a token bucket: it allows controlled bursts up to the bucket capacity, enforces the right average rate via the refill rate, and needs only two values per key, tokens and last-refill timestamp. If the requirement is to forbid bursts entirely, I would switch to a sliding window counter, which approximates an exact sliding window with two counters and smooths the boundary burst that fixed window suffers." Naming the alternative and its cost is the senior move.</p>
+  </div>
+
+  <h2>Step 4 &middot; Architecture and the atomicity problem</h2>
+  <div class="prose">
+    <p>Because the fleet is stateless and many servers serve one key's traffic, the bucket state must live in a <strong>shared store</strong> every server reaches. Redis is the natural choice: in-memory (sub-millisecond), supports atomic operations, and is already in the stack. Each API server, on each request, asks Redis "does this key have a token? if so, take one," and allows or rejects based on the answer.</p>
+    <p>The subtle, interview-critical part is <strong>atomicity</strong>. The check ("are there tokens?") and the update ("decrement") must happen as one indivisible operation, because if they are two separate round trips, two concurrent requests can both read "1 token left," both decide to allow, and both decrement, letting through more than the limit. That is a classic read-modify-write race, and under 50k ops/s it will happen constantly. The fix is to make the whole refill-check-decrement a single atomic step in Redis, either a Lua script (Redis runs it atomically server-side, no interleaving) or Redis's built-in atomic commands. The principle is identical to "keep transactions short and avoid races" from Day 50: the limiter's correctness rests entirely on the check-and-decrement being atomic.</p>
+  </div>
+
+  <div class="diagram">  request ─▶ API server (one of many, stateless)
+                  │  key = api_key
+                  ▼
+        Redis: ATOMIC refill + check + decrement   ← ONE Lua script / atomic op
+                  │   (never two round trips — that race-conditions the count)
+          ┌───────┴────────┐
+       tokens ≥ 1?      tokens = 0?
+          │                 │
+        allow            reject 429 + Retry-After
+   state per key: { tokens, last_refill_ts }   ~tens of bytes, ~1M keys → tens of MB</div>
+
+  <h2>Step 5 &middot; Distributed coordination</h2>
+  <div class="prose">
+    <p>The shared-Redis design above is the clean answer: one source of truth, exact global limit, every server consistent. Its costs are a network hop per request (kept tiny by Redis being in-memory and the op being single round trip) and Redis being a critical dependency (which feeds the failure discussion). Make Redis itself redundant (replicated, multi-AZ) so it is not a single point of failure.</p>
+    <p>Know the alternative because interviewers probe it: <strong>local (per-node) counters</strong>, where each server enforces limit&divide;N locally with no shared store. This is faster (no network hop) and has no shared dependency, but it is only approximate, because the load balancer does not split a key's traffic perfectly evenly across nodes, so the effective global limit drifts, and it breaks down as nodes are added or removed. The middle ground is a local token bucket with periodic async reconciliation against a shared store, trading exactness for speed. State the trade clearly: centralized Redis gives an exact limit at the cost of a hop and a dependency; per-node gives speed and independence at the cost of an approximate, drifting global limit. For a public API where the limit is a contract, exactness usually wins, so centralized Redis.</p>
+  </div>
+
+  <h2>Step 6 &middot; Failure modes: fail-open vs fail-closed</h2>
+  <div class="prose">
+    <p>The decision you flagged in step 1 must now be resolved: <strong>what happens when Redis (the limiter's backing store) is down or unreachable?</strong> There is no universally correct answer, only a trade you must name.</p>
+    <ul>
+      <li><strong>Fail-open</strong> (allow requests when the limiter cannot decide): protects <em>availability</em>, your API keeps serving even if the limiter is down, but it removes the protection, so a traffic surge during the outage can overwhelm the backend. Choose fail-open when the limiter exists mainly for fairness/abuse-prevention and the backend can tolerate a temporary unguarded burst.</li>
+      <li><strong>Fail-closed</strong> (reject requests when the limiter cannot decide): protects the <em>backend</em>, but it converts a limiter outage into an API outage, which is often a worse user-facing failure than the thing you were guarding against. Choose fail-closed when the limit is protecting something fragile or expensive that absolutely must not be overrun.</li>
+    </ul>
+    <p>The common production stance is <strong>fail-open with a local fallback</strong>: if shared Redis is unreachable, fall back to a coarse per-node local limit so you are not totally unprotected, and keep serving. That preserves availability while still applying a backstop. Whichever you choose, say why and tie it to what the limiter is actually protecting, that reasoning is the point of the question. Pair this with the resilience patterns you will see in LLMOps (circuit breakers, retries with backoff) so a flapping Redis does not amplify into cascading failure.</p>
+  </div>
+
+  <h2>Step 7 &middot; Wrap: ops</h2>
+  <div class="prose">
+    <p>Close on operations, as always. <strong>Observability:</strong> emit metrics for allow vs reject rate per key and overall, current Redis latency on the limiter op, and an alert if reject rate spikes (possible attack or misconfigured limit) or if the limiter is failing over to local fallback. <strong>Config:</strong> limits should be data, not code, stored so they can change per key/tier without a deploy, and surfaced to clients via response headers (<code>X-RateLimit-Limit</code>, <code>X-RateLimit-Remaining</code>, <code>Retry-After</code>) so well-behaved clients self-throttle. <strong>Rollout:</strong> ship in "monitor-only" mode first (count what <em>would</em> be rejected without rejecting), verify the limits are sane against real traffic, then enforce, the canary discipline from Day 48. <strong>Cost:</strong> dominated by the Redis op volume, which the estimate already sized at ~50k ops/s, comfortably within a small replicated Redis.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Worked reference design (one screen)</h2>
+  <div class="callout example">
+    <span class="label">Reference</span>
+    <p>The whole thing, compressed to what you would leave on the whiteboard.</p>
+  </div>
+  <div class="diagram">  CLARIFY    per-API-key limit (e.g. 100/min + burst); distributed across a
+             stateless fleet; <1ms overhead; 429 + Retry-After on reject;
+             fail-open-with-local-fallback if the store is down.
+
+  ESTIMATE   ~50k req/s peak → ~50k atomic ops/s; ~1M active keys × tens of
+             bytes ≈ tens of MB state → in-memory store, not a database.
+
+  ALGORITHM  token bucket: refill r tokens/s up to capacity C; spend 1/request;
+             reject when empty. State per key = { tokens, last_refill_ts }.
+             alt: sliding-window counter if bursts must be forbidden.
+
+  ARCH       API server ─▶ Redis ATOMIC (Lua) refill+check+decrement ─▶ allow/429.
+             one round trip; check+decrement MUST be atomic (else race over-allows).
+
+  COORD      centralized Redis = exact global limit (cost: a hop + a dependency,
+             made redundant/multi-AZ). per-node local = fast but approximate/drifts.
+             → centralized for a contractual public-API limit.
+
+  FAILURE    Redis down → fail-open with a coarse per-node local backstop
+             (availability first), alert, recover. (fail-closed only if the
+             backend is too fragile to ever be overrun.)
+
+  OPS        limits as config (per key/tier, no deploy); emit allow/reject + op
+             latency; expose X-RateLimit-* + Retry-After; ship monitor-only first.</div>
+  <div class="prose">
+    <p>Notice every Module 8 idea reappears: stateless fleet and shared state (Day 49), the right store and atomicity/race avoidance (Day 50), an in-memory cache as the hot-path store (Day 51), graceful degradation under dependency failure (the resilience thread), all driven by the Day 48 framework. That is why the rate limiter is the canonical warm-up: it exercises the whole module in one compact problem.</p>
+  </div>
+
+  <details class="solution"><summary>Show solution &mdash; token bucket sketch (Python) + the atomic Redis idea</summary>
+  <div class="body prose">
+    <p>A single-process token bucket. The key trick is <em>lazy refill</em>: you do not run a timer adding tokens, you compute how many tokens should have accrued since the last check, based on elapsed time and the refill rate, capped at capacity.</p>
+    <pre><code><span class="tok-k">import</span> time
+
+<span class="tok-k">class</span> <span class="tok-f">TokenBucket</span>:
+    <span class="tok-k">def</span> <span class="tok-f">__init__</span>(self, rate, capacity):
+        self.rate = rate            <span class="tok-c"># tokens added per second</span>
+        self.capacity = capacity    <span class="tok-c"># max tokens (the burst allowance)</span>
+        self.tokens = capacity      <span class="tok-c"># start full</span>
+        self.last = time.monotonic()
+
+    <span class="tok-k">def</span> <span class="tok-f">allow</span>(self, cost=<span class="tok-n">1</span>):
+        now = time.monotonic()
+        elapsed = now - self.last
+        <span class="tok-c"># lazy refill: accrue tokens for the time that passed, cap at capacity</span>
+        self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
+        self.last = now
+        <span class="tok-k">if</span> self.tokens &gt;= cost:
+            self.tokens -= cost
+            <span class="tok-k">return</span> <span class="tok-k">True</span>          <span class="tok-c"># allow, spend a token</span>
+        <span class="tok-k">return</span> <span class="tok-k">False</span>             <span class="tok-c"># reject → caller returns 429</span>
+
+<span class="tok-c"># bucket = TokenBucket(rate=100/60, capacity=100)  # ~100/min, burst 100</span>
+<span class="tok-c"># if not bucket.allow(): return Response(status=429, headers={"Retry-After": "1"})</span></code></pre>
+    <p>This is correct for one process, but in the distributed design the state lives in Redis and the read-modify-write must be <strong>atomic</strong>, otherwise two servers both read the same token count and both allow. You make the refill-check-decrement one indivisible server-side step with a Lua script (Redis executes a script atomically, nothing interleaves):</p>
+    <pre><code><span class="tok-c">-- KEYS[1] = bucket key; ARGV: rate, capacity, now, cost</span>
+<span class="tok-c">-- stored hash: { tokens, last_refill_ts }; returns 1 (allow) or 0 (reject)</span>
+<span class="tok-k">local</span> rate     = <span class="tok-f">tonumber</span>(ARGV[<span class="tok-n">1</span>])
+<span class="tok-k">local</span> capacity = <span class="tok-f">tonumber</span>(ARGV[<span class="tok-n">2</span>])
+<span class="tok-k">local</span> now      = <span class="tok-f">tonumber</span>(ARGV[<span class="tok-n">3</span>])
+<span class="tok-k">local</span> cost     = <span class="tok-f">tonumber</span>(ARGV[<span class="tok-n">4</span>])
+
+<span class="tok-k">local</span> b = redis.<span class="tok-f">call</span>(<span class="tok-s">'HMGET'</span>, KEYS[<span class="tok-n">1</span>], <span class="tok-s">'tokens'</span>, <span class="tok-s">'ts'</span>)
+<span class="tok-k">local</span> tokens = <span class="tok-f">tonumber</span>(b[<span class="tok-n">1</span>]) <span class="tok-k">or</span> capacity
+<span class="tok-k">local</span> ts     = <span class="tok-f">tonumber</span>(b[<span class="tok-n">2</span>]) <span class="tok-k">or</span> now
+
+tokens = math.<span class="tok-f">min</span>(capacity, tokens + (now - ts) * rate)  <span class="tok-c">-- lazy refill</span>
+<span class="tok-k">local</span> allowed = <span class="tok-n">0</span>
+<span class="tok-k">if</span> tokens &gt;= cost <span class="tok-k">then</span>
+  tokens = tokens - cost
+  allowed = <span class="tok-n">1</span>
+<span class="tok-k">end</span>
+redis.<span class="tok-f">call</span>(<span class="tok-s">'HMSET'</span>, KEYS[<span class="tok-n">1</span>], <span class="tok-s">'tokens'</span>, tokens, <span class="tok-s">'ts'</span>, now)
+redis.<span class="tok-f">call</span>(<span class="tok-s">'EXPIRE'</span>, KEYS[<span class="tok-n">1</span>], <span class="tok-n">3600</span>)   <span class="tok-c">-- evict idle keys</span>
+<span class="tok-k">return</span> allowed</code></pre>
+    <p>The Python version teaches the algorithm; the Lua version is what makes it correct in production. Same logic, but the script's atomicity is the whole reason it holds the global limit under 50k concurrent ops/s. (Numbers and the script structure are illustrative, not a copy of any specific API's parameters.)</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Stretch variations</h2>
+  <div class="prose">
+    <p>Once the base design is solid, interviewers extend it. Have a one-line answer for each:</p>
+    <ul>
+      <li><strong>Tiered limits</strong> (free vs paid keys): limits are config keyed by tier, the algorithm is unchanged, you just look up rate and capacity per key.</li>
+      <li><strong>Limit by cost, not count</strong> (an expensive endpoint costs more tokens): spend <code>cost &gt; 1</code> tokens per request, which the bucket already supports, this is exactly how you would rate-limit an <em>LLM</em> API by token spend rather than request count.</li>
+      <li><strong>Multiple limits at once</strong> (per-second and per-day): run independent buckets and require all to allow.</li>
+      <li><strong>Global limit across regions:</strong> exact global limits across regions are expensive (cross-region coordination latency), so usually you accept per-region limits or eventual reconciliation, and you name that trade.</li>
+    </ul>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Module 8 review &mdash; the questions to have cold</h2>
+  <p class="muted">A quick self-test across the whole module. Say each key out loud; if any feels shaky, reopen that day before moving to ML system design.</p>
+  <ul class="q-list">
+    <li>Walk through your system design methodology. (Day 48)
+      <div class="a">Key: clarify (functional + non-functional) &rarr; estimate (QPS, storage) &rarr; high-level arch &rarr; data model &rarr; deep-dive the bottleneck &rarr; trade-offs (name what you give up) &rarr; ops (rollout, observability, cost).</div></li>
+    <li>Vertical vs horizontal scaling, and why statelessness? (Day 49)
+      <div class="a">Key: vertical = bigger box (ceiling + SPOF); horizontal = more boxes behind a load balancer; stateless app servers so any node serves any request, state in DB/cache.</div></li>
+    <li>SQL vs NoSQL default, and what breaks when you shard? (Day 50)
+      <div class="a">Key: default Postgres (relational + JSONB + FTS + pgvector); sharding by key spreads writes but cross-shard joins/transactions and hot keys hurt, pick the shard key carefully.</div></li>
+    <li>Cache strategies, and the two hard problems? (Day 51)
+      <div class="a">Key: cache-aside (default) vs write-through/back, LRU + TTL; invalidation is hard (freshness vs hit ratio) and the stampede floods the DB, fix with single-flight + jittered TTL.</div></li>
+    <li>When do you go async, and queue vs pub/sub vs log? (Day 52)
+      <div class="a">Key: decouple, smooth spikes, background work; queue = one consumer per message, pub/sub = all subscribers, log (Kafka) = durable/ordered/replayable; idempotent consumers + backpressure + outbox.</div></li>
+    <li>Design a rate limiter. (Day 53)
+      <div class="a">Key: token bucket (or sliding window), shared Redis with an atomic check-decrement (Lua), per-user + global, distributed coordination, fail-open vs fail-closed on store failure.</div></li>
+    <li>Explain CAP/PACELC in practice. (Day 50)
+      <div class="a">Key: under a partition choose consistency or availability; PACELC adds that even without a partition you trade latency vs consistency.</div></li>
+    <li>How do you name a trade-off like a senior? (Day 48)
+      <div class="a">Key: "I chose X, which buys A but costs B, acceptable here because requirement R", never present a design as all upside.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (the lab deliverable)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Make the limiter real against Redis. Implement the token-bucket logic as a Lua script and load it with <code>SCRIPT LOAD</code> / <code>EVALSHA</code> via redis-py, then write a tiny client loop that fires, say, 200 requests as fast as it can against a key configured for 100/min with a burst of 100, and confirm roughly the first 100 are allowed and the rest get rejected, then watch tokens trickle back as time passes. Then prove the race matters: implement a deliberately <em>non-atomic</em> version (separate <code>GET</code> then <code>SET</code>) and hammer it from several threads, you will see it allow more than the limit. Switch to the atomic Lua version and watch the over-allow vanish. That contrast is the whole lesson. Docs: Redis <a href="https://redis.io/docs/latest/develop/interact/programmability/eval-intro/">scripting (EVAL)</a> and <a href="https://redis.io/docs/latest/develop/clients/redis-py/">redis-py</a>. Optionally paste your finished design into <a href="../../tools.html">Claude</a> and ask it to interview you on the failure modes.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>The rate limiter is not abstract for you, it is the shape of a real problem on MaiQ: any service that calls an LLM provider has to respect that provider's rate limits, and the cleanest way to do that on your side is exactly this design, a token bucket in Redis with an atomic check, sized to the provider's quota, so your fleet never blows past the limit and triggers 429s. The "limit by cost, not count" variation maps directly onto rate-limiting by LLM token spend rather than request count, which is how you would budget an expensive model. And Redis is already your shared store and your cache, so the limiter rides on infrastructure you operate. When an interviewer asks you to design a rate limiter, you can ground the failure discussion in production reality: for an LLM-backed feature you would fail-open with a local backstop so a Redis blip does not take the product down, and pair it with retries-with-backoff and a circuit breaker on the provider, the same resilience thinking you apply to keep MaiQ stable.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>You drove the full seven-step framework on a concrete problem and produced a defensible reference design. Token bucket is the default rate-limiting algorithm because it allows controlled bursts, enforces the right average, and needs only two values per key. In a distributed fleet the bucket state lives in a shared store (Redis) and the check-and-decrement must be atomic, a single Lua script, or concurrent requests race and over-allow. Distributed coordination is a trade between an exact centralized limit and a fast-but-approximate per-node one, and the failure question, fail-open vs fail-closed, is answered by what the limiter is actually protecting (commonly fail-open with a local backstop). This module is now yours: methodology, scaling, databases, caching, async, applied end to end.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d53">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: Module 9 begins, the ML system design framework, designing systems where a model is the product.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d52-async-messaging-streaming.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 52 &middot; Queues, pub/sub &amp; streaming</div></a>
+    <a data-nav="next" class="next" href="../m09-ml-system-design/d54-ml-sd-framework.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 54 &middot; The ML system design framework</div></a>
+  </div>
+
+  <div class="foot">Module 8 &middot; System Design Fundamentals &middot; Day 53 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

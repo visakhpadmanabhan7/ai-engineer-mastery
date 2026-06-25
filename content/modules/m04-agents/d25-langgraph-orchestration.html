@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 25 · LangGraph &amp; orchestration</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 4 &middot; Agents &amp; Tool Use</span>
+    <span class="pill">Day 25</span>
+    <span class="pill">55 min</span>
+    <span class="diff" title="Difficulty: intermediate"><i class="on"></i><i class="on"></i><i></i></span>
+  </div>
+
+  <h1>LangGraph &amp; orchestration</h1>
+  <p class="lede">Hand-rolled <code>while</code> loops are fine for a demo agent and a nightmare in production. LangGraph gives agent control flow a real runtime: a stateful graph with cycles, interrupts, and checkpoints. Today you learn what it buys and when the upgrade pays off.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Separate LangChain (integrations and chains) from LangGraph (a stateful graph runtime).</li>
+      <li>Name the LangGraph primitives: nodes, edges, state, cycles, interrupts, checkpointers.</li>
+      <li>Explain why a graph beats an ad-hoc loop once control flow gets complex.</li>
+      <li>Implement human-in-the-loop with an interrupt, and fan-out with Send.</li>
+      <li>Decide when to combine PydanticAI (typed I/O) with a graph rather than choosing one.</li>
+    </ul>
+  </div>
+
+  <h2>1 &middot; LangChain is not LangGraph</h2>
+  <div class="prose">
+    <p>People conflate these constantly, and the distinction matters in interviews. <strong>LangChain</strong> is the integrations-and-chains library: a huge set of adapters (model providers, vector stores, document loaders, retrievers) plus the abstractions to wire them into <em>chains</em>, the fixed pipelines from Day 22. It is excellent for "retrieve, then prompt, then parse." It is weaker when the control flow stops being a straight line.</p>
+    <p><strong>LangGraph</strong> is a different thing: a <strong>stateful graph runtime</strong> for agentic control flow. You describe your agent as a graph of nodes (units of work) connected by edges (what runs next), all operating on a shared <strong>state</strong> object, and crucially the graph can contain <strong>cycles</strong> (loop back to a node), <strong>interrupts</strong> (pause for a human), and <strong>checkpointers</strong> (persist state so you can resume). LangChain answers "how do I call these components"; LangGraph answers "how do I orchestrate a stateful, looping, interruptible agent reliably." They are complementary: you often use LangChain's integrations <em>inside</em> LangGraph nodes.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"LangChain is integrations and chains, great for fixed pipelines. LangGraph is a stateful graph runtime for agents: nodes, edges, a shared state, plus cycles, interrupts, and checkpointers. I reach for LangGraph the moment control flow gets complex, loops, branching, human-in-the-loop, durable resume, because a graph makes that explicit and recoverable where an ad-hoc while-loop makes it implicit and fragile." That cleanly answers "when does the LangGraph upgrade pay off."</p>
+  </div>
+
+  <h2>2 &middot; The primitives</h2>
+  <div class="prose">
+    <p>Five concepts carry almost everything:</p>
+    <ul>
+      <li><strong>State.</strong> A single typed object (often a <code>TypedDict</code> or Pydantic model) threaded through the whole graph. Each node reads it and returns updates that get merged in. This is the spine, every node sees and contributes to one shared state, so there is no tangle of variables passed around by hand.</li>
+      <li><strong>Nodes.</strong> Units of work: a function (or an LLM call, a tool call, a retrieval step). A node takes the state and returns a partial update.</li>
+      <li><strong>Edges.</strong> What runs next. A normal edge always goes A → B. A <strong>conditional edge</strong> routes based on the state (a function inspects the state and returns the name of the next node), which is how you branch and how you loop.</li>
+      <li><strong>Cycles.</strong> Edges can point backward, so the agent loop (call model → if it wants a tool, run the tool → go back to the model) is just a cycle in the graph. The ReAct loop from Day 22 becomes two nodes and a conditional edge.</li>
+      <li><strong>Interrupts &amp; checkpointers.</strong> An <strong>interrupt</strong> pauses the graph at a chosen point and hands control back to your application (for human approval, say). A <strong>checkpointer</strong> persists the state at each step to a store, so a run can be paused, resumed later, recover after a crash, or be inspected. Together they are what make the difference between a script and a durable system.</li>
+    </ul>
+  </div>
+
+  <div class="diagram">  A LangGraph agent = a graph over ONE shared state object
+  ─────────────────────────────────────────────────────────
+
+            ┌─────────────┐
+   START ─► │  agent node │ ◄───────────────┐   (cycle: loop back)
+            │  (LLM call) │                 │
+            └──────┬──────┘                 │
+                   │ conditional edge:      │
+            wants a tool? ──── yes ──► ┌─────┴─────┐
+                   │                   │ tool node │
+                   no                  └───────────┘
+                   ▼
+            ┌─────────────┐
+            │  END        │      checkpointer: state saved at every step
+            └─────────────┘      interrupt: pause here for a human, resume later
+                                 STATE: { messages, tool_results, plan, … } threaded through all</div>
+
+  <h2>3 &middot; Why a graph beats an ad-hoc loop</h2>
+  <div class="prose">
+    <p>You can absolutely build an agent with a hand-written <code>while True:</code> loop, a list of messages, and some <code>if</code> statements. For a small agent it is even the right call. The trouble is that as control flow grows, the loop accumulates implicit, hard-to-see structure: state lives in scattered local variables, branching hides in nested conditionals, and there is no clean place to pause, persist, or resume. Three things break first:</p>
+    <ul>
+      <li><strong>Persistence and resume.</strong> If your process dies mid-run, an ad-hoc loop loses everything. A checkpointed graph resumes from the last saved step. For long or expensive agent runs, this is the difference between "retry from scratch" and "continue."</li>
+      <li><strong>Human-in-the-loop.</strong> Pausing a raw loop to wait for human approval, then resuming exactly where it stopped, is genuinely awkward to write correctly. An interrupt makes it a first-class operation.</li>
+      <li><strong>Observability and structure.</strong> A graph is an explicit, inspectable object, you can see the nodes, the edges, the branches, and trace which path a run took. An ad-hoc loop's structure is implicit in the code, so debugging means reading control flow instead of reading a trace.</li>
+    </ul>
+    <p>The honest version of the trade-off: a graph adds upfront structure (boilerplate) you do not need for a tiny agent. The payoff arrives precisely when control flow gets complex, multiple branches, loops, approvals, durable runs, which is exactly when an ad-hoc loop turns into spaghetti. So the senior heuristic is: <em>simple loop while it is simple; move to a graph the moment you need cycles plus persistence plus human-in-the-loop together.</em></p>
+  </div>
+
+  <pre><code><span class="tok-c"># A minimal LangGraph-style state machine for a ReAct agent.</span>
+<span class="tok-k">from</span> langgraph.graph <span class="tok-k">import</span> StateGraph, START, END
+<span class="tok-k">from</span> typing <span class="tok-k">import</span> TypedDict, Annotated
+<span class="tok-k">import</span> operator
+
+<span class="tok-k">class</span> <span class="tok-f">State</span>(TypedDict):
+    messages: Annotated[<span class="tok-k">list</span>, operator.add]   <span class="tok-c"># nodes append to shared state</span>
+
+<span class="tok-k">def</span> <span class="tok-f">agent</span>(state):                                <span class="tok-c"># node: call the model</span>
+    reply = llm.invoke(state[<span class="tok-s">"messages"</span>])
+    <span class="tok-k">return</span> {<span class="tok-s">"messages"</span>: [reply]}
+
+<span class="tok-k">def</span> <span class="tok-f">tools</span>(state):                                <span class="tok-c"># node: run the requested tool</span>
+    result = run_tool(state[<span class="tok-s">"messages"</span>][-<span class="tok-n">1</span>])
+    <span class="tok-k">return</span> {<span class="tok-s">"messages"</span>: [result]}
+
+<span class="tok-k">def</span> <span class="tok-f">route</span>(state):                                <span class="tok-c"># conditional edge: loop or stop</span>
+    last = state[<span class="tok-s">"messages"</span>][-<span class="tok-n">1</span>]
+    <span class="tok-k">return</span> <span class="tok-s">"tools"</span> <span class="tok-k">if</span> wants_tool(last) <span class="tok-k">else</span> END
+
+g = StateGraph(State)
+g.add_node(<span class="tok-s">"agent"</span>, agent)
+g.add_node(<span class="tok-s">"tools"</span>, tools)
+g.add_edge(START, <span class="tok-s">"agent"</span>)
+g.add_conditional_edges(<span class="tok-s">"agent"</span>, route)    <span class="tok-c"># branch on state</span>
+g.add_edge(<span class="tok-s">"tools"</span>, <span class="tok-s">"agent"</span>)              <span class="tok-c"># CYCLE: tool → back to agent</span>
+
+app = g.compile(checkpointer=saver)             <span class="tok-c"># durable: resume after crash</span></code></pre>
+
+  <div class="prose">
+    <p>That is the entire ReAct loop expressed as a graph: two nodes, one conditional edge that either routes to the tool node or ends, and one backward edge that closes the cycle. The <code>checkpointer</code> makes it resumable. Compare that to the same behavior buried in a <code>while</code> loop and you can see why the structure is worth it once things grow.</p>
+  </div>
+
+  <h2>4 &middot; Human-in-the-loop via interrupt</h2>
+  <div class="prose">
+    <p>This is LangGraph's standout feature and a direct callback to Day 23's approval gates. Some actions (charge a card, send to a customer, delete data) must not fire without a human saying yes. With a graph, you place an <strong>interrupt</strong> just before the risky tool node: the graph runs up to that point, persists its state via the checkpointer, and <em>pauses</em>, handing control back to your application. Your app shows the proposed action to a human; on approval, you resume the graph from exactly where it stopped, and the tool executes. On rejection, you route elsewhere.</p>
+    <p>The reason this is clean in a graph and painful in a raw loop is the checkpointer: because state is already persisted at every step, "pause and resume later" is free, the human can take an hour, the process can even restart, and the run continues. This is the textbook implementation of "classify read vs write, gate the write" from Day 23, now with a runtime that actually supports the pause.</p>
+  </div>
+
+  <div class="diagram">  ... → [draft action node] → ⟨ INTERRUPT ⟩ ── state checkpointed, graph pauses
+                                    │
+                          your app shows the human:
+                          "Agent wants to: refund €240 to ORD-004812. Approve?"
+                                    │
+                    ┌── approve ────┴──── reject ──┐
+                    ▼                              ▼
+            resume → [execute tool]          route → [ask for clarification]</div>
+
+  <h2>5 &middot; Send: parallel fan-out</h2>
+  <div class="prose">
+    <p>Day 24's Plan-Execute needs to run independent steps in parallel. LangGraph expresses that with <strong>Send</strong>: from one node you can dispatch the <em>same</em> downstream node multiple times with different inputs, and they run as parallel branches whose results merge back into the shared state. If a planner produces eight independent lookups, a node emits eight <code>Send</code> calls to the "lookup" node, the runtime fans them out, and a downstream node synthesizes the merged results. This is how the parallelism from the previous lesson becomes a concrete graph operation instead of manual thread management.</p>
+  </div>
+
+  <h2>6 &middot; PydanticAI: combine, do not pick</h2>
+  <div class="prose">
+    <p>A common false choice is "LangGraph <em>or</em> PydanticAI." They solve different layers. <strong>PydanticAI</strong> is about <strong>typed inputs and outputs</strong>: it leans on Pydantic to give each agent or tool a validated, strongly-typed interface, so what goes in and what comes out are guaranteed shapes (exactly the schema-enforcement and validation theme from Day 23). LangGraph is about <strong>orchestration</strong>: the stateful graph that decides what runs when.</p>
+    <p>The right move is usually to <strong>combine</strong> them: use LangGraph for the control flow (nodes, cycles, interrupts, checkpoints) and PydanticAI (or plain Pydantic) for the typed I/O of the nodes and tools inside it. You get a durable, interruptible graph whose every step has a validated contract. Picking one and forgoing the other usually means either an orchestrator with loose, error-prone I/O, or beautifully typed pieces with no robust runtime to coordinate them. The senior framing: orchestration and typed I/O are orthogonal concerns, pick the best tool for each layer.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: a refund agent with an approval gate</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>Goal: an agent that looks up an order, decides whether a refund is warranted, and, if so, issues it, but no refund fires without human approval, and the run must survive a process restart while it waits.</p>
+  </div>
+  <div class="diagram">  START → lookup_order ──► decide ──┬── no refund ──► END
+                                    │
+                                    └── refund warranted
+                                            ▼
+                                    draft_refund (typed: {order_id, amount})
+                                            ▼
+                                     ⟨ INTERRUPT ⟩  ← state checkpointed; pause
+                                            ▼  (human approves hours later)
+                                    issue_refund (idempotent, key=order_id)
+                                            ▼
+                                           END</div>
+  <div class="prose">
+    <p>Every primitive from today shows up. <strong>State</strong> threads the order and decision through the nodes. The <strong>conditional edge</strong> after <code>decide</code> branches on "refund warranted?". The <strong>interrupt</strong> before <code>issue_refund</code> implements Day 23's write-tool approval gate, and the <strong>checkpointer</strong> is what lets the human take their time without losing the run. The refund tool is <strong>idempotent</strong> (keyed on the order ID) so a resumed-or-retried graph cannot double-refund, and the <code>draft_refund</code> payload is a <strong>typed</strong> object so the amount and ID are validated before a human ever sees them. A raw while-loop could fake some of this, but the durable pause-and-resume around a human decision is exactly the thing it cannot do cleanly, which is the whole reason to use the graph.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Answer each out loud in full sentences, as if to an interviewer. Then open the solution and compare. The gap is your lesson.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>A teammate asks: "We already use LangChain. Why would I add LangGraph, isn't that the same project?" Give the distinction and a concrete trigger that would make you actually switch.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>They are complementary, not the same. <strong>LangChain</strong> is integrations and chains, the adapters (models, vector stores, loaders, retrievers) and the glue to build fixed, linear pipelines; it is great for "retrieve → prompt → parse." <strong>LangGraph</strong> is a <em>stateful graph runtime</em> for agentic control flow: nodes, edges, a shared state, and, decisively, cycles, interrupts, and checkpointers. You keep using LangChain's integrations inside LangGraph nodes, so it is "add," not "replace." A concrete trigger to actually switch: the moment you need a real <strong>loop with persistence and human-in-the-loop together</strong>, for example, an agent that iterates over tool calls, must pause for human approval before a risky action, and must survive a process restart while it waits. A linear LangChain chain cannot express the cycle, the durable pause, or the resume cleanly; that combination is exactly what LangGraph's checkpointer and interrupt exist for. If you only have a straight pipeline, you do not need LangGraph yet.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>Your agent runs a 12-step research task that takes four minutes and costs real tokens. Occasionally the server redeploys mid-run and the user has to start over, furious. You are using a hand-written while-loop. What is the fix, and which single primitive does the heavy lifting?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Move the agent to a <strong>graph with a checkpointer</strong>; the <strong>checkpointer</strong> is the primitive doing the heavy lifting. The problem is that a hand-written while-loop keeps all its state in process memory, so a redeploy wipes it and the run restarts from zero, wasting four minutes and the tokens already spent. A checkpointer persists the graph's shared state to a durable store at every step, so after a restart the run <em>resumes from the last saved step</em> instead of from scratch. Modeling the 12 steps as nodes/edges also makes the structure explicit and traceable, but persistence-and-resume is the specific capability that fixes the furious-user symptom. (Bonus senior point: this is also what later enables human-in-the-loop and inspection, because the state is already durably saved at each step.)</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>Someone frames a decision as "LangGraph vs PydanticAI, which should we standardize on?" Explain why the framing is wrong and what you would actually do.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>The framing is wrong because the two solve <strong>orthogonal layers</strong>, so it is not an either/or. <strong>PydanticAI</strong> governs <em>typed inputs and outputs</em>: validated, strongly-typed interfaces for agents and tools (the schema-enforcement / validation concern). <strong>LangGraph</strong> governs <em>orchestration</em>: the stateful graph that decides what runs when, with cycles, interrupts, and checkpoints. Standardizing on one and dropping the other means either a robust orchestrator with loose, error-prone I/O, or nicely typed components with no durable runtime to coordinate them. What I would actually do is <strong>combine</strong> them: use LangGraph for control flow and PydanticAI (or plain Pydantic) for the typed I/O of the nodes and tools inside the graph, yielding a durable, interruptible graph where every step has a validated contract. Choose the best tool per layer rather than forcing a single winner.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's Agents module. Drill the one-line keys, then expand each into a 90-second answer.</p>
+  <ul class="q-list">
+    <li>LangChain vs LangGraph, when does the upgrade pay off?
+      <div class="a">Key: LangChain = integrations/chains (fixed pipelines); LangGraph = stateful graph runtime (cycles, interrupts, checkpoints); upgrade when control flow gets complex (loops + persistence + human-in-the-loop).</div></li>
+    <li>What are LangGraph's core primitives?
+      <div class="a">Key: nodes (work), edges incl. conditional (what runs next), a shared typed state, cycles (loops), interrupts (pause), checkpointers (durable resume).</div></li>
+    <li>Why does a graph beat an ad-hoc while-loop for complex agents?
+      <div class="a">Key: explicit structure + traceability, durable persistence/resume after crash, and first-class human-in-the-loop; the loop hides state and structure and cannot pause/resume cleanly.</div></li>
+    <li>How do you implement an approval gate for a high-risk action?
+      <div class="a">Key: classify read vs write, place an interrupt before the write node; state is checkpointed and the graph pauses, draft → human approves → resume → execute (idempotent tool).</div></li>
+    <li>How do you run independent steps in parallel in LangGraph?
+      <div class="a">Key: Send, dispatch the same node multiple times with different inputs as parallel branches, results merge back into shared state (the Plan-Execute fan-out).</div></li>
+    <li>LangGraph vs PydanticAI, which do you pick?
+      <div class="a">Key: neither exclusively, they are orthogonal: LangGraph orchestrates control flow, PydanticAI gives typed I/O; combine them so every node has a validated contract inside a durable graph.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (15&ndash;25 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Follow the <a href="https://langchain-ai.github.io/langgraph/">LangGraph docs</a> quickstart to build the two-node ReAct graph from section three (an <code>agent</code> node, a <code>tools</code> node, a conditional edge, and the cycle back). Then add the two production features: attach a <strong>checkpointer</strong> and confirm you can interrupt the run and resume it with the same thread ID, and place an <strong>interrupt</strong> before a "write" tool so the graph pauses for your approval before executing (see the <a href="https://langchain-ai.github.io/langgraph/concepts/human_in_the_loop/">human-in-the-loop</a> guide). The instructive comparison: try to add "pause for approval, survive a restart, then continue" to a plain <code>while</code>-loop version first, feel how awkward it is, then see how the graph makes it two lines. That contrast <em>is</em> the lesson.</p>
+    <p class="muted" style="font-size:13.5px">No environment set up? Read the quickstart and sketch the graph (nodes, edges, where the interrupt goes, what the state holds) on paper. See <a href="../../tools.html">Tools &amp; Claude</a>.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>You build agentic features on MaiQ with <strong>LangGraph</strong>, so this is your home turf in an interview. You can speak first-hand to why a graph runtime beats hand-rolled loops once an agent has real branching and tool cycles, and you can tie the <strong>Skill Store</strong> (users authoring and running their own agents in chat) to orchestration concerns: user-built agents need a runtime that keeps state coherent, can pause where a human should weigh in, and is traceable when something misbehaves, exactly what nodes, state, interrupts, and checkpointers provide. Your <strong>hybrid retrieval</strong> and <strong>FastAPI ingestion into pgvector</strong> work also slots in naturally as nodes within such a graph (a retrieval node feeding an agent node). When asked "how do you orchestrate agents in production," you are not describing a tutorial, you are describing the system you ship.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>LangChain is integrations and chains (fixed pipelines); LangGraph is a stateful graph runtime for agents, nodes, edges, shared state, plus cycles, interrupts, and checkpointers. A graph beats an ad-hoc loop precisely when control flow gets complex, because it makes structure explicit and traceable, persists state for crash-safe resume, and supports human-in-the-loop as a first-class pause. The ReAct loop is just two nodes and a conditional edge with a cycle; an approval gate is an interrupt before a write node, made durable by the checkpointer; and Send fans independent steps out in parallel. Finally, LangGraph and PydanticAI are orthogonal (orchestration vs typed I/O), so combine them rather than choosing, every node durable, every contract validated.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d25">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: agent memory, short-term, long-term, and episodic, and how to stop the context window from blowing up.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d24-agent-architectures.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 24 &middot; Agent architectures</div></a>
+    <a data-nav="next" class="next" href="d26-agent-memory.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 26 &middot; Agent memory</div></a>
+  </div>
+
+  <div class="foot">Module 4 &middot; Agents &amp; Tool Use &middot; Day 25 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

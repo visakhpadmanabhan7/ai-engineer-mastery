@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 23 · Tool / function calling</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 4 &middot; Agents &amp; Tool Use</span>
+    <span class="pill">Day 23</span>
+    <span class="pill">55 min</span>
+    <span class="diff" title="Difficulty: intermediate"><i class="on"></i><i class="on"></i><i></i></span>
+  </div>
+
+  <h1>Tool / function calling</h1>
+  <p class="lede">Tool calling is the single mechanism that turns a text predictor into something that can act on the world. Get the tool <em>definitions</em> right and your agent feels reliable; get them wrong and it picks the wrong tool, hallucinates arguments, and you blame the model.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Explain the tool-calling round-trip: model emits a call, runtime executes, result is appended, loop continues.</li>
+      <li>Write a tool definition with an action-verb name, a "use when / do NOT use when" docstring, tight typed params, and a return description.</li>
+      <li>Decide when tools should run in parallel versus serially.</li>
+      <li>Diagnose and prevent hallucinated tool calls (bad name vs bad arguments).</li>
+      <li>Make every write tool idempotent so retries are safe.</li>
+    </ul>
+  </div>
+
+  <h2>1 &middot; The model does not run your code</h2>
+  <div class="prose">
+    <p>The first thing to internalize: <strong>the LLM never executes anything.</strong> When you give a model a set of tools, you are handing it a menu of function <em>signatures</em>, not the functions. The model's only power is to emit a structured request that says "I would like to call <code>get_weather</code> with <code>{"city": "Berlin"}</code>." That request comes back to <em>your</em> runtime as data. Your code decides whether and how to run it, executes the real function, and appends the result. Then the model gets to look at the result and decide what to do next.</p>
+    <p>This separation is the whole safety story of agents. The model proposes; your code disposes. You can validate arguments, refuse a call, require human approval, rate-limit, or log, all before a single line of the actual tool runs. Tool calling is not "the model running functions"; it is "the model asking, your runtime answering."</p>
+  </div>
+
+  <div class="diagram">  ┌──────────┐   1. you send: prompt + tool SCHEMAS (names, params, docs)
+  │   YOUR   │ ───────────────────────────────────────────────────►  ┌───────┐
+  │ RUNTIME  │                                                        │ MODEL │
+  │          │ ◄─────────────────────────────────────────────────── │       │
+  └────┬─────┘   2. model returns a STRUCTURED tool call:             └───────┘
+       │            { name: "get_weather", args: { city: "Berlin" } }
+       │
+       │ 3. YOUR code validates the args, then executes the real function
+       │      result = get_weather(city="Berlin")  →  {"tempC": 7}
+       │
+       │ 4. you APPEND the result as a tool_result message and send back
+       ▼
+  ┌──────────┐   5. model reads the observation, decides: another tool? or final answer?
+  │   MODEL  │ ──►  "It's 7°C in Berlin."   ■  (or emits another tool call → loop)
+  └──────────┘</div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"Tool calling is a structured request/response: the model emits a schema-validated call, my runtime executes the real function, I append the result to the conversation, and the model continues. The model never runs code, which is precisely why I can validate, gate, and log every action before it executes." That sentence answers half the agent-safety follow-ups before they are asked.</p>
+  </div>
+
+  <h2>2 &middot; Anatomy of a tool definition the model picks correctly</h2>
+  <div class="prose">
+    <p>The model decides which tool to call <strong>almost entirely from the tool's name and description.</strong> It cannot read your implementation. So a tool definition is really a piece of <em>prompt engineering aimed at the router</em>. Four parts carry the weight:</p>
+    <ul>
+      <li><strong>Name: an action verb.</strong> <code>search_orders</code>, <code>create_ticket</code>, <code>get_user_balance</code>. Verbs tell the model what the tool <em>does</em>. Avoid noun-blobs like <code>orders</code> or vague names like <code>helper</code>.</li>
+      <li><strong>Description: "use this when / do NOT use this when."</strong> The positive case tells the model when to reach for it; the <em>negative</em> scoping is what stops it from over-firing or confusing two similar tools. Negative scoping is the highest-leverage sentence in the whole definition.</li>
+      <li><strong>Parameters: tight and typed.</strong> Use enums instead of free strings where the value set is known, mark required vs optional honestly, give each field a one-line description, and constrain formats (dates as ISO, IDs as the real pattern). Loose params are where hallucinated arguments breed.</li>
+      <li><strong>Return description: what comes back.</strong> Tell the model the shape and meaning of the result so it can use it in the next step instead of guessing.</li>
+    </ul>
+  </div>
+
+  <pre><code><span class="tok-c"># A tool definition is prompt engineering for the router.</span>
+<span class="tok-c"># JSON-schema shape (works with Anthropic, OpenAI, and most frameworks).</span>
+{
+  <span class="tok-s">"name"</span>: <span class="tok-s">"search_orders"</span>,                <span class="tok-c"># action verb, not "orders"</span>
+  <span class="tok-s">"description"</span>: (
+    <span class="tok-s">"Look up a customer's past orders by email or order ID. "</span>
+    <span class="tok-s">"USE WHEN the user asks about an existing order's status, items, or date. "</span>
+    <span class="tok-s">"Do NOT use to CREATE or CANCEL an order (use create_order / cancel_order), "</span>
+    <span class="tok-s">"and do NOT use for product catalog questions (use search_catalog)."</span>
+  ),
+  <span class="tok-s">"input_schema"</span>: {
+    <span class="tok-s">"type"</span>: <span class="tok-s">"object"</span>,
+    <span class="tok-s">"properties"</span>: {
+      <span class="tok-s">"email"</span>:    {<span class="tok-s">"type"</span>: <span class="tok-s">"string"</span>, <span class="tok-s">"format"</span>: <span class="tok-s">"email"</span>,
+                    <span class="tok-s">"description"</span>: <span class="tok-s">"Customer email; provide this OR order_id."</span>},
+      <span class="tok-s">"order_id"</span>: {<span class="tok-s">"type"</span>: <span class="tok-s">"string"</span>, <span class="tok-s">"pattern"</span>: <span class="tok-s">"^ORD-[0-9]{6}$"</span>,
+                    <span class="tok-s">"description"</span>: <span class="tok-s">"Order ID like ORD-004812."</span>},
+      <span class="tok-s">"status"</span>:   {<span class="tok-s">"type"</span>: <span class="tok-s">"string"</span>,
+                    <span class="tok-s">"enum"</span>: [<span class="tok-s">"any"</span>, <span class="tok-s">"open"</span>, <span class="tok-s">"shipped"</span>, <span class="tok-s">"delivered"</span>],   <span class="tok-c"># enum, not free text</span>
+                    <span class="tok-s">"description"</span>: <span class="tok-s">"Filter by status; default 'any'."</span>}
+    },
+    <span class="tok-s">"required"</span>: []   <span class="tok-c"># neither is hard-required: email OR id (enforce in code)</span>
+  }
+  <span class="tok-c"># returns: list of {order_id, date, items[], status, total} — say so in the description.</span>
+}</code></pre>
+
+  <div class="prose">
+    <p>Notice the description does three jobs at once: states the positive trigger, names the sibling tools it must <em>not</em> be confused with, and rules out an adjacent domain. That negative scoping is what makes a 10-tool agent pick correctly instead of flailing. Write tool descriptions as if the only reader is a slightly-too-eager intern who will use the tool the moment it seems vaguely relevant.</p>
+  </div>
+
+  <h2>3 &middot; Parallel vs serial calls</h2>
+  <div class="prose">
+    <p>Modern models can emit <strong>several tool calls in one turn</strong> when the calls are independent. If the user asks "compare the weather in Berlin and Munich," the model can request <code>get_weather("Berlin")</code> and <code>get_weather("Munich")</code> together; you execute both (ideally concurrently) and return both results in one batch. That is a latency win: two round-trips collapse into one.</p>
+    <p>But parallel only works when the calls <strong>do not depend on each other's output</strong>. If step two needs step one's result as an <em>argument</em> ("find the top customer, then look up their orders"), the calls must be <strong>serial</strong>: the model has to see the first Observation before it can fill in the second call's arguments. The rule is simple: <em>independent calls can fan out in parallel; dependent calls must wait.</em> A good agent runtime executes the independent batch concurrently and only loops back to the model when a result is needed to decide the next move.</p>
+  </div>
+
+  <div class="diagram">  PARALLEL (independent)              SERIAL (dependent)
+  ──────────────────────              ──────────────────
+  one turn:                           turn 1:
+    ├─ get_weather("Berlin")            └─ get_top_customer()  → "Acme"
+    └─ get_weather("Munich")          turn 2: (now it knows the arg)
+  run both at once, 1 round-trip        └─ get_orders(customer="Acme")
+                                       2 round-trips, unavoidable</div>
+
+  <h2>4 &middot; Hallucinated tool calls and how to stop them</h2>
+  <div class="prose">
+    <p>A <strong>hallucinated tool call</strong> is when the model emits a call that is wrong in one of two ways. Knowing which kind you have determines the fix:</p>
+    <ul>
+      <li><strong>Wrong name:</strong> the model invents a tool that does not exist (<code>refund_customer</code> when you only have <code>create_refund</code>). Rarer.</li>
+      <li><strong>Wrong arguments:</strong> the model calls a real tool with arguments that violate the schema, a made-up ID, a date in the wrong format, a missing required field, or a plausible-but-fabricated value. This is the <em>common</em> case, and the dangerous one, because the call <em>looks</em> valid.</li>
+    </ul>
+    <p>The defenses stack, cheapest first:</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Concept</span>
+    <p><b>Schema enforcement / structured tool calling.</b> Use the provider's native tool-calling format (not "ask for JSON in the prompt"). The model is constrained to emit a call matching one of your schemas, which kills most bad-name and malformed-shape errors at the source.<br>
+    <b>Registry validation.</b> Before executing, look the tool name up in your registry and validate the arguments against the schema (Pydantic is ideal). Reject unknown names and schema violations; never execute on trust.<br>
+    <b>Tight typed args.</b> Enums, regex patterns, and required-field rules turn "plausible garbage" into "rejected at the door." A free-text <code>status</code> invites invention; a four-value enum does not.<br>
+    <b>Self-correction.</b> When validation fails, do not crash, feed the validation error back as the Observation. The model usually fixes its own argument on the next turn. A reliable agent treats a bad tool call as a recoverable step, not a fatal one.</p>
+  </div>
+
+  <pre><code><span class="tok-k">from</span> pydantic <span class="tok-k">import</span> BaseModel, EmailStr, field_validator
+
+<span class="tok-k">class</span> <span class="tok-f">SearchOrdersArgs</span>(BaseModel):
+    email: EmailStr | <span class="tok-k">None</span> = <span class="tok-k">None</span>
+    order_id: str | <span class="tok-k">None</span> = <span class="tok-k">None</span>
+
+    <span class="tok-f">@field_validator</span>(<span class="tok-s">"order_id"</span>)
+    <span class="tok-k">def</span> <span class="tok-f">check_id</span>(cls, v):
+        <span class="tok-k">if</span> v <span class="tok-k">and</span> <span class="tok-k">not</span> v.startswith(<span class="tok-s">"ORD-"</span>):
+            <span class="tok-k">raise</span> ValueError(<span class="tok-s">"order_id must look like ORD-004812"</span>)
+        <span class="tok-k">return</span> v
+
+<span class="tok-k">def</span> <span class="tok-f">dispatch</span>(name, raw_args, registry):
+    <span class="tok-k">if</span> name <span class="tok-k">not in</span> registry:                       <span class="tok-c"># bad NAME → reject</span>
+        <span class="tok-k">return</span> tool_error(<span class="tok-s">f"No tool named {name}."</span>)
+    <span class="tok-k">try</span>:
+        args = registry[name].schema(**raw_args)     <span class="tok-c"># bad ARGS → validate</span>
+    <span class="tok-k">except</span> ValidationError <span class="tok-k">as</span> e:
+        <span class="tok-k">return</span> tool_error(<span class="tok-k">str</span>(e))                  <span class="tok-c"># feed error back → self-correct</span>
+    <span class="tok-k">return</span> registry[name].fn(args)                   <span class="tok-c"># only now do we execute</span></code></pre>
+
+  <h2>5 &middot; Idempotency: the rule that lets agents retry safely</h2>
+  <div class="prose">
+    <p>Agents <strong>loop and retry</strong>: a tool times out, the runtime retries; the model re-issues a call it thinks failed; a network blip duplicates a request. For a read tool (<code>get_balance</code>), running twice is harmless. For a <strong>write tool</strong> (<code>charge_card</code>, <code>create_order</code>, <code>send_email</code>, <code>delete_record</code>), running twice is a double charge, a duplicate order, a second email to an annoyed customer. This is not hypothetical; it is the most common way agents cause real-world damage.</p>
+    <p>The fix is <strong>idempotency</strong>: design write tools so that calling them twice with the same logical intent has the same effect as calling them once. The standard mechanism is an <strong>idempotency key</strong>: the caller (or runtime) generates a stable key for the operation, and the tool guarantees that two calls with the same key produce a single effect, returning the original result on the duplicate. Payment APIs do exactly this. For an agent, treat idempotency keys on every write tool as <em>non-negotiable</em>, because you cannot promise the loop will only fire once.</p>
+  </div>
+
+  <pre><code><span class="tok-k">def</span> <span class="tok-f">create_order</span>(items, idempotency_key):
+    <span class="tok-c"># 2nd call with the same key returns the SAME order, no duplicate.</span>
+    existing = orders.get_by_key(idempotency_key)
+    <span class="tok-k">if</span> existing:
+        <span class="tok-k">return</span> existing                       <span class="tok-c"># safe replay</span>
+    order = orders.create(items=items, key=idempotency_key)
+    <span class="tok-k">return</span> order</code></pre>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: a bad argument, recovered</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>User: <code>"What's the status of my order from Tuesday?"</code> The agent has <code>search_orders</code> but the user gave no ID. Watch the recovery loop.</p>
+  </div>
+  <div class="diagram">  Thought:  I'll search by the order they mean.
+  Action:   search_orders(order_id="ORD-TUESDAY")     ← hallucinated arg
+  Runtime:  validate → fails regex ^ORD-[0-9]{6}$
+  Observ.:  ERROR: order_id must look like ORD-004812; I have no ID for "Tuesday".
+  Thought:  I have no valid ID. The user gave their email earlier.
+  Action:   search_orders(email="jo@acme.com", status="any")   ← corrected
+  Observ.:  [ {ORD-004812, Tue, "shipped"} ]
+  Final:    "Your Tuesday order ORD-004812 has shipped."</div>
+  <div class="prose">
+    <p>The hallucinated <code>ORD-TUESDAY</code> never touched the database, the schema validator caught it. Feeding the validation error back as the Observation let the model self-correct on the very next turn. This is the difference between a brittle agent (crashes on the bad call) and a reliable one (treats a bad call as a recoverable step). The schema did the catching; the feedback loop did the fixing.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Answer each out loud in full sentences, as if to an interviewer. Then open the solution and compare. The gap is your lesson.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>Your agent has two tools, <code>get_invoice</code> and <code>get_receipt</code>, and it keeps calling the wrong one because users say "bill," "invoice," and "receipt" interchangeably. You cannot retrain the model. What is the highest-leverage fix, and where exactly does it go?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Fix it in the <strong>tool descriptions</strong> with explicit positive <em>and</em> negative scoping, because the model routes almost entirely off the description. Give each tool a "USE WHEN / do NOT use when" line that disambiguates the overlapping vocabulary: e.g. <code>get_invoice</code> → "USE WHEN the user wants the amount <em>owed</em> or a pre-payment document (also called a 'bill'). Do NOT use for proof of a completed payment, that is get_receipt." and the mirror image on <code>get_receipt</code>. The negative scoping ("do NOT use for X, use the other tool") is the single most effective sentence because it directly resolves the confusion between siblings. Optionally tighten further by naming the trigger words in each description. No retraining required: the routing decision is prompt-shaped, so you fix it in the prompt-shaped surface, the tool definition.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>A reviewer says "just retry every failed tool call three times, problem solved." For which tools is this safe, for which is it dangerous, and what one design change makes the dangerous ones safe to retry?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Blanket retries are safe for <strong>read / query tools</strong> (<code>get_balance</code>, <code>search_orders</code>), which have no side effects, running them N times yields the same answer. They are <strong>dangerous for write tools</strong> (<code>charge_card</code>, <code>create_order</code>, <code>send_email</code>, <code>delete_record</code>), where each retry can produce a duplicate charge, order, or email. The one design change that makes writes safe to retry is <strong>idempotency</strong>, typically via an idempotency key: the tool deduplicates on the key so a second call with the same key returns the original result instead of repeating the effect. With idempotency keys in place, the reviewer's "retry three times" becomes safe across the board; without them, it is a recipe for double-charging customers. So the correct answer is "retries are fine, but only after every write tool is made idempotent."</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>You give a model a <code>delete_user(user_id: str)</code> tool with a free-text <code>user_id</code> and no validation. List two distinct things that can go wrong, and the specific guardrail for each.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p><strong>(1) Hallucinated argument:</strong> the model can fabricate a plausible-looking <code>user_id</code> that does not correspond to the user it means (or to anyone), and a free-text field gives it no friction. Guardrail: <em>tight typed args + registry/Pydantic validation</em>, constrain the format (e.g. UUID or a known pattern) and verify the ID exists before executing, returning a validation error to the model on failure so it can self-correct. <strong>(2) Irreversible action with no oversight:</strong> deletion is destructive and a non-deterministic agent should not fire it unattended. Guardrail: <em>classify it as a write/high-risk tool and put an approval gate (a framework interrupt) in front of it</em>, draft the delete, pause for a human to confirm, then execute. Bonus: make it idempotent so a retried delete does not error or cascade, and log every call for audit. Together: schema validation stops the wrong target, the approval gate stops the unattended destructive action.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's Agents and Context-Engineering modules. Drill the one-line keys, then expand each into a 90-second answer.</p>
+  <ul class="q-list">
+    <li>What makes a good tool definition?
+      <div class="a">Key: action-verb name, "use this when / do NOT use when" docstring (negative scoping), tight typed params, return description.</div></li>
+    <li>What is a hallucinated tool call and how do you prevent it?
+      <div class="a">Key: nonexistent name or schema-violating args (bad args more common); prevent via structured tool calling, registry validation, tight typed args, self-correction from the error.</div></li>
+    <li>Walk through the tool-calling round-trip.
+      <div class="a">Key: model emits a structured call → runtime validates + executes the real function → result appended as observation → model continues or finishes. The model never runs code.</div></li>
+    <li>When can tool calls run in parallel versus serially?
+      <div class="a">Key: independent calls fan out in one turn (latency win); dependent calls must be serial because step two needs step one's result as an argument.</div></li>
+    <li>What is idempotency in tool design and why care?
+      <div class="a">Key: agents retry loops; create/charge/delete firing twice is dangerous; idempotency keys make duplicate calls a single effect, non-negotiable on write tools.</div></li>
+    <li>Why is enforcing structured output / tool schemas better than asking for JSON in the prompt?
+      <div class="a">Key: native tool calling constrains generation to the schema (strongest), killing malformed shapes and most bad names at the source; prompt-asked JSON is unconstrained and breaks.</div></li>
+    <li>The 3-layer constraint model for tool/structured outputs?
+      <div class="a">Key: L1 output format (tool calling) / L2 schema (Pydantic types + required) / L3 semantic ("does this ID/date actually make sense"). Pair calling with post-validation.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (15&ndash;25 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>From the Anthropic <a href="https://docs.claude.com/en/docs/agents-and-tools/tool-use/overview">tool-use guide</a>, define one <em>write</em> tool, say <code>book_meeting(title, date, attendee)</code>, with an action-verb name, a "USE WHEN / do NOT use when" description, an enum or pattern on at least one field, and an <code>idempotency_key</code> param. Then do three experiments: (1) ask a question that needs it and confirm the call's arguments are well-formed; (2) deliberately ask something ambiguous and watch whether the model invents a bad argument, then add a validation error path and see it self-correct; (3) issue the same booking request twice and verify your idempotency check returns one booking, not two. Validate the model's arguments with a small <a href="https://docs.pydantic.dev/latest/">Pydantic</a> model before "executing." You will have built every defense from section four in one sitting.</p>
+    <p class="muted" style="font-size:13.5px">No API key? Hand-trace it: write the schema, invent a malformed call, and write the validation error you would feed back. See <a href="../../tools.html">Tools &amp; Claude</a> for access.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>The <strong>Skill Store</strong> in MaiQ is, under the hood, a tool-definition problem at scale: when end users author their own agents in chat, the quality of the <em>tool descriptions and typed parameters</em> is what determines whether the model picks the right capability. You can speak to the exact tension in this lesson, that a skill the model "should" use only gets used if its name and description scope it correctly, and that you have to validate user-authored arguments before anything runs, since you are letting non-engineers wire up actions. That is a concrete, lived answer to "how do you stop hallucinated or wrong tool calls in production," and it pairs naturally with your <strong>hybrid retrieval</strong> work (retrieval itself is one of the tools an agent decides to call). When an interviewer pushes on tool design, you are not theorizing, you have shipped a platform where bad tool definitions would have shown up as user-visible bugs.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>Tool calling is a structured request/response: the model emits a call, your runtime validates and executes it, the result is appended, the loop continues, and the model never runs code itself. The model routes almost entirely off the tool's name and description, so a tool definition is prompt engineering: action-verb name, "use when / do NOT use when" scoping, tight typed params, return description. Independent calls fan out in parallel; dependent calls go serial. Hallucinated calls are usually bad <em>arguments</em>, not bad names, and you defend with schema enforcement, registry validation, typed args, and self-correction from the error. Finally, make every write tool idempotent, because the loop will retry, and an idempotency key is what keeps a retry from becoming a double charge.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d23">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: agent architectures, from single-agent ReAct to Plan-Execute and multi-agent supervisor trees.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d22-what-is-an-agent.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 22 &middot; What is an agent, really?</div></a>
+    <a data-nav="next" class="next" href="d24-agent-architectures.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 24 &middot; Agent architectures</div></a>
+  </div>
+
+  <div class="foot">Module 4 &middot; Agents &amp; Tool Use &middot; Day 23 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

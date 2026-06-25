@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 24 · Agent architectures</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 4 &middot; Agents &amp; Tool Use</span>
+    <span class="pill">Day 24</span>
+    <span class="pill">55 min</span>
+    <span class="diff" title="Difficulty: intermediate"><i class="on"></i><i class="on"></i><i></i></span>
+  </div>
+
+  <h1>Agent architectures</h1>
+  <p class="lede">Once one ReAct loop is not enough, you have choices: plan ahead, or split the work across multiple agents. Today you learn which architecture fits which problem, so you can answer "would you use one agent or several here?" with a reason instead of a guess.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Contrast single-agent ReAct with Plan-Execute and say when each wins.</li>
+      <li>Name the three multi-agent topologies, supervisor, swarm, hierarchical, and their defaults.</li>
+      <li>Decide when to split into multiple agents versus one bigger agent.</li>
+      <li>Explain filtered handoffs and why they prevent state leakage.</li>
+      <li>Handle large tool spaces with tool retrieval / routing instead of dumping 50 tools in one prompt.</li>
+    </ul>
+  </div>
+
+  <h2>1 &middot; ReAct vs Plan-Execute</h2>
+  <div class="prose">
+    <p>You met <strong>ReAct</strong> on Day 22: one loop, Thought → Action → Observation, the model decides the next step <em>after seeing the last result</em>. It is the right default for tasks with a handful of mostly-sequential steps, because it is simple and the trace is readable. Its weakness: it decides one step at a time, so it cannot exploit steps that could all run at once, and on long tasks it can drift (lose the thread of the original goal after many turns).</p>
+    <p><strong>Plan-Execute</strong> separates thinking from doing. A <strong>planner</strong> reads the goal and emits a <em>plan</em> upfront, often a DAG (directed acyclic graph) of steps with dependencies. An <strong>executor</strong> runs the steps, fanning out the independent ones in parallel. A <strong>re-planner</strong> inspects the results and revises the plan if reality diverged (a step failed, a result changed the picture). The win is when there are <strong>more than roughly six steps that are mostly knowable upfront and largely parallel</strong>: the planner sees the whole shape at once and the executor exploits the parallelism, where ReAct would plod through them one Observation at a time.</p>
+  </div>
+
+  <div class="diagram">  ReAct (decide-as-you-go)              Plan-Execute (decide-then-do)
+  ──────────────────────────            ─────────────────────────────────
+  Thought→Action→Obs                     PLAN:  step1 ─┐
+     ↓ (then decide next)                       step2 ─┼─► (independent, parallel)
+  Thought→Action→Obs                            step3 ─┘
+     ↓                                          step4  (needs step1)   ← DAG edges
+  Thought→Action→Obs                     EXECUTE: run 1,2,3 at once → then 4
+     ↓                                   RE-PLAN: did anything fail / change?
+  Final                                          if so, revise plan and rerun
+  best for ≤ ~handful of                 best for &gt;6 mostly-parallel,
+  sequential, adaptive steps             upfront-knowable steps</div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"ReAct decides one step at a time off the last observation, simple and debuggable, ideal for a handful of sequential steps. Plan-Execute commits a DAG upfront, runs independent steps in parallel, and re-plans on divergence, which pays off once there are more than about six mostly-parallel steps. I start with ReAct and only reach for Plan-Execute when the parallelism and step count justify the added machinery." That answer shows you choose architecture by problem shape, not by hype.</p>
+  </div>
+
+  <h2>2 &middot; One bigger agent, or several?</h2>
+  <div class="prose">
+    <p>The instinct to "add another agent" is usually premature. More agents means more coordination, more places for context to get lost in handoffs, more latency, and a harder-to-trace system. The default is <strong>one agent</strong> until a concrete pressure forces a split. Two pressures genuinely justify splitting:</p>
+    <ul>
+      <li><strong>Distinct tool domains.</strong> When the task spans clearly separate areas of expertise with their own tools (a "research" set, a "coding" set, a "billing" set), one agent juggling all of them confuses the routing and bloats its context. Splitting by domain gives each sub-agent a small, coherent tool set it uses well.</li>
+      <li><strong>Too many tools.</strong> Past roughly <strong>30 tools</strong>, a single agent's tool-selection accuracy degrades, the model has too many similar options and picks wrong. Partitioning the tools across specialized agents keeps each agent inside the ~10-20-tool sweet spot where routing is reliable.</li>
+    </ul>
+    <p>Critically, splitting is <em>not</em> about making each agent "smarter." It is about keeping each agent's <strong>decision space small</strong> so it routes accurately. If your reason for adding an agent is not "this shrinks some agent's tool space or separates distinct domains," you probably do not need it. A focused single agent beats a sprawling multi-agent system that leaks context at every handoff.</p>
+  </div>
+
+  <h2>3 &middot; The three multi-agent topologies</h2>
+  <div class="prose">
+    <p>When you do split, the agents have to coordinate, and there are three standard shapes. Pick by how much you value debuggability versus speed, and by how many agents you have.</p>
+  </div>
+
+  <div class="diagram">  SUPERVISOR (default)            SWARM                  HIERARCHICAL (&gt;20 agents)
+  ────────────────────            ─────                  ─────────────────────────
+        ┌───────────┐             A ⇄ B                       ┌─────────┐
+        │ SUPERVISOR│             ↑ ╲ ↓                       │ top sup │
+        │  (router) │             │  ╲│                       └────┬────┘
+        └─┬──┬───┬──┘             D ⇄ C                    ┌───────┼───────┐
+          │  │   │                                      ┌──┴──┐ ┌──┴──┐ ┌──┴──┐
+        ┌─┘  │   └─┐              agents hand            │ sub │ │ sub │ │ sub │
+      ┌─┴─┐┌─┴─┐ ┌─┴─┐            off DIRECTLY           │ sup │ │ sup │ │ sup │
+      │ A ││ B │ │ C │            to each other          └──┬──┘ └──┬──┘ └──┬──┘
+      └───┘└───┘ └───┘            (no central             workers workers workers
+   one router decides             router)                teams of agents,
+   who runs; results                                     routed in layers
+   return to supervisor</div>
+
+  <div class="prose">
+    <ul>
+      <li><strong>Supervisor (the default).</strong> One routing LLM receives the task, decides which specialist agent runs, collects the result, and decides what is next. Every decision flows through one place, so it is <strong>the most debuggable</strong>: the trace is a clean sequence of "supervisor picked A, A returned X, supervisor picked B." The cost is latency (the supervisor is a bottleneck and adds a hop per delegation) and a single point of routing failure. Choose this unless you have a specific reason not to.</li>
+      <li><strong>Swarm (direct handoffs).</strong> Agents hand control directly to each other (agent A decides "this is really a billing question" and hands off to the billing agent) with no central router. It is <strong>faster</strong> (no supervisor hop) but <strong>harder to trace</strong>, because control bounces peer-to-peer and there is no single timeline. Use it when low latency matters more than a clean audit trail and the handoff logic is simple.</li>
+      <li><strong>Hierarchical.</strong> Supervisors of supervisors, teams of agents routed in layers. This only earns its complexity at <strong>large scale (&gt;20 agents)</strong>, where a single flat supervisor would itself be choosing among too many options. Below that, it is over-engineering.</li>
+    </ul>
+  </div>
+
+  <h2>4 &middot; Filtered handoffs (stop the context leak)</h2>
+  <div class="prose">
+    <p>The quiet killer of multi-agent systems is <strong>state leakage</strong>: when one agent hands off to another, the naive move is to pass the <em>entire</em> conversation and scratchpad along. Now the billing agent is reasoning over the research agent's half-finished thoughts, irrelevant tool outputs, and dead-end attempts. Its context is polluted, its routing degrades, and its token bill climbs. The more agents in the chain, the worse the accumulation.</p>
+    <p>The fix is a <strong>filtered handoff</strong>: pass only what the receiving agent needs, a clean task statement and the specific facts relevant to it, not the whole history. Think of it like delegating at work: you do not forward an employee every email you have ever read, you give them the task and the few inputs they need. Filtered handoffs keep each agent's context tight and on-topic, which is exactly what keeps routing accurate. A clean handoff interface (task + scoped inputs + expected output) is the difference between a multi-agent system that scales and one that drowns in its own history.</p>
+  </div>
+
+  <div class="callout warning">
+    <span class="label">Anti-pattern</span>
+    <p>Passing the full message history and every prior tool result on every handoff. It feels safe ("more context can't hurt") but it leaks irrelevant state into each agent, degrades routing, inflates cost, and compounds with each hop. Hand off a <em>scoped</em> task and only the inputs that agent needs.</p>
+  </div>
+
+  <h2>5 &middot; Large tool spaces: do not dump 50 tools in one prompt</h2>
+  <div class="prose">
+    <p>The single most common multi-agent mistake at the architecture level is treating "we have 50 tools" as "give one agent 50 tools." Tool-selection accuracy falls off well before that, the model faces too many similar descriptions and picks wrong (the bad-argument and wrong-tool problems from Day 23 get worse with scale). The sweet spot for one agent is roughly <strong>10-20 tools</strong>. Past that, restructure rather than overload. Three standard techniques:</p>
+    <ul>
+      <li><strong>Tool retrieval (semantic routing).</strong> Embed every tool's description, and at each step retrieve only the top 5-10 tools relevant to the current query. The agent only ever <em>sees</em> a small, relevant menu, so it routes accurately even though the catalog is huge. This is RAG applied to the tool list.</li>
+      <li><strong>Categorical / hierarchical routing.</strong> Group tools into categories (a "calendar" group, a "CRM" group); a first decision picks the category, a second picks the tool within it. Two small choices beat one giant one.</li>
+      <li><strong>Supervisor over specialist agents.</strong> Partition the tools across domain agents (section two) and let a supervisor route to the right agent, who then chooses among <em>its</em> small tool set. This is the multi-agent answer to a large tool space.</li>
+    </ul>
+    <p>All three share one principle: <strong>keep the number of options in front of the model small at the moment of choice.</strong> Whether you achieve that by retrieving tools, nesting categories, or splitting agents, the goal is the same, accurate routing through a small decision space.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: design a customer-ops assistant</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>Requirement: an internal assistant that can (a) answer billing questions, (b) look up and update CRM records, (c) search the docs/knowledge base, and (d) file engineering tickets. About 35 tools total across these areas. What architecture?</p>
+  </div>
+  <div class="diagram">  35 tools across 4 distinct domains → ONE agent would (a) exceed ~30 tools
+  and (b) blur 4 separate tool sets. Split by DOMAIN, route via SUPERVISOR:
+
+                       ┌──────────────────┐
+                       │    SUPERVISOR    │  routes by intent, debuggable trace
+                       └──┬────┬────┬───┬─┘
+              ┌───────────┘    │    │   └───────────┐
+        ┌─────┴─────┐  ┌───────┴──┐ ┌─┴────────┐ ┌──┴────────┐
+        │  BILLING  │  │   CRM    │ │   DOCS   │ │  TICKETS  │
+        │  agent    │  │  agent   │ │  agent   │ │  agent    │
+        │ ~8 tools  │  │ ~10 tools│ │ ~4 tools │ │ ~6 tools  │   ← each in the sweet spot
+        └───────────┘  └──────────┘ └──────────┘ └───────────┘
+   handoffs are FILTERED: supervisor passes the scoped task + needed IDs only,
+   not the whole history. Write tools (update CRM, charge) are idempotent + gated.</div>
+  <div class="prose">
+    <p>Why this and not one big ReAct agent? Two of the split triggers fire at once: <strong>distinct tool domains</strong> (billing vs CRM vs docs vs tickets) and <strong>&gt;30 tools total</strong>. A supervisor is the default topology (debuggable, and we are nowhere near the 20-agent threshold that would call for hierarchical). Filtered handoffs keep the CRM agent from drowning in billing context. And because some tools write (update a record, issue a credit), they stay idempotent with an approval gate, the Day 23 rules ride along into the architecture. Note what we did <em>not</em> do: no swarm (we want the clean audit trail), no hierarchy (too few agents). Every choice traces to a stated pressure.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Answer each out loud in full sentences, as if to an interviewer. Then open the solution and compare. The gap is your lesson.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>A task always needs the same eight independent lookups (eight different data sources), then one synthesis step that uses all of them. An engineer built it as a ReAct loop and it is slow. What architecture fits better and why, specifically?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p><strong>Plan-Execute</strong> fits better. The key facts: the steps are (a) <em>knowable upfront</em> (always the same eight lookups), (b) <em>mostly independent</em> (the eight do not depend on each other), and (c) there are <em>more than six</em> of them, exactly the regime where Plan-Execute beats ReAct. ReAct is slow here because it decides one step at a time off the last observation, so it runs the eight lookups <em>sequentially</em> even though they could all run at once. A planner emits a DAG (eight parallel leaves feeding one synthesis node), the executor fans the eight out concurrently in a single wave, and the synthesis step runs once they return. That collapses eight sequential round-trips into roughly one parallel wave plus the synthesis, a large latency win. The re-planner can still handle a failed lookup. The whole reason it pays off is the parallelism the fixed, decide-as-you-go ReAct loop could not exploit.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>Your multi-agent support system works but is "weirdly dumb": the billing agent sometimes answers as if it were mid-way through a research task. Diagnose the most likely cause and the fix.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>The most likely cause is <strong>state leakage through unfiltered handoffs</strong>: when control passes to the billing agent, the system is forwarding the <em>entire</em> conversation and scratchpad, including the research agent's half-finished thoughts and tool outputs, so the billing agent reasons over polluted, off-topic context and "acts like" it is still doing research. The fix is a <strong>filtered handoff</strong>: pass only a clean, scoped task statement plus the specific inputs the billing agent needs (the account ID, the question), not the whole history. Define a tight handoff interface (task + scoped inputs + expected output). This keeps each agent's context relevant, which restores accurate routing and behavior, and as a bonus cuts token cost. The general rule: more context is not safer in multi-agent systems; irrelevant context actively degrades each agent, and the damage compounds with every hop.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>You inherit an agent with 60 tools crammed into one prompt; it frequently calls the wrong tool. You are told "do not just split it into agents, find the simplest fix first." What do you reach for, and what is the underlying principle shared by every valid fix?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>The simplest fix that does not introduce multiple agents is <strong>tool retrieval (semantic routing)</strong>: embed all 60 tool descriptions, and at each step retrieve only the top 5-10 tools relevant to the current query, so the agent sees a small, relevant menu instead of all 60. (It is RAG applied to the tool list.) A second option short of full multi-agent is <strong>categorical / hierarchical routing</strong>: pick a tool <em>category</em> first, then a tool within it, two small choices instead of one 60-way choice. Full multi-agent (supervisor over specialists) is the heavier option you were told to avoid first. The underlying principle shared by all of them: <strong>keep the number of options in front of the model small at the moment of choice.</strong> Tool-selection accuracy collapses with too many similar options (well past the ~10-20 sweet spot), so every fix works by shrinking the decision space the model faces on any given step, whether by retrieving, nesting, or splitting.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's Agents module. Drill the one-line keys, then expand each into a 90-second answer.</p>
+  <ul class="q-list">
+    <li>Plan-Execute vs ReAct, when does Plan-Execute win?
+      <div class="a">Key: &gt;6 mostly-parallel steps knowable upfront; planner emits a DAG, executor runs, re-planner inspects and revises. ReAct stays default for a handful of sequential steps.</div></li>
+    <li>Supervisor vs Swarm vs Hierarchical topology?
+      <div class="a">Key: supervisor = one routing LLM (default, debuggable, slower); swarm = direct handoffs (faster, harder to trace); hierarchical for &gt;20 agents.</div></li>
+    <li>When do you split into multiple agents instead of one bigger agent?
+      <div class="a">Key: distinct tool domains, or &gt;30 tools degrading selection. Goal is a small decision space per agent, not making each "smarter."</div></li>
+    <li>How do you handle a large tool space (50+) without wrong picks?
+      <div class="a">Key: tool retrieval (embed descriptions, top 5-10), categorical/hierarchical routing, or a supervisor over specialists; ~10-20 tools is the sweet spot.</div></li>
+    <li>What is a filtered handoff and what does it prevent?
+      <div class="a">Key: pass only the scoped task + needed inputs, not the full history; prevents state leakage that pollutes the receiving agent's context and degrades routing.</div></li>
+    <li>Why is the supervisor topology the default despite being slower?
+      <div class="a">Key: every decision flows through one router, so the trace is clean and debuggable; you trade some latency for observability, which usually wins.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (15&ndash;25 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Sketch (on paper or in code comments) a two-agent supervisor system for a task you know: a <em>supervisor</em> plus two specialists with non-overlapping tool sets. Then implement a minimal version with the Anthropic <a href="https://docs.claude.com/en/docs/agents-and-tools/tool-use/overview">tool-use API</a> or skim the <a href="https://langchain-ai.github.io/langgraph/concepts/multi_agent/">LangGraph multi-agent docs</a> to see how supervisor and handoff are modeled as graph nodes. The instructive part: deliberately implement a <em>naive</em> handoff that forwards the whole history, then a <em>filtered</em> one that forwards only the scoped task, and compare the second agent's behavior and token count. You will feel state leakage rather than just read about it. Bonus: add a tenth tool to one agent and notice how routing quality starts to wobble as you approach the sweet-spot ceiling.</p>
+    <p class="muted" style="font-size:13.5px">No API key? Do the architecture decision exercise: take three task descriptions and, for each, write down topology + why, citing the split triggers. See <a href="../../tools.html">Tools &amp; Claude</a>.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>MaiQ's <strong>Skill Store</strong>, where users author and run their own agents in chat, is a live example of the large-tool-space and routing problems in this lesson: every user-authored skill adds to the catalog, so the platform cannot just hand one model an ever-growing pile of tools, it has to keep the decision space small so the right skill gets picked. You can speak to that tension directly (how do you scale the number of available capabilities without the model picking wrong?) and to the design judgment of "one focused agent versus several," which is exactly the kind of architecture reasoning a senior interviewer is probing. Your <strong>hybrid retrieval</strong> work also transfers cleanly here: tool retrieval (embedding tool descriptions and retrieving the relevant few) is the same machinery you already build for documents, applied to the tool list. So when asked "how would you architect this," you can ground the answer in a platform you shipped rather than a diagram you read.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>Start with single-agent ReAct; reach for Plan-Execute only when there are more than about six mostly-parallel, upfront-knowable steps, because that is where committing a DAG and running it in parallel beats deciding one step at a time. Stay with one agent until a concrete pressure, distinct tool domains or more than ~30 tools, forces a split, and remember that splitting is about shrinking each agent's decision space, not making it smarter. Of the topologies, supervisor is the debuggable default, swarm trades traceability for speed, and hierarchical only earns its keep past ~20 agents. Use filtered handoffs (scoped task + needed inputs, never the whole history) to stop state leakage. And for large tool spaces, keep the options small at the moment of choice via tool retrieval, categorical routing, or a supervisor over specialists.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d24">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: LangGraph and orchestration, the stateful graph runtime that turns ad-hoc agent loops into something you can trust.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d23-tool-calling.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 23 &middot; Tool / function calling</div></a>
+    <a data-nav="next" class="next" href="d25-langgraph-orchestration.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 25 &middot; LangGraph &amp; orchestration</div></a>
+  </div>
+
+  <div class="foot">Module 4 &middot; Agents &amp; Tool Use &middot; Day 24 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

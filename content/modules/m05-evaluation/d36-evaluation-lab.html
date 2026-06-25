@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 36 · Lab — an LLM-as-judge harness</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 5 &middot; Evaluation &amp; Observability</span>
+    <span class="pill">Day 36</span>
+    <span class="pill">120 min</span>
+    <span class="diff" title="Difficulty: advanced"><i class="on"></i><i class="on"></i><i class="on"></i></span>
+  </div>
+
+  <h1>Lab &mdash; an LLM-as-judge harness</h1>
+  <p class="lede">This is the module capstone. You will build a real, working evaluation harness end to end: a golden set, an LLM-as-judge with an anchored rubric, a run over two prompt variants, regression flagging, a cheap programmatic check alongside the judge, and finally calibration of the judge against your own human labels. By the end you will have the exact artifact behind your resume's evaluation story, in code, in your hands.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you will have built</span>
+    <ul class="objectives">
+      <li>A 10-item golden set with queries, ideal answers, and ideal contexts.</li>
+      <li>An LLM-as-judge scoring faithfulness on an anchored 1 to 5 scale, reasoning before score.</li>
+      <li>A harness that runs two prompt variants over the set and reports per-variant scores.</li>
+      <li>A regression check that flags any case where variant B scores worse than variant A.</li>
+      <li>A cheap programmatic guardrail running alongside the judge.</li>
+      <li>A calibration step comparing the judge to 3 to 5 of your own human labels.</li>
+    </ul>
+  </div>
+
+  <div class="callout example">
+    <span class="label">Setup (5 min)</span>
+    <p>You need Python and an Anthropic API key (<code>pip install anthropic</code>, set <code>ANTHROPIC_API_KEY</code>). See <a href="../../tools.html">Tools &amp; Claude</a> for access. Total budget is small, this lab is a few dozen short LLM calls, cents of spend. Build it incrementally: do each checkpoint, run it, confirm the output, then move on. Do not paste the whole thing at once, the point is to understand each piece. Solution code is in the collapsible under each checkpoint, try it yourself first.</p>
+  </div>
+
+  <h2>What you are building</h2>
+  <div class="prose">
+    <p>The harness is the eval-driven loop from Day 31 made concrete. You are evaluating a tiny "answer from context" RAG generator: given a context passage and a question, produce a grounded answer. You will test two <em>prompt variants</em> of that generator, a plain one and one that explicitly instructs grounding, and use the judge to decide, with evidence, whether variant B is actually better. That is the whole job in miniature.</p>
+  </div>
+
+  <div class="diagram">  THE HARNESS, END TO END
+  golden set (10 items)
+        │
+        ├──► generator(variant A) ─┐
+        │                          ├─► judge(faithfulness 1-5) ─┐
+        ├──► generator(variant B) ─┘   + programmatic guardrail │
+        │                                                       ▼
+        │                                            per-variant mean score
+        │                                            + per-item regression flags
+        ▼
+  3-5 human labels ──► calibrate judge (agreement) ──► trust? then ship the loop</div>
+
+  <hr class="section-rule">
+
+  <h2>Checkpoint 1 &mdash; the golden set (15 min)</h2>
+  <div class="callout practice">
+    <span class="label">Build this</span>
+    <p>Create a Python list of 10 golden items. Each is a dict with <code>id</code>, <code>context</code>, <code>question</code>, and <code>ideal_answer</code>. Cover a few intents and deliberately include at least <strong>two items the answer should refuse</strong> (the context does not contain the answer, ideal answer is "the context does not say"). This is your fixed reference, every later step measures against it.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Keep it small, varied, and include the refusal cases, those are what catch a generator that invents facts.</p>
+<pre><code>GOLDEN = [
+    {<span class="tok-s">"id"</span>: <span class="tok-s">"g1"</span>,
+     <span class="tok-s">"context"</span>: <span class="tok-s">"Orders ship within 2 business days. Returns are accepted within 30 days of delivery."</span>,
+     <span class="tok-s">"question"</span>: <span class="tok-s">"How long do I have to return an item?"</span>,
+     <span class="tok-s">"ideal_answer"</span>: <span class="tok-s">"30 days from delivery."</span>},
+    {<span class="tok-s">"id"</span>: <span class="tok-s">"g2"</span>,
+     <span class="tok-s">"context"</span>: <span class="tok-s">"The Pro plan costs 49 EUR per month and includes 5 seats."</span>,
+     <span class="tok-s">"question"</span>: <span class="tok-s">"How many seats are in the Pro plan?"</span>,
+     <span class="tok-s">"ideal_answer"</span>: <span class="tok-s">"5 seats."</span>},
+    {<span class="tok-s">"id"</span>: <span class="tok-s">"g3"</span>,
+     <span class="tok-s">"context"</span>: <span class="tok-s">"Support is available Monday to Friday, 9am to 5pm CET."</span>,
+     <span class="tok-s">"question"</span>: <span class="tok-s">"Is support available on Sundays?"</span>,
+     <span class="tok-s">"ideal_answer"</span>: <span class="tok-s">"No, support is Monday to Friday only."</span>},
+    {<span class="tok-s">"id"</span>: <span class="tok-s">"g4"</span>,   <span class="tok-c"># REFUSAL case: answer not in context</span>
+     <span class="tok-s">"context"</span>: <span class="tok-s">"Orders ship within 2 business days."</span>,
+     <span class="tok-s">"question"</span>: <span class="tok-s">"What is the CEO's phone number?"</span>,
+     <span class="tok-s">"ideal_answer"</span>: <span class="tok-s">"The context does not say."</span>},
+    {<span class="tok-s">"id"</span>: <span class="tok-s">"g5"</span>,
+     <span class="tok-s">"context"</span>: <span class="tok-s">"The API rate limit is 100 requests per minute on the free tier."</span>,
+     <span class="tok-s">"question"</span>: <span class="tok-s">"What is the free-tier rate limit?"</span>,
+     <span class="tok-s">"ideal_answer"</span>: <span class="tok-s">"100 requests per minute."</span>},
+    {<span class="tok-s">"id"</span>: <span class="tok-s">"g6"</span>,
+     <span class="tok-s">"context"</span>: <span class="tok-s">"Data is encrypted at rest using AES-256."</span>,
+     <span class="tok-s">"question"</span>: <span class="tok-s">"How is data encrypted at rest?"</span>,
+     <span class="tok-s">"ideal_answer"</span>: <span class="tok-s">"With AES-256."</span>},
+    {<span class="tok-s">"id"</span>: <span class="tok-s">"g7"</span>,   <span class="tok-c"># REFUSAL case</span>
+     <span class="tok-s">"context"</span>: <span class="tok-s">"The Pro plan costs 49 EUR per month."</span>,
+     <span class="tok-s">"question"</span>: <span class="tok-s">"How much is the Enterprise plan?"</span>,
+     <span class="tok-s">"ideal_answer"</span>: <span class="tok-s">"The context does not say."</span>},
+    {<span class="tok-s">"id"</span>: <span class="tok-s">"g8"</span>,
+     <span class="tok-s">"context"</span>: <span class="tok-s">"Refunds are processed to the original payment method within 5-7 days."</span>,
+     <span class="tok-s">"question"</span>: <span class="tok-s">"How are refunds returned to me?"</span>,
+     <span class="tok-s">"ideal_answer"</span>: <span class="tok-s">"To your original payment method, within 5-7 days."</span>},
+    {<span class="tok-s">"id"</span>: <span class="tok-s">"g9"</span>,
+     <span class="tok-s">"context"</span>: <span class="tok-s">"The app supports English, German, and French."</span>,
+     <span class="tok-s">"question"</span>: <span class="tok-s">"Does the app support Spanish?"</span>,
+     <span class="tok-s">"ideal_answer"</span>: <span class="tok-s">"No, only English, German, and French."</span>},
+    {<span class="tok-s">"id"</span>: <span class="tok-s">"g10"</span>,
+     <span class="tok-s">"context"</span>: <span class="tok-s">"Two-factor authentication can be enabled in Account Settings."</span>,
+     <span class="tok-s">"question"</span>: <span class="tok-s">"Where do I turn on two-factor authentication?"</span>,
+     <span class="tok-s">"ideal_answer"</span>: <span class="tok-s">"In Account Settings."</span>},
+]
+<span class="tok-f">print</span>(<span class="tok-s">f"golden set: {len(GOLDEN)} items, "</span>
+      <span class="tok-s">f"{sum(1 for g in GOLDEN if 'does not say' in g['ideal_answer'])} refusal cases"</span>)
+</code></pre>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Checkpoint 2 &mdash; the two generator variants (15 min)</h2>
+  <div class="callout practice">
+    <span class="label">Build this</span>
+    <p>Write a <code>generate(context, question, system_prompt)</code> function that calls Claude, plus two system prompts: <strong>variant A</strong> ("answer the question") and <strong>variant B</strong> ("answer ONLY from the context; if the context does not contain the answer, say so; do not use outside knowledge"). Variant B is the hypothesis: explicit grounding instructions should raise faithfulness, especially on the refusal cases. Run both over one item to confirm they work.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Low temperature on the generator too, you want the comparison to reflect the prompt change, not sampling noise.</p>
+<pre><code><span class="tok-k">from</span> anthropic <span class="tok-k">import</span> Anthropic
+client = Anthropic()
+GEN_MODEL = <span class="tok-s">"claude-sonnet-4-5"</span>
+
+VARIANT_A = <span class="tok-s">"You are a helpful assistant. Answer the user's question."</span>
+
+VARIANT_B = (
+    <span class="tok-s">"You are a helpful assistant. Answer the question using ONLY the provided context. "</span>
+    <span class="tok-s">"If the context does not contain the answer, reply exactly: "</span>
+    <span class="tok-s">"'The context does not say.' Do not use outside knowledge."</span>
+)
+
+<span class="tok-k">def</span> <span class="tok-f">generate</span>(context: str, question: str, system_prompt: str) -&gt; str:
+    msg = client.messages.create(
+        model=GEN_MODEL,
+        max_tokens=<span class="tok-n">200</span>,
+        temperature=<span class="tok-n">0</span>,
+        system=system_prompt,
+        messages=[{<span class="tok-s">"role"</span>: <span class="tok-s">"user"</span>,
+                   <span class="tok-s">"content"</span>: <span class="tok-s">f"Context:\n{context}\n\nQuestion: {question}"</span>}],
+    )
+    <span class="tok-k">return</span> msg.content[<span class="tok-n">0</span>].text.strip()
+
+<span class="tok-c"># smoke test on the refusal case</span>
+g = GOLDEN[<span class="tok-n">3</span>]
+<span class="tok-f">print</span>(<span class="tok-s">"A:"</span>, generate(g[<span class="tok-s">"context"</span>], g[<span class="tok-s">"question"</span>], VARIANT_A))
+<span class="tok-f">print</span>(<span class="tok-s">"B:"</span>, generate(g[<span class="tok-s">"context"</span>], g[<span class="tok-s">"question"</span>], VARIANT_B))
+</code></pre>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Checkpoint 3 &mdash; the LLM-as-judge (25 min)</h2>
+  <div class="callout practice">
+    <span class="label">Build this</span>
+    <p>Write the faithfulness judge. The rubric must have: a <strong>numbered 1 to 5 scale with explicit per-level anchors</strong>, an instruction to <strong>write reasoning first and the score last</strong>, and it must score <em>only</em> faithfulness (claims supported by context), ignoring style and length. Parse out an integer <code>Score: N</code>. Use a low temperature and, ideally, name a judge model from a different family than your generator to dodge self-preference (or at least be ready to defend the choice). Test it on one obviously-faithful and one obviously-fabricated answer.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>This is the heart of the harness. Note the anchors, the forced ordering, and the strict parse.</p>
+<pre><code><span class="tok-k">import</span> re
+
+JUDGE_MODEL = <span class="tok-s">"claude-sonnet-4-5"</span>   <span class="tok-c"># in practice prefer a different family than the generator</span>
+
+JUDGE_RUBRIC = <span class="tok-s">"""You are a strict evaluator of FAITHFULNESS.
+Score ONLY whether every claim in the ANSWER is supported by the CONTEXT.
+Ignore style, tone, and length. Saying 'the context does not say' when the
+context truly lacks the answer is FULLY FAITHFUL and should score 5.
+
+Scale (integer 1-5):
+5 = every claim supported by the context; nothing invented; correct refusal counts as 5.
+4 = supported, with one trivial unsupported detail that does not mislead.
+3 = mostly supported; one clear claim is unsupported by the context.
+2 = several unsupported claims, or one important invented fact.
+1 = key claims contradict or are absent from the context.
+
+First write a brief REASONING naming the specific claim(s) you checked.
+Then, on the FINAL line, output exactly: Score: N
+"""</span>
+
+<span class="tok-k">def</span> <span class="tok-f">judge</span>(context: str, question: str, answer: str) -&gt; dict:
+    user = <span class="tok-s">f"CONTEXT:\n{context}\n\nQUESTION:\n{question}\n\nANSWER:\n{answer}"</span>
+    msg = client.messages.create(
+        model=JUDGE_MODEL, max_tokens=<span class="tok-n">400</span>, temperature=<span class="tok-n">0</span>,
+        system=JUDGE_RUBRIC,
+        messages=[{<span class="tok-s">"role"</span>: <span class="tok-s">"user"</span>, <span class="tok-s">"content"</span>: user}],
+    )
+    text = msg.content[<span class="tok-n">0</span>].text
+    m = re.search(<span class="tok-s">r"Score:\s*([1-5])"</span>, text)
+    <span class="tok-k">if</span> <span class="tok-k">not</span> m:
+        <span class="tok-k">raise</span> ValueError(<span class="tok-s">f"no score parsed:\n{text}"</span>)
+    <span class="tok-k">return</span> {<span class="tok-s">"score"</span>: int(m.group(<span class="tok-n">1</span>)), <span class="tok-s">"reasoning"</span>: text.strip()}
+
+<span class="tok-c"># sanity test</span>
+ctx = <span class="tok-s">"Returns are accepted within 30 days of delivery."</span>
+<span class="tok-f">print</span>(judge(ctx, <span class="tok-s">"Return window?"</span>, <span class="tok-s">"30 days from delivery."</span>)[<span class="tok-s">"score"</span>])      <span class="tok-c"># expect 5</span>
+<span class="tok-f">print</span>(judge(ctx, <span class="tok-s">"Return window?"</span>, <span class="tok-s">"90 days, and shipping is free."</span>)[<span class="tok-s">"score"</span>]) <span class="tok-c"># expect 1-2</span>
+</code></pre>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Checkpoint 4 &mdash; run the harness over both variants (20 min)</h2>
+  <div class="callout practice">
+    <span class="label">Build this</span>
+    <p>Loop over the golden set, for each item generate with variant A and variant B, judge both, and collect per-item scores. Print the <strong>mean faithfulness per variant</strong> and a per-item table (id, score A, score B). This is the moment the eval-driven loop produces a number: is variant B actually better, on average, on the same fixed set?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Store everything so the next checkpoints (regression flags, guardrail, calibration) can reuse it.</p>
+<pre><code><span class="tok-k">def</span> <span class="tok-f">run_variant</span>(system_prompt: str) -&gt; list:
+    rows = []
+    <span class="tok-k">for</span> g <span class="tok-k">in</span> GOLDEN:
+        ans = generate(g[<span class="tok-s">"context"</span>], g[<span class="tok-s">"question"</span>], system_prompt)
+        verdict = judge(g[<span class="tok-s">"context"</span>], g[<span class="tok-s">"question"</span>], ans)
+        rows.append({<span class="tok-s">"id"</span>: g[<span class="tok-s">"id"</span>], <span class="tok-s">"answer"</span>: ans,
+                     <span class="tok-s">"score"</span>: verdict[<span class="tok-s">"score"</span>]})
+    <span class="tok-k">return</span> rows
+
+results_A = run_variant(VARIANT_A)
+results_B = run_variant(VARIANT_B)
+
+<span class="tok-k">def</span> <span class="tok-f">mean</span>(rows): <span class="tok-k">return</span> sum(r[<span class="tok-s">"score"</span>] <span class="tok-k">for</span> r <span class="tok-k">in</span> rows) / len(rows)
+
+<span class="tok-f">print</span>(<span class="tok-s">f"\nmean faithfulness  A={mean(results_A):.2f}  B={mean(results_B):.2f}\n"</span>)
+<span class="tok-f">print</span>(<span class="tok-s">f"{'id':&lt;5}{'A':&gt;4}{'B':&gt;4}"</span>)
+<span class="tok-k">for</span> a, b <span class="tok-k">in</span> zip(results_A, results_B):
+    <span class="tok-f">print</span>(<span class="tok-s">f"{a['id']:&lt;5}{a['score']:&gt;4}{b['score']:&gt;4}"</span>)
+</code></pre>
+    <p>Expect variant B to win, mainly by getting the refusal cases (g4, g7) right where variant A may answer from outside knowledge. If B does not win, that is a real and interesting result, inspect the answers.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Checkpoint 5 &mdash; flag regressions (15 min)</h2>
+  <div class="callout practice">
+    <span class="label">Build this</span>
+    <p>A higher mean is not enough, the average can rise while specific cases get <em>worse</em>, and a worse case might be your most important one. Add a check that flags every item where variant B scored <strong>lower</strong> than variant A, and refuse to declare B a clean win if any regression exists. This is the guardrail discipline from Day 34 applied per-case.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Always inspect the cases that got worse, not just the mean. That habit is the senior signal.</p>
+<pre><code>regressions = [
+    {<span class="tok-s">"id"</span>: a[<span class="tok-s">"id"</span>], <span class="tok-s">"A"</span>: a[<span class="tok-s">"score"</span>], <span class="tok-s">"B"</span>: b[<span class="tok-s">"score"</span>]}
+    <span class="tok-k">for</span> a, b <span class="tok-k">in</span> zip(results_A, results_B)
+    <span class="tok-k">if</span> b[<span class="tok-s">"score"</span>] &lt; a[<span class="tok-s">"score"</span>]
+]
+
+<span class="tok-k">if</span> <span class="tok-k">not</span> regressions <span class="tok-k">and</span> mean(results_B) &gt; mean(results_A):
+    <span class="tok-f">print</span>(<span class="tok-s">"CLEAN WIN: B beats A on the mean with no per-item regressions."</span>)
+<span class="tok-k">elif</span> regressions:
+    <span class="tok-f">print</span>(<span class="tok-s">f"HOLD: B regressed on {len(regressions)} item(s) — inspect before shipping:"</span>)
+    <span class="tok-k">for</span> r <span class="tok-k">in</span> regressions:
+        <span class="tok-f">print</span>(<span class="tok-s">f"  {r['id']}: A={r['A']} -&gt; B={r['B']}"</span>)
+<span class="tok-k">else</span>:
+    <span class="tok-f">print</span>(<span class="tok-s">"NO IMPROVEMENT: B did not beat A on the mean."</span>)
+</code></pre>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Checkpoint 6 &mdash; a cheap programmatic check alongside the judge (15 min)</h2>
+  <div class="callout practice">
+    <span class="label">Build this</span>
+    <p>Not everything needs an LLM. Add a deterministic guardrail that runs for free next to the judge: for the refusal cases (ideal answer is "the context does not say"), programmatically assert the variant's answer actually <em>signals refusal</em> (contains a "does not"/"not in the context"/"cannot find" style phrase). Report a pass rate. This shows you reaching for the bottom layer of the pyramid where there is a deterministic ground truth, instead of paying a judge call for something a string check handles.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>The point: use the judge for subjective faithfulness, use a free assertion for the checkable structural property.</p>
+<pre><code>REFUSAL_MARKERS = (<span class="tok-s">"does not say"</span>, <span class="tok-s">"not in the context"</span>,
+                   <span class="tok-s">"cannot find"</span>, <span class="tok-s">"no information"</span>, <span class="tok-s">"not specified"</span>)
+
+<span class="tok-k">def</span> <span class="tok-f">looks_like_refusal</span>(text: str) -&gt; bool:
+    t = text.lower()
+    <span class="tok-k">return</span> any(m <span class="tok-k">in</span> t <span class="tok-k">for</span> m <span class="tok-k">in</span> REFUSAL_MARKERS)
+
+<span class="tok-k">def</span> <span class="tok-f">refusal_pass_rate</span>(results) -&gt; float:
+    refusal_ids = {g[<span class="tok-s">"id"</span>] <span class="tok-k">for</span> g <span class="tok-k">in</span> GOLDEN <span class="tok-k">if</span> <span class="tok-s">"does not say"</span> <span class="tok-k">in</span> g[<span class="tok-s">"ideal_answer"</span>]}
+    rel = [r <span class="tok-k">for</span> r <span class="tok-k">in</span> results <span class="tok-k">if</span> r[<span class="tok-s">"id"</span>] <span class="tok-k">in</span> refusal_ids]
+    passed = sum(<span class="tok-n">1</span> <span class="tok-k">for</span> r <span class="tok-k">in</span> rel <span class="tok-k">if</span> looks_like_refusal(r[<span class="tok-s">"answer"</span>]))
+    <span class="tok-k">return</span> passed / len(rel)
+
+<span class="tok-f">print</span>(<span class="tok-s">f"refusal guardrail  A={refusal_pass_rate(results_A):.0%}  "</span>
+      <span class="tok-s">f"B={refusal_pass_rate(results_B):.0%}"</span>)
+</code></pre>
+    <p>You will typically see B near 100 percent and A much lower, concrete proof that the grounding instruction works, obtained for zero LLM cost.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Checkpoint 7 &mdash; calibrate the judge against your own labels (25 min)</h2>
+  <div class="callout practice">
+    <span class="label">Build this</span>
+    <p>This is the step that makes the judge trustworthy, and the one most people skip. Pick 5 of the variant-B answers, read each yourself, and assign your own faithfulness score 1 to 5 (you are the human ground truth). Then compare your 5 labels to the judge's scores on those same 5: report exact-match agreement and the mean absolute difference, and flag any case where you and the judge disagree by 2 or more. State whether you would trust this judge to gate decisions, and if not, what you would fix.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>You fill in <code>HUMAN_LABELS</code> with your own honest reads. The code measures agreement; the judgment is yours.</p>
+<pre><code><span class="tok-c"># YOU assign these after reading 5 of the variant-B answers yourself.</span>
+<span class="tok-c"># (ground truth = your judgment, not the model's)</span>
+HUMAN_LABELS = {
+    <span class="tok-s">"g1"</span>: <span class="tok-n">5</span>, <span class="tok-s">"g4"</span>: <span class="tok-n">5</span>, <span class="tok-s">"g6"</span>: <span class="tok-n">5</span>, <span class="tok-s">"g7"</span>: <span class="tok-n">5</span>, <span class="tok-s">"g9"</span>: <span class="tok-n">5</span>,
+}
+
+judged = {r[<span class="tok-s">"id"</span>]: r[<span class="tok-s">"score"</span>] <span class="tok-k">for</span> r <span class="tok-k">in</span> results_B}
+pairs = [(hid, HUMAN_LABELS[hid], judged[hid]) <span class="tok-k">for</span> hid <span class="tok-k">in</span> HUMAN_LABELS]
+
+exact = sum(<span class="tok-n">1</span> <span class="tok-k">for</span> _, h, j <span class="tok-k">in</span> pairs <span class="tok-k">if</span> h == j) / len(pairs)
+mad = sum(abs(h - j) <span class="tok-k">for</span> _, h, j <span class="tok-k">in</span> pairs) / len(pairs)
+big_gaps = [(i, h, j) <span class="tok-k">for</span> i, h, j <span class="tok-k">in</span> pairs <span class="tok-k">if</span> abs(h - j) &gt;= <span class="tok-n">2</span>]
+
+<span class="tok-f">print</span>(<span class="tok-s">f"calibration on {len(pairs)} items:"</span>)
+<span class="tok-f">print</span>(<span class="tok-s">f"  exact agreement = {exact:.0%}"</span>)
+<span class="tok-f">print</span>(<span class="tok-s">f"  mean abs diff   = {mad:.2f}"</span>)
+<span class="tok-k">if</span> big_gaps:
+    <span class="tok-f">print</span>(<span class="tok-s">f"  DISAGREEMENTS (&gt;=2): {big_gaps}  -&gt; sharpen rubric anchors here"</span>)
+<span class="tok-k">else</span>:
+    <span class="tok-f">print</span>(<span class="tok-s">"  no large disagreements — judge looks usable for gating"</span>)
+</code></pre>
+    <p>Interpretation: high exact agreement and a mean absolute difference well under 1 means the judge tracks you and you can trust it to gate experiments. A 2-plus gap on any case means go back and sharpen the anchor (or add an in-context example) for that level, the disagreements tell you exactly which part of the rubric is ambiguous. With only 5 labels this is a directional check; in production you would use more labels and a proper statistic (Cohen's kappa for the discrete scores, Spearman for ranking) and want substantial agreement, roughly 0.6 or higher, before trusting the judge. The discipline is identical at any scale: never trust a judge you have not compared to a human.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Stretch goals (optional)</h2>
+  <div class="prose">
+    <p>If you finish early and want to push the harness toward production quality:</p>
+    <ul>
+      <li><strong>Position-bias-proof pairwise judging.</strong> Instead of scoring each answer alone, judge A vs B head to head, then judge B vs A, and only count a winner if both orders agree. That neutralizes position bias from Day 32.</li>
+      <li><strong>Add a second metric.</strong> Write an answer-relevancy judge (does the answer address the question asked) and report both faithfulness and relevancy, the start of the focused five-metric panel from Day 34.</li>
+      <li><strong>Wire it as a CI gate.</strong> Make the script exit non-zero when variant B regresses on any item or falls below a faithfulness threshold, that is the prompt CI/CD gate, ready to drop into a workflow.</li>
+      <li><strong>Cost and latency.</strong> Time each generate and judge call and tally token usage, the seed of the observability you built in Day 35.</li>
+    </ul>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Module 5 review &mdash; lock it in</h2>
+  <p class="muted">You finished the evaluation module. Answer these out loud cold, then expand the weak ones with Claude. These are the questions a senior interview will actually press on.</p>
+  <ul class="q-list">
+    <li>Why is evaluation the most underrated AI engineering skill, and what is the eval-driven loop?
+      <div class="a">Key: building a prototype is commoditized, proving a change is better on a non-deterministic system is the bottleneck. Loop: define metric + dataset, baseline, change one variable, re-measure, keep or revert.</div></li>
+    <li>Draw the three-layer eval pyramid and the offline/online split.
+      <div class="a">Key: programmatic (cheap, every request) → LLM-judge (nightly, subjective quality) → human (weekly, ground truth). Offline = fixed set pre-deploy gate; online = live signals post-deploy truth.</div></li>
+    <li>What is LLM-as-judge, how do you make the rubric stable, and where does it break?
+      <div class="a">Key: LLM scores outputs vs a rubric to scale human eval. Stable rubric: numbered scale, per-level anchors, in-context examples, reasoning before score, one dimension per call. Breaks on position/verbosity/self-preference bias and must be calibrated.</div></li>
+    <li>How do you build a golden set that does not rot, and what are replay and regression sets?
+      <div class="a">Key: seed by intent, mine prod traces (low-confidence + bugs), tag, refresh quarterly. Replay = real inputs re-run to diff behavior; regression = every fixed bug frozen as a permanent test.</div></li>
+    <li>What RAG metrics do you report, which do you trust most, and what is the five-metric rule?
+      <div class="a">Key: faithfulness (trust most), answer relevancy, contextual precision, contextual recall, plus one operational metric. Track a focused ~five so regressions do not hide in clutter.</div></li>
+    <li>How do you ship a change safely from offline to production?
+      <div class="a">Key: offline gate → shadow (real traffic, no user risk) → canary (small growing per-user A/B) → full, watching guardrail metrics with a kill switch at every rung. Automate the offline gate with prompt CI.</div></li>
+    <li>What does an LLM observability pipeline look like and what SLOs do you set?
+      <div class="a">Key: trace per request as a span tree (LLM/tool/retrieval spans with tokens, cost, latency), OTel/OTLP or LangSmith/Langfuse, structured logs, never raw PII. SLOs: p95/p99 latency, error+refusal rate, cost/request budget, faithfulness floor on a rolling sample.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>You just rebuilt, in a single sitting, the skeleton of the LLM-as-judge evaluation framework you shipped on MaiQ. That is the point of this lab: to turn a resume bullet into something you can whiteboard from memory under pressure. When an interviewer says "tell me about your evaluation work," you can now narrate it as an engineer who has the harness in muscle memory: a golden set with refusal cases, an anchored faithfulness judge with reasoning-before-score, a run that compares prompt variants on a fixed set, per-item regression flags so a rising mean never hides a worse case, a cheap programmatic check where the ground truth is deterministic, and calibration against human labels before the judge is trusted. That is exactly the rigor behind your 11+ experiments and the 37 percent cost cut at 2 percent quality drop, the harness is what made those numbers measured decisions rather than hopes. Evaluation is the market's most underrated 2026 skill and it is your edge; you now have it not just on your resume but in your hands.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Module 5 takeaways</span>
+    <p>You built an evaluation harness end to end: golden set, anchored LLM-as-judge with reasoning before score, a two-variant run, per-item regression flagging, a free programmatic guardrail, and judge calibration against your own labels. The lesson behind the code: define good before you tune, measure one variable at a time on a fixed set, separate retrieval from generation, never trust an uncalibrated judge, ship up the shadow-canary-full ladder, and trace and log everything so the system is operable. This is the discipline that lets you say "ship it" or "do not" with evidence, which is the single clearest senior signal in AI engineering. Module 5 is your edge; carry it into every system design and behavioral round.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d36">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Next module: fine-tuning and model adaptation, when prompting and RAG are not enough, and how to choose between them.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d35-observability-tracing.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 35 &middot; Observability &amp; tracing</div></a>
+    <a data-nav="next" class="next" href="../m06-finetuning/d37-prompt-rag-finetune.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 37 &middot; Prompting vs RAG vs fine-tuning</div></a>
+  </div>
+
+  <div class="foot">Module 5 &middot; Evaluation &amp; Observability &middot; Day 36 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

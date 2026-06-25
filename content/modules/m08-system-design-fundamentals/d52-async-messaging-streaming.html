@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 52 · Queues, pub/sub &amp; streaming</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 8 &middot; System Design Fundamentals</span>
+    <span class="pill">Day 52</span>
+    <span class="pill">60 min</span>
+    <span class="diff" title="Difficulty: advanced"><i class="on"></i><i class="on"></i><i class="on"></i></span>
+  </div>
+
+  <h1>Queues, pub/sub &amp; streaming</h1>
+  <p class="lede">Synchronous request-response couples your services together and makes every spike everyone's problem. Going asynchronous, putting a queue or a log between producers and consumers, is how real systems decouple, absorb bursts, and do heavy work in the background. Today you learn when to go async and which messaging shape to reach for.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>State the three reasons to go async: decouple, smooth spikes, background work.</li>
+      <li>Distinguish a message queue, pub/sub, and a log/stream, and pick the right one.</li>
+      <li>Explain Kafka's model: durable, ordered partitions and consumer groups, versus a task queue.</li>
+      <li>Reason about backpressure when consumers fall behind producers.</li>
+      <li>Make consumers idempotent and explain why "exactly-once" is mostly a myth.</li>
+      <li>Apply the outbox pattern to write to the database and publish an event atomically.</li>
+    </ul>
+  </div>
+
+  <h2>When (and why) to go async</h2>
+  <div class="prose">
+    <p>In synchronous request-response, the caller waits for the callee to finish. That is the right model for "give me this user's profile now," but it is the wrong model when the work is slow, spiky, or not needed before you answer the user. Asynchronous messaging inserts a buffer, a queue or a log, between the producer of work and its consumer, and that buffer buys you three things:</p>
+    <ul>
+      <li><strong>Decoupling</strong> &mdash; the producer does not need to know who consumes the message, how many consumers there are, or whether they are even up right now. It drops a message and moves on. Consumers can be added, removed, restarted, or scaled independently. Services stop being chained together, so one slow service no longer blocks the others.</li>
+      <li><strong>Spike smoothing (load leveling)</strong> &mdash; a sudden burst of work lands in the queue and is drained at the consumers' sustainable rate, instead of overwhelming a downstream service all at once. The queue acts as a shock absorber, the producer can spike to 10x while consumers process steadily.</li>
+      <li><strong>Background work</strong> &mdash; anything the user does not need synchronously (send the email, generate the thumbnail, update analytics, kick off an embedding job) goes on a queue so the request returns fast and the slow work happens out of band. This is the same instinct as "never await an LLM in a transaction," keep the slow stuff off the hot path.</li>
+    </ul>
+    <p>The cost is real and you must name it: async adds operational complexity, eventual consistency (the work is not done when the request returns), harder debugging (no single call stack, you trace across a message boundary), and the need to handle retries, failures, and duplicates. So you go async when slowness, spikiness, or fan-out justify it, and you stay synchronous when the caller genuinely needs the result now.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"I introduce async messaging to decouple producers from consumers, smooth traffic spikes, and move slow or non-critical work off the request path. The price is eventual consistency and harder debugging, so I only reach for it when the work is slow, bursty, or fanned out to many consumers, and I keep genuinely synchronous reads synchronous." That shows you treat async as a deliberate trade, not a default.</p>
+  </div>
+
+  <h2>1 &middot; Three shapes: queue, pub/sub, log</h2>
+  <div class="prose">
+    <p>"Messaging" is three distinct patterns, and choosing the wrong one is a common mistake. The defining question is: how many consumers should process each message, and does the history matter?</p>
+    <ul>
+      <li><strong>Message queue (work queue)</strong> &mdash; each message is processed by exactly <em>one</em> consumer, then removed. It is for distributing <em>work</em>: many workers pull from the queue, each takes a task, no two workers do the same task. Think a job queue for sending emails or resizing images (Celery, RabbitMQ, AWS SQS). Competing consumers share the load; once a message is acknowledged it is gone.</li>
+      <li><strong>Publish/subscribe (pub/sub)</strong> &mdash; each message is delivered to <em>every</em> subscriber. It is for broadcasting <em>events</em>: one event ("order placed") fans out to many independent reactions (charge the card, send a receipt, update inventory, notify analytics), each owned by a different service. Producers publish to a topic, subscribers each get their own copy. Decoupling is the point: the publisher does not know or care who is listening.</li>
+      <li><strong>Log / stream</strong> &mdash; an append-only, ordered, <em>durable</em> record of events that consumers read at their own pace and that retains history. Unlike a queue, reading does not delete: the log keeps messages for a retention window, so multiple consumer groups can read the same stream independently, replay from the past, and new consumers can join and read history. This is the Kafka model, and it is the foundation of event-driven and streaming-analytics systems.</li>
+    </ul>
+    <p>A clean way to remember it: a queue distributes work to one of many workers; pub/sub broadcasts an event to all subscribers; a log is a replayable, ordered, retained stream that many consumers read independently. The log generalizes the other two (it can act as a durable broadcast with replay), which is why Kafka shows up everywhere.</p>
+  </div>
+
+  <div class="diagram">  QUEUE (one consumer per message)        PUB/SUB (every subscriber gets it)
+   producer ─▶ [ q: m1 m2 m3 ] ─┬▶ worker A   producer ─▶ (topic) ─┬▶ sub: billing
+                                ├▶ worker B                        ├▶ sub: email
+                                └▶ worker C                        └▶ sub: analytics
+   each task done once, then removed         each event delivered to all, independently
+
+  LOG / STREAM (durable, ordered, replayable)
+   producer ─▶ [ offset: 0 1 2 3 4 5 6 7 … ]  (append-only, retained for N days)
+                       ▲read at offset 5        ▲read at offset 2
+                  consumer-group X          consumer-group Y   ← independent, can replay</div>
+
+  <h2>2 &middot; Kafka: durable ordered partitions and consumer groups</h2>
+  <div class="prose">
+    <p>Kafka is the reference log/stream system, and three concepts carry the interview.</p>
+    <p><strong>Partitions.</strong> A topic is split into partitions, and that is how Kafka scales: each partition is an independent ordered log, and partitions are spread across brokers so throughput scales with partition count. The crucial property is that <strong>ordering is guaranteed only within a partition</strong>, not across the whole topic. A message's partition is chosen by its key (for example user_id), so all events for one key land in the same partition and stay strictly ordered relative to each other, while unrelated keys parallelize across partitions. Choosing the partition key is the same kind of decision as choosing a shard key: it sets both your parallelism and your ordering guarantee.</p>
+    <p><strong>Consumer groups.</strong> Consumers reading a topic form a group, and Kafka assigns each partition to exactly one consumer in the group, so within a group the partitions (and thus the work) are balanced across consumers and each message is processed once <em>per group</em>. Add consumers up to the partition count to scale a group's throughput; beyond that, extra consumers sit idle (a partition cannot be split across two consumers in a group). Different groups are fully independent: the billing group and the analytics group each read the whole topic at their own offsets. That is how Kafka is simultaneously a work queue (within a group) and pub/sub (across groups).</p>
+    <p><strong>Offsets and durability.</strong> Each consumer group tracks its position (offset) in each partition. Because the log is durable and retained, a consumer that crashes resumes from its committed offset, a new consumer can replay from the beginning, and you can reprocess history after a bug fix. This durability and replayability is exactly what a simple task queue lacks.</p>
+    <p><strong>Kafka vs a task queue.</strong> Use a <strong>task queue</strong> (Celery, SQS, RabbitMQ) when you want to distribute discrete background jobs to workers, you do not need ordering or history, and "done and gone" is fine, the classic "process this job" workload. Use <strong>Kafka</strong> when you need a durable, ordered, replayable event stream that multiple independent consumers read, high throughput, and the ability to replay, the classic event-sourcing and streaming-analytics workload. Reaching for Kafka to send a few emails is over-engineering; reaching for a plain task queue when you need an ordered, replayable event backbone is under-engineering.</p>
+  </div>
+
+  <h2>3 &middot; Backpressure</h2>
+  <div class="prose">
+    <p>The queue is a shock absorber, but it is not infinite. <strong>Backpressure</strong> is what you do when consumers cannot keep up with producers and the buffer starts filling without bound. If you ignore it, the queue grows until it exhausts memory or disk and the system fails, or latency balloons as messages wait longer and longer (a growing consumer <em>lag</em> in Kafka terms). The senior move is to have an explicit answer for "what happens when the consumer falls behind."</p>
+    <p>The levers: <strong>scale out consumers</strong> to drain faster (up to the partition count in Kafka); <strong>buffer with bounded limits</strong> and decide what to do when full, block the producer (slow it down, true backpressure), drop low-priority messages (load shedding), or spill to a dead-letter destination; and <strong>monitor lag</strong> as a first-class metric so you scale or shed before the buffer is exhausted. The fundamental truth: a queue smooths a <em>temporary</em> spike, but if the producer's sustained rate exceeds the consumers' sustained capacity, no buffer saves you, you must either add consumer capacity or shed load. Naming that, "a queue absorbs bursts but cannot fix a permanent rate mismatch," is exactly the reasoning interviewers want.</p>
+  </div>
+
+  <h2>4 &middot; Idempotent consumers and the exactly-once myth</h2>
+  <div class="prose">
+    <p>Distributed messaging systems deliver <strong>at-least-once</strong> by default: to guarantee a message is not lost, they will redeliver it if an acknowledgment is missed (consumer crashes after processing but before acking, a network blip, a rebalance). So <strong>duplicates are normal</strong>, and your consumer must be built to tolerate them. The alternative, at-most-once, drops on failure and risks losing messages, which is usually worse.</p>
+    <p>"Exactly-once delivery" across a network is essentially a <strong>myth</strong> in the general case, because you cannot atomically both deliver and acknowledge across an unreliable network (the two generals problem). What systems like Kafka actually offer is exactly-once <em>processing semantics</em> within a constrained boundary (transactional reads-and-writes inside Kafka), not magic exactly-once delivery to arbitrary external side effects. So you do not rely on the broker to dedupe your side effects.</p>
+    <p>The real answer is <strong>idempotent consumers</strong>: make processing the same message twice have the same effect as processing it once. Techniques: track processed message IDs and skip ones you have already handled (a dedup table or a seen-set with TTL); use idempotency keys on downstream side effects so "charge $10 with key abc" is a no-op the second time (the same idempotency you saw for agent tool calls in Module 4); or make the operation naturally idempotent (a <code>SET status = shipped</code> is safe to repeat; an <code>INCREMENT</code> is not). Idempotency is what lets you embrace at-least-once delivery safely, you stop fearing duplicates because they cannot hurt you.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"Messaging is at-least-once, so I design consumers to be idempotent rather than chasing exactly-once delivery, which is a myth across a network. I dedupe on a message or idempotency key, or make the side effect naturally repeatable, so reprocessing a duplicate is harmless. That lets me embrace redelivery as a feature, not a bug." This single answer signals real distributed-systems maturity.</p>
+  </div>
+
+  <h2>5 &middot; The outbox pattern and event-driven architecture</h2>
+  <div class="prose">
+    <p>Here is a subtle bug that the outbox pattern exists to fix. A service often needs to do two things on one action: write to its database <em>and</em> publish an event ("order created"). These are two separate systems, so they cannot share one transaction, and any failure between them is a dual-write inconsistency. If the database commit succeeds but the publish fails, downstream services never hear about the order; if you publish first and the commit fails, you announced an order that does not exist. You cannot make "commit to Postgres" and "publish to Kafka" atomic directly.</p>
+    <p>The <strong>outbox pattern</strong> solves it by collapsing the two writes into one. In the same database transaction that writes the business data, you also insert the event into an <code>outbox</code> table. Because it is one transaction, the business write and the recorded event are atomic, either both happen or neither does. Then a separate relay process reads new rows from the outbox table and publishes them to the message system, marking them sent (or letting consumers dedupe by event ID). The publish becomes at-least-once and idempotent, but it can no longer be silently lost or fabricated, because the event was durably committed alongside the data it describes. This is the standard way to bridge a database and a message bus reliably, and naming it is a strong senior signal.</p>
+    <p>This is the building block of <strong>event-driven architecture</strong>: services communicate by emitting and reacting to events on a durable log rather than calling each other synchronously. Each service owns its data and publishes events; others subscribe and react. The benefits are loose coupling, independent scaling, and a replayable history of everything that happened (event sourcing). The costs are eventual consistency everywhere and the operational weight of running the message backbone, which is why you adopt it for systems that genuinely benefit from decoupling and streaming, not for a simple CRUD app.</p>
+  </div>
+
+  <div class="diagram">  OUTBOX (atomic write + reliable publish)
+   ┌─ one DB transaction ─────────────────────┐
+   │  INSERT order            (business data)  │   both commit together,
+   │  INSERT event INTO outbox (the event)     │   or neither does
+   └───────────────────────────────────────────┘
+                     │  committed
+                     ▼
+        [ relay polls outbox ] ─▶ publish to Kafka ─▶ mark sent
+                     │
+        consumers read the stream (idempotent, dedupe by event_id)
+   → no dual-write gap: the event can never be lost or fabricated.</div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: an image-upload pipeline, sync vs async</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>A user uploads a photo. The system must store it, generate three thumbnail sizes, run a moderation model, and update the user's gallery. Compare the naive synchronous flow with the async design.</p>
+  </div>
+  <div class="diagram">  SYNCHRONOUS (bad)
+   upload ─▶ store ─▶ resize×3 ─▶ moderation model ─▶ update gallery ─▶ respond
+   user waits for ALL of it (seconds); a model slowdown stalls every upload;
+   a spike of uploads overwhelms the resize + moderation workers at once.
+
+  ASYNC / EVENT-DRIVEN (good)
+   upload ─▶ store original ─┐ short DB tx + outbox: "image_uploaded"
+                            ▼
+              [ relay ] ─▶ stream "image_uploaded"
+                            │  (pub/sub fan-out, each consumer group independent)
+        ┌───────────────────┼───────────────────────┐
+        ▼                   ▼                         ▼
+   resize worker(s)    moderation worker(s)     gallery-update worker
+   (work queue,         (idempotent: dedupe      (idempotent SET)
+    competing consumers) by image_id)
+   → respond to the user in ms ("upload received"); heavy work drains at the
+     workers' sustainable rate; a moderation backlog only grows ITS lag, not
+     the user's latency; duplicates are safe because every consumer is idempotent.</div>
+  <div class="prose">
+    <p>Every concept from today shows up: the outbox makes "stored and announced" atomic, pub/sub fans the one event out to three independent reactions, each reaction is its own scalable consumer group, idempotency makes redelivery harmless, and backpressure is contained to the slow consumer's lag instead of the user's request. That is the difference between a system that buckles under a traffic spike and one that absorbs it.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Say each answer out loud in full sentences, as if to an interviewer. Then open the solution and compare. The gap is your lesson.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>A payments service writes the charge to Postgres and then publishes a "payment_succeeded" event to Kafka so downstream services send receipts and update ledgers. Occasionally a customer is charged but never gets a receipt and the ledger is missing the entry. No code throws an error. Explain the bug and the standard fix, and why a "just retry the publish" wrapper is not enough.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>This is the dual-write problem. The charge commit to Postgres and the publish to Kafka are two separate systems that cannot share a transaction, so there is a gap between them: the database commit succeeds, then the process crashes (or the broker is briefly unreachable, or the pod is killed) before the publish lands, and nothing throws because each step individually "worked", the charge is real, the event was simply never emitted. Downstream services that depend on the event therefore never react, so no receipt and no ledger entry, even though the money moved. A "just retry the publish" wrapper does not fully fix it because the failure can happen after the commit but before any retry logic runs at all (the process dies in that window), so there is nothing left to do the retry; retries help with transient broker errors but cannot cover a crash between the two writes. The standard fix is the outbox pattern: in the same database transaction that records the charge, also insert the event into an outbox table, so the charge and the intent-to-publish commit atomically, either both persist or neither does. A separate relay process then reads unsent outbox rows and publishes them to Kafka at-least-once, marking them sent, with consumers deduping by event ID. Now the event can never be silently lost (it is durably committed with the charge) and never fabricated (it only exists if the charge committed), which closes the gap that retries alone cannot.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>You move a notification feature to a task queue. In a load test it works, but in production during a marketing blast the queue depth climbs for an hour and notifications arrive 40 minutes late, then it slowly recovers. Your teammate says "the queue is broken, it is not smoothing the spike." Are they right? What is actually happening, and what are your options?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>They are misdiagnosing it: the queue is doing exactly its job, the problem is a capacity mismatch, not a broken queue. A queue smooths a spike by buffering work and letting consumers drain it at their sustainable rate, which is fine for a short burst. But during the marketing blast the producer's sustained rate (events arriving) exceeds the consumers' sustained processing capacity for a long stretch, so the buffer fills faster than it drains and the backlog, and therefore the delay, grows for as long as the imbalance lasts. It recovers afterward because once the blast ends the arrival rate drops below consumer capacity and the consumers chew through the accumulated backlog. The 40-minute lateness is the visible consumer lag. This is the fundamental truth about queues: they absorb temporary bursts but cannot fix a permanent or prolonged rate mismatch, only added consumer capacity or shed load can. Your options: scale out consumers so they drain at or above the incoming rate during such events (in Kafka, up to the partition count, so you may also need more partitions), and ideally autoscale on queue depth or lag so capacity follows demand; prioritize, send the time-sensitive notifications first and defer or batch the rest; or shed load, drop or downgrade low-value notifications when lag crosses a threshold rather than letting everything fall behind. And you monitor lag as a first-class signal so you react before users notice. The senior framing is "the queue worked, but a queue is a shock absorber, not infinite capacity, sustained overload needs more consumers or load shedding."</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>A team is choosing between a plain task queue (SQS) and Kafka for two needs: (a) sending welcome emails to new signups, and (b) a real-time analytics pipeline where several independent teams each consume the full clickstream, need strict per-user ordering, and occasionally must replay the last week after fixing a bug. Match each need to the right tool and justify it with the specific properties that decide it.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Welcome emails go on the plain task queue (SQS), and the clickstream pipeline goes on Kafka, and the deciding properties are ordering, history/replay, and number of independent consumers. Sending a welcome email is a discrete background job: each signup produces one task, exactly one worker should send that email, there is no ordering requirement between different users' emails, and once an email is sent the task is done and gone with no need to keep it. That is precisely the work-queue shape, distribute jobs to competing workers, "done and gone" is fine, so a task queue is the simplest correct tool and Kafka would be over-engineering. The analytics pipeline is the opposite on every axis. Several independent teams each need to read the entire clickstream on their own schedule, which is the consumer-group property of a durable log: different consumer groups read the same stream independently at their own offsets, something a work queue cannot do because it removes a message once one consumer takes it. They need strict per-user ordering, which Kafka provides by keying events on user_id so all of one user's events land in the same partition and stay ordered, while different users parallelize across partitions. And they must replay the last week after a bug fix, which requires a durable, retained, replayable log, exactly Kafka's offset-and-retention model, and exactly what a task queue lacks because it deletes on consumption. So the rule is: task queue for discrete fire-and-forget jobs with no ordering or replay needs, Kafka when you need a durable, ordered, replayable event stream that multiple independent consumers read.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's System Design Fundamentals slice. Drill the one-line keys, then expand each into a 90-second answer with Claude using protocol prompt #2.</p>
+  <ul class="q-list">
+    <li>When do you reach for a queue, pub/sub, or a stream?
+      <div class="a">Key: decouple producers/consumers, smooth spikes, async work; Kafka for durable ordered streams; mind backpressure and idempotent consumers.</div></li>
+    <li>Queue vs pub/sub vs log, what is the difference?
+      <div class="a">Key: queue = one consumer per message (distribute work); pub/sub = every subscriber gets it (broadcast events); log = durable, ordered, replayable, many independent consumers.</div></li>
+    <li>Explain Kafka's partitions and consumer groups.
+      <div class="a">Key: topic split into partitions for parallelism, ordering only within a partition (keyed); a group assigns each partition to one consumer (work queue within a group, pub/sub across groups); offsets enable replay.</div></li>
+    <li>When do you choose Kafka over a task queue like Celery/SQS?
+      <div class="a">Key: Kafka for durable, ordered, replayable, high-throughput event streams with multiple independent consumers; task queue for discrete fire-and-forget jobs with no ordering or replay.</div></li>
+    <li>What is backpressure and how do you handle it?
+      <div class="a">Key: consumers can't keep up and the buffer grows; scale out consumers, bound the buffer (block/shed/dead-letter), monitor lag; a queue can't fix a sustained rate mismatch.</div></li>
+    <li>Why is exactly-once a myth, and what do you do instead?
+      <div class="a">Key: delivery is at-least-once (duplicates normal); build idempotent consumers, dedupe by message/idempotency key or make the side effect naturally repeatable.</div></li>
+    <li>What is the outbox pattern and what problem does it solve?
+      <div class="a">Key: the dual-write gap between DB commit and event publish; write the event to an outbox table in the same transaction, a relay publishes it, so events are never lost or fabricated.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (15&ndash;20 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Build a tiny durable stream on Redis Streams (no Kafka cluster needed). Use <code>XADD</code> to append events to a stream and a consumer group (<code>XGROUP CREATE</code>) with <code>XREADGROUP</code> to consume them; acknowledge with <code>XACK</code>. Then deliberately skip the ack on one message and restart the consumer, observe that the unacked message is redelivered (this is at-least-once in action). Now add a tiny dedup set keyed by message ID so reprocessing the redelivered message is a no-op, and confirm the side effect only happens once, that is an idempotent consumer. Bonus: spin up two consumers in the same group and watch the stream's entries split between them (the work-queue-within-a-group behavior). Docs: Redis <a href="https://redis.io/docs/latest/develop/data-types/streams/">Streams</a> and the consumer-groups guide there.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>This module maps directly onto your Einbliq experience in Munich, where you worked on streaming analytics and observability. A streaming-analytics system is exactly the log/stream pattern at the center of today's lesson: an ordered, durable event stream that independent consumers read to compute metrics and feed dashboards (the Grafana observability side), with consumer lag as a metric you watch. You have also touched Redis Streams, which is the small-scale version of the same partitioned-log-with-consumer-groups model you just built by hand. And on MaiQ, the right shape for ingestion is event-driven: a document upload emits an event, and the parsing and embedding work happens on a consumer off the request path, the same "keep the slow work async" instinct as never holding a transaction across an LLM call. When an interviewer asks you to design an event pipeline or a streaming system, you can ground it in having built and operated one: producers emit to a durable stream, independent consumer groups process it, you make consumers idempotent because delivery is at-least-once, and you watch lag for backpressure.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>Go async to decouple producers from consumers, smooth spikes, and move slow work off the request path, accepting eventual consistency and harder debugging as the price. Know the three shapes: a queue distributes work to one of many workers, pub/sub broadcasts an event to all subscribers, and a log (Kafka) is a durable, ordered, replayable stream that many consumer groups read independently. Ordering in Kafka is per-partition and set by the key, and consumer groups give you work-queue behavior within a group and pub/sub across groups. Delivery is at-least-once, so build idempotent consumers instead of chasing the exactly-once myth, watch consumer lag for backpressure, and use the outbox pattern to close the dual-write gap between your database and your event bus.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d52">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: the Module 8 lab, design a distributed rate limiter end to end using the full methodology.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d51-caching-cdn.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 51 &middot; Caching &amp; CDNs</div></a>
+    <a data-nav="next" class="next" href="d53-sd-fundamentals-lab.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 53 &middot; Lab &mdash; design a rate limiter</div></a>
+  </div>
+
+  <div class="foot">Module 8 &middot; System Design Fundamentals &middot; Day 52 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

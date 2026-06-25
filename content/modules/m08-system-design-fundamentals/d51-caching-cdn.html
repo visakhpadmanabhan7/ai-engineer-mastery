@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 51 · Caching &amp; CDNs</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 8 &middot; System Design Fundamentals</span>
+    <span class="pill">Day 51</span>
+    <span class="pill">50 min</span>
+    <span class="diff" title="Difficulty: intermediate"><i class="on"></i><i class="on"></i><i></i></span>
+  </div>
+
+  <h1>Caching &amp; CDNs</h1>
+  <p class="lede">Caching is the highest-leverage performance move in system design: it takes load off the database, cuts latency by orders of magnitude, and is the reason a read-heavy system survives. It is also where the two famously hard problems live, invalidation and the stampede. Today you learn both sides.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Contrast cache-aside, write-through, and write-back, and pick one with a reason.</li>
+      <li>Choose an eviction policy (LRU, LFU, TTL) for the access pattern in front of you.</li>
+      <li>Explain why invalidation is the hard part and name the staleness vs freshness trade-off.</li>
+      <li>Diagnose a cache stampede / thundering herd and mitigate it three ways.</li>
+      <li>Place Redis as an application cache and a CDN at the edge for the right content.</li>
+      <li>State a sensible cache-hit-ratio goal and reason about what it implies.</li>
+    </ul>
+  </div>
+
+  <h2>Why cache at all</h2>
+  <div class="prose">
+    <p>A cache is a small, fast store that holds copies of data that is expensive to fetch or compute, so repeat requests skip the slow path. The economics are dramatic: a memory read from Redis is on the order of a millisecond or less, while the database query or computation it replaces can be tens of milliseconds. Multiply that by the read-heavy traffic from Day 49, and the cache is what stands between your database and collapse. On a feed serving 100k reads per second, a 90% cache hit ratio means only 10k per second reach the database, the difference between "comfortable" and "on fire."</p>
+    <p>Two ideas make caching work at all. <strong>Temporal locality</strong>: recently accessed data is likely to be accessed again soon. <strong>Skew</strong>: in most systems a small fraction of the data (hot keys, popular items) accounts for the large majority of reads. Cache the hot minority and you absorb most of the traffic with a small cache. The whole game is keeping the right things in a limited space and knowing when the copy has gone stale.</p>
+  </div>
+
+  <h2>1 &middot; Caching patterns: where reads and writes go</h2>
+  <div class="prose">
+    <p>A caching pattern defines how the cache and the database stay in sync. The three you must know differ in who writes to the cache and when.</p>
+    <ul>
+      <li><strong>Cache-aside (lazy loading)</strong> &mdash; the default. The application owns the logic: on a read, check the cache; on a hit, return it; on a miss, read the database, write the value into the cache, then return it. Writes go to the database and <em>invalidate</em> (delete) the cache entry so the next read repopulates it. Only requested data is cached (no waste), and the cache can fail without breaking correctness (you just fall through to the database). The downsides are the first-read latency on every miss and a brief window where cache and database can disagree.</li>
+      <li><strong>Write-through</strong> &mdash; every write goes to the cache <em>and</em> the database synchronously, so the cache is always fresh and reads are always warm. The cost is higher write latency (two writes per write) and you cache data that may never be read.</li>
+      <li><strong>Write-back (write-behind)</strong> &mdash; writes go to the cache immediately and are flushed to the database asynchronously in batches. Very fast writes and great for write-heavy bursts, but you risk <strong>data loss</strong> if the cache dies before the flush, and the database is temporarily stale. Use it only where a small loss window is acceptable.</li>
+    </ul>
+    <p>The interview default is cache-aside, because it is simple, resilient to cache failure, and wastes no space. Reach for write-through when reads must never miss after a write, and write-back only when write throughput dominates and you can tolerate a loss window.</p>
+  </div>
+
+  <div class="diagram">  CACHE-ASIDE (default)
+   READ:   app ─▶ cache?  ──hit──▶ return
+                    │miss
+                    ▼
+                  DB ─▶ write value into cache ─▶ return
+   WRITE:  app ─▶ DB  ─▶ delete (invalidate) the cache key
+
+  WRITE-THROUGH                         WRITE-BACK
+   WRITE: app ─▶ cache ─▶ DB (both,      WRITE: app ─▶ cache (now) ─┐
+                          sync)                                     └─async flush─▶ DB
+   reads always warm, writes pay 2x      fast writes, risk loss if cache dies first</div>
+
+  <h2>2 &middot; Eviction: what to drop when the cache is full</h2>
+  <div class="prose">
+    <p>A cache has bounded memory, so when it fills you must evict something to make room. The policy decides what gets thrown out, and the right one depends on the access pattern.</p>
+    <ul>
+      <li><strong>LRU (Least Recently Used)</strong> &mdash; evict the entry not touched for the longest time. The default and the right choice when temporal locality holds (recently used implies soon-to-be-used again). It adapts naturally as the hot set shifts.</li>
+      <li><strong>LFU (Least Frequently Used)</strong> &mdash; evict the entry with the fewest accesses. Better when popularity is stable over time (some items are durably hot regardless of recency), but it can cling to once-popular entries and is slower to adapt to a changing hot set.</li>
+      <li><strong>TTL (Time To Live)</strong> &mdash; every entry expires after a fixed duration regardless of use. Not really a replacement policy but a freshness control, and it doubles as the simplest form of invalidation: stale data self-destructs. Almost always combined with LRU/LFU.</li>
+    </ul>
+    <p>In practice you combine them: an LRU cache with per-key TTLs is the workhorse. LRU keeps the hot set resident; the TTL bounds how stale any single entry can get. Redis supports several eviction policies (for example <code>allkeys-lru</code>), and choosing one is a normal sizing decision.</p>
+  </div>
+
+  <h2>3 &middot; Invalidation: the genuinely hard part</h2>
+  <div class="prose">
+    <p>There is a famous line that the two hard things in computing are naming, cache invalidation, and off-by-one errors. Invalidation is hard because a cache is a <em>copy</em>, and the moment the source of truth changes, every copy is potentially wrong. Serve a stale copy and users see incorrect data; invalidate too aggressively and you destroy your hit ratio and hammer the database. The core tension is <strong>freshness versus hit ratio</strong>, and there is no free lunch.</p>
+    <p>The main strategies, from simplest to most precise:</p>
+    <ul>
+      <li><strong>TTL expiry</strong> &mdash; let entries time out. Dead simple, no coordination, but data is stale for up to the TTL, and you tune the TTL to trade freshness against load. The default for data that can be a little stale.</li>
+      <li><strong>Write-time invalidation</strong> &mdash; on every write, delete (or update) the affected cache keys, the cache-aside write path. Precise and fresh, but only as good as your ability to know exactly which keys a write touches. A write that affects a derived or aggregated value can be easy to miss, which is how stale entries leak.</li>
+      <li><strong>Versioning / key namespacing</strong> &mdash; bake a version into the cache key (or a prefix), and bump the version to invalidate a whole class at once. Old keys are simply never read again and age out by eviction. Great for bulk invalidation without hunting individual keys.</li>
+    </ul>
+    <p>The senior framing: pick the weakest consistency the use case tolerates. A product price needs prompt write-time invalidation; a "trending this week" list is fine on a TTL. Match the strategy to how wrong a stale read is allowed to be, and say so out loud.</p>
+  </div>
+
+  <h2>4 &middot; The cache stampede (thundering herd)</h2>
+  <div class="prose">
+    <p>This is the failure interviewers love, because the naive cache makes it worse, not better. A <strong>cache stampede</strong> happens when a hot key expires or is evicted and, in the instant it is missing, a flood of concurrent requests all miss the cache simultaneously and all hit the database at once to recompute the same value. The database, sized assuming the cache absorbs that traffic, gets a sudden spike of identical expensive queries and can topple. The cruel part is that the more popular the key, the bigger the herd, so your hottest, most-cached data is the most dangerous when it lapses.</p>
+    <p>Three mitigations, often combined:</p>
+    <ul>
+      <li><strong>Locking / single-flight</strong> &mdash; when a key misses, only the first request acquires a lock and recomputes the value while the others wait for it and then read the freshly cached result. One database query instead of ten thousand. (Redis makes this easy with a short-lived lock key.)</li>
+      <li><strong>Request coalescing</strong> &mdash; the application-level version of the same idea: collapse concurrent identical misses into one in-flight computation and fan the single result out to all waiters.</li>
+      <li><strong>Jittered / staggered TTL</strong> &mdash; never expire many related keys at the same instant. Add randomness to TTLs so expiries spread over time, and consider <em>early recomputation</em> (refresh a hot key slightly before it expires, in the background) so it is never actually absent. Jitter prevents the synchronized mass expiry that triggers the herd in the first place.</li>
+    </ul>
+  </div>
+
+  <div class="diagram">  STAMPEDE (no protection)              MITIGATED (single-flight + jitter)
+   hot key expires                       hot key expires
+        │                                     │
+   10,000 concurrent misses              1st miss ─acquire lock─▶ recompute ─▶ cache
+        ▼  all at once                   the other 9,999 ─wait─▶ read fresh value
+   [   DATABASE   ] ← spike, topples      [ DATABASE ] ← exactly ONE query
+                                          + jittered TTLs so keys don't all expire together</div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"A cache stampede is when a hot key lapses and a herd of concurrent misses all hit the database to recompute the same value at once. I prevent it with single-flight locking so only the first miss recomputes while the rest wait, plus jittered TTLs and background early-refresh so the hot key is never simultaneously absent for everyone." Naming the herd <em>and</em> the fix unprompted is a strong signal.</p>
+  </div>
+
+  <h2>5 &middot; Redis as a cache, and the CDN at the edge</h2>
+  <div class="prose">
+    <p><strong>Redis</strong> is the default application cache: an in-memory key-value store reachable by every node in your stateless fleet, with sub-millisecond reads, TTLs, atomic operations, and the eviction policies above built in. It sits between the app servers and the database (cache-aside), and because it is shared it also holds sessions and other hot state (which is what keeps the app tier stateless, from Day 49). Run it replicated and multi-AZ so the cache itself is not a single point of failure.</p>
+    <p>A <strong>CDN (Content Delivery Network)</strong> is a different layer of caching: a geographically distributed network of edge servers that cache content close to users. It is the right tool for <strong>static and cacheable</strong> content, images, video, CSS/JS bundles, fonts, and any response that is the same for many users, because it serves them from an edge node near the requester instead of round-tripping to your origin across the world. That cuts latency (physical distance is latency) and offloads enormous bandwidth from your servers. CDNs cache by URL with TTLs and support explicit invalidation (a purge), and you control cacheability with HTTP cache headers. The mental split: Redis caches dynamic application data near your compute; a CDN caches static assets near your users.</p>
+  </div>
+
+  <div class="prose">
+    <p><strong>Hit ratio goals.</strong> The cache hit ratio (hits &divide; total lookups) is the metric that says whether caching is working. For hot read paths, aim for roughly <strong>90%+</strong>: at 90% the database sees one-tenth of the read traffic, at 95% one-twentieth. Below ~80% on a path that should be cacheable, something is wrong, a too-short TTL, a cache too small for the hot set, or a poor key design causing misses. The ratio also frames capacity: if you know the hit ratio and total QPS, you know exactly how much read traffic actually reaches the database, which is the number you size the database for.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: trace a cache-aside read, then break it</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>A product page reads product data 50,000 times per second. Trace the cache-aside path, then watch a stampede form and fix it.</p>
+  </div>
+  <div class="diagram">  NORMAL (90% hit)
+   read product:123 ─▶ Redis GET product:123
+        ├─ HIT  (≈45,000/s) ─▶ return in <1 ms
+        └─ MISS (≈5,000/s)  ─▶ DB SELECT ─▶ SET product:123 (TTL 300s, +jitter) ─▶ return
+   DB sees ~5,000/s, not 50,000/s.
+
+  PRICE CHANGE
+   write price ─▶ DB UPDATE ─▶ DEL product:123   (write-time invalidation)
+   next read repopulates from the DB. fresh, precise.
+
+  THE BUG: product:123 is the hottest key and its TTL lapses at one instant
+   → ~50,000 concurrent misses in that moment ─▶ all hit the DB ─▶ spike.
+  THE FIX: single-flight (first miss recomputes under a lock, rest wait) +
+           jittered TTL + background refresh just before expiry → DB sees ONE query.</div>
+  <div class="prose">
+    <p>The same key that gives you a 90% hit ratio in steady state is the one that endangers the database the instant it expires. That is the whole lesson in one trace: caching is enormous leverage, and the leverage cuts both ways at the moment of invalidation, which is exactly why invalidation and the stampede are the hard parts.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Say each answer out loud in full sentences, as if to an interviewer. Then open the solution and compare. The gap is your lesson.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>An engineer adds a cache-aside layer in front of the database and reports that average latency dropped, but at random moments the database CPU spikes hard and a few requests time out, and it correlates with nothing in particular. The cache TTL is a flat 600 seconds for everything. Diagnose the likely cause and propose the fix.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>This is a cache stampede driven by synchronized TTL expiry. With a flat 600-second TTL, many keys that were populated around the same time, especially a burst of popular keys cached together, expire at the same instant. In that instant every concurrent request for those keys misses simultaneously and falls through to the database to recompute, so the database gets a sudden burst of identical expensive queries it was never sized for (the cache normally absorbs them), the CPU spikes, and the slowest of those requests time out. It "correlates with nothing" because the trigger is the clock, not user behavior. The fix has two parts. First, add jitter to the TTLs so expiries spread out over time instead of bunching, for example 600 seconds plus or minus a random spread, which alone prevents the synchronized mass expiry. Second, protect the hot keys with single-flight locking so that when a key does miss, only the first request recomputes it under a lock while the others wait and then read the fresh value, turning ten thousand redundant queries into one; optionally refresh very hot keys in the background just before they expire so they are never absent. Together these keep the database load smooth instead of spiky, which is the whole point of the cache.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>You are choosing a caching pattern for two different features in the same app: (a) a user's account balance, which must never show a stale value after a transaction, and (b) a "most-viewed articles today" list that is expensive to compute. Which pattern and invalidation strategy for each, and why not the other way around?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>For the account balance, correctness dominates and staleness is unacceptable, so you want write-time invalidation (and arguably write-through). With cache-aside plus precise invalidation, every transaction updates the database and immediately deletes (or updates) the balance cache key, so the next read repopulates the correct value; write-through achieves the same freshness by writing cache and database together on every change so a read can never see an old balance. A long TTL would be wrong here because it would let a stale balance persist for the TTL window after a transaction, which is exactly the failure you cannot have for money. For the most-viewed list, freshness barely matters (nobody is harmed if "today's most viewed" is a few minutes behind) but recomputation is expensive, so a simple TTL is ideal: cache the computed list with, say, a one-to-five-minute TTL plus jitter and let it expire and recompute on a schedule, which keeps the expensive aggregation off the hot path almost entirely. Swapping them would be bad both ways: write-time invalidation on the most-viewed list would mean re-running the expensive aggregation on every single view event (enormous waste for data that does not need to be fresh), and a long TTL on the balance would serve wrong financial data. The principle is to pick the weakest consistency the use case tolerates: precise invalidation only where staleness is harmful, cheap TTL where it is not.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>A teammate proposes putting your CDN in front of the personalized home feed API "to make it fast," reasoning that the CDN caches responses near users. Why is this a mistake, and what content is the CDN actually for?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>It is a mistake because a CDN caches a response by its URL and serves that same cached copy to every user who requests it, which only works when the response is identical across users. A personalized home feed is different for every user by definition, so either the CDN cannot cache it at all (cache headers mark it private/no-store and the CDN is pure overhead) or, far worse, if it is misconfigured to cache, one user's personalized feed gets served to other users, which is both a correctness bug and a privacy leak. CDNs are for static and shared content: images, video, CSS and JavaScript bundles, fonts, and any API response that is the same for many users (a public article body, a product catalog page). For that content the CDN is a huge win because it serves from an edge node physically near the user, cutting latency and offloading bandwidth from the origin. The personalized feed belongs to a different caching layer: cache its expensive inputs and per-user computed results in Redis near your compute (cache-aside, keyed by user), not at a shared edge. The clean mental split is CDN caches static/shared content near users, Redis caches dynamic/personalized data near your servers.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's System Design Fundamentals slice. Drill the one-line keys, then expand each into a 90-second answer with Claude using protocol prompt #2.</p>
+  <ul class="q-list">
+    <li>What cache strategies exist, and what is the hardest part?
+      <div class="a">Key: cache-aside (default) vs write-through / write-back; TTL + eviction (LRU); invalidation is the hard part; watch stampede / thundering herd.</div></li>
+    <li>Compare cache-aside, write-through, and write-back.
+      <div class="a">Key: aside = lazy, app-managed, resilient to cache failure; write-through = always fresh, 2x write cost; write-back = fastest writes, risks loss if cache dies before flush.</div></li>
+    <li>How do you choose an eviction policy?
+      <div class="a">Key: LRU for shifting hot set (temporal locality), LFU for stable popularity, TTL for freshness; usually LRU + per-key TTL together.</div></li>
+    <li>Why is cache invalidation hard, and what strategies exist?
+      <div class="a">Key: a cache is a copy, so freshness fights hit ratio; TTL expiry (simple, stale window), write-time delete (precise but must know the keys), versioned keys (bulk invalidate).</div></li>
+    <li>What is a cache stampede and how do you mitigate it?
+      <div class="a">Key: hot key lapses, herd of concurrent misses floods the DB; mitigate with single-flight locking, request coalescing, and jittered TTL / background early refresh.</div></li>
+    <li>When do you use a CDN vs an application cache like Redis?
+      <div class="a">Key: CDN for static/shared content near users (images, JS/CSS, public responses); Redis for dynamic/personalized data near your compute; never CDN a per-user response.</div></li>
+    <li>What cache hit ratio do you target and what does it imply?
+      <div class="a">Key: ~90%+ on hot reads, so the DB sees ~1/10 of read traffic; below ~80% suggests too-short TTL, undersized cache, or bad key design.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (15&ndash;20 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Build cache-aside by hand against Redis. Write a function <code>get_product(id)</code> that does <code>GET product:{id}</code>, returns on a hit, and on a miss reads from a stand-in "database" (a dict with an artificial 50ms sleep), then <code>SET</code>s the value with a TTL plus a few seconds of random jitter. Wrap the database call in timing and log HIT or MISS. Hammer it with the same few IDs from several threads and watch the hit ratio climb and the simulated database calls collapse. Then deliberately set a flat (un-jittered) short TTL and fire 50 concurrent requests for one key right as it expires, observe the burst of simultaneous misses, then add a simple lock so only the first miss recomputes and confirm the burst becomes a single call. Docs: Redis <a href="https://redis.io/docs/latest/commands/set/">SET with EX</a> and the <a href="https://redis.io/docs/latest/develop/clients/redis-py/">redis-py</a> client.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>Caching is a thread that runs straight through your retrieval work on MaiQ. The cost optimization you are known for, the 11+ retrieval experiments that cut inference cost 37% for a 2% quality drop, is in large part a caching and reuse story: embed once and reuse the vectors, cache rerank results so you do not re-score the same candidates, and avoid recomputing what has not changed. Redis is already in your stack as the shared store. When an interviewer asks how you would cut the cost or latency of an LLM or retrieval system, you can ground the answer in this lesson and your experience: cache-aside the expensive computations (embeddings, rerank scores, retrieved sets) in Redis with sensible TTLs, watch the hit ratio, and protect the hottest keys from stampedes, the same principles that take load off a database take load off your most expensive model and retrieval calls. You will go deeper on prompt and semantic caching for LLMs in the LLMOps module; this is the general foundation underneath it.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>Caching is the highest-leverage performance move: cache the hot minority of data and a 90%+ hit ratio means the database sees a fraction of the read traffic. Default to cache-aside because it is simple and survives cache failure, and reach for write-through or write-back only when reads-must-be-warm or write-throughput demands it. Eviction (LRU plus TTL) keeps the hot set resident and bounds staleness. The two hard parts are invalidation, where you pick the weakest consistency the use case tolerates, and the stampede, which you defeat with single-flight locking and jittered TTLs. Use Redis to cache dynamic data near your compute and a CDN to cache static, shared content near your users, never the personalized stuff.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d51">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: going async, queues, pub/sub, and streaming, to decouple producers from consumers and smooth out spikes.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d50-databases.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 50 &middot; Databases: SQL/NoSQL, sharding, CAP</div></a>
+    <a data-nav="next" class="next" href="d52-async-messaging-streaming.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 52 &middot; Queues, pub/sub &amp; streaming</div></a>
+  </div>
+
+  <div class="foot">Module 8 &middot; System Design Fundamentals &middot; Day 51 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

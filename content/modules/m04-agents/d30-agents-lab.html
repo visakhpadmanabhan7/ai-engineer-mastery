@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 30 · Lab &mdash; a tool-using agent</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 4 &middot; Agents &amp; Tool Use</span>
+    <span class="pill">Day 30</span>
+    <span class="pill">120 min</span>
+    <span class="diff" title="Difficulty: advanced"><i class="on"></i><i class="on"></i><i class="on"></i></span>
+  </div>
+
+  <h1>Lab &mdash; a tool-using agent</h1>
+  <p class="lede">This is the Module 4 capstone. You will build a small ReAct agent from scratch: two or three typed tools (a calculator, a search/retrieval tool, and a write tool guarded by approval), a max-steps guard, structured tool calls validated with Pydantic, parse-error feedback fed into the next turn, and a trajectory log. Then you add one evaluation, tool-call accuracy on a handful of scripted tasks. Every concept from Days 22 to 29 shows up as a line of code you can run.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Implement a ReAct loop (Thought, Action, Observation) as a plain Python loop.</li>
+      <li>Define typed tools and validate the model's tool calls with Pydantic.</li>
+      <li>Feed a validation or parse error back into the next turn as self-correction.</li>
+      <li>Guard a write tool behind an approval gate and bound the loop with max steps.</li>
+      <li>Emit a trajectory log of every step, tool, args, and observation.</li>
+      <li>Write a tool-call-accuracy eval over scripted tasks and read its results.</li>
+    </ul>
+  </div>
+
+  <h2>What you are building</h2>
+  <div class="prose">
+    <p>One file, runnable, no framework required (a LangGraph version is sketched at the end). The agent answers a request by looping: the model proposes a tool call, you validate and execute it, you feed the observation back, and it loops until it emits a final answer or hits the step cap. The architecture is exactly the ReAct default from Day 24, hardened with the reliability mechanisms from Day 28 and instrumented for the eval from Day 29.</p>
+  </div>
+
+  <div class="diagram">  user request
+        │
+   ┌────▼─────────────────────────────────────────────────────┐
+   │  LOOP  (max_steps cap — Day 28 hard cap)                  │
+   │    model → proposes  {tool, args}                         │  Thought + Action
+   │    Pydantic validate args ──fail──► feed error back ──┐   │  (self-correction, Day 27)
+   │    │ ok                                               │   │
+   │    dispatch:  calc | search        (read, run freely) │   │
+   │               write → APPROVAL GATE (Day 28) ─────────┘   │  Observation
+   │    append observation → next turn                        │
+   │    log step → trajectory                                  │  (trace, Day 28/29)
+   └────┬─────────────────────────────────────────────────────┘
+        ▼  final answer  +  trajectory log  ──►  tool-call-accuracy eval (Day 29)</div>
+
+  <h2>Checkpoint 0 &middot; Setup and the tools</h2>
+  <div class="prose">
+    <p>Define three typed tools. Each has a clear name, a tight Pydantic argument model, and a docstring stating when to use it. The write tool (<code>save_note</code>) is the one we will gate. We tag each tool read or write, exactly the classification from Day 28.</p>
+  </div>
+
+  <pre><code><span class="tok-c"># pip install anthropic pydantic</span>
+<span class="tok-k">from</span> pydantic <span class="tok-k">import</span> BaseModel, Field, ValidationError
+<span class="tok-k">from</span> typing <span class="tok-k">import</span> Literal
+<span class="tok-k">import</span> json, hashlib
+
+<span class="tok-c"># ---- typed argument models (Day 23: tight, typed params) ----</span>
+<span class="tok-k">class</span> <span class="tok-f">CalcArgs</span>(BaseModel):
+    expression: str = Field(description=<span class="tok-s">"a pure arithmetic expression, e.g. '(120*0.2)+5'"</span>)
+
+<span class="tok-k">class</span> <span class="tok-f">SearchArgs</span>(BaseModel):
+    query: str = Field(min_length=2, description=<span class="tok-s">"keywords to look up in the notes store"</span>)
+
+<span class="tok-k">class</span> <span class="tok-f">SaveArgs</span>(BaseModel):
+    title: str
+    body: str
+
+<span class="tok-c"># ---- tool implementations ----</span>
+NOTES = {<span class="tok-s">"return policy"</span>: <span class="tok-s">"Returns accepted within 30 days with receipt."</span>,
+         <span class="tok-s">"shipping"</span>: <span class="tok-s">"Standard shipping is 3-5 business days."</span>}
+SAVED = {}
+
+<span class="tok-k">def</span> <span class="tok-f">calc</span>(a: CalcArgs):
+    <span class="tok-k">return</span> str(eval(a.expression, {<span class="tok-s">"__builtins__"</span>: {}}, {}))   <span class="tok-c"># sandboxed eval, demo only</span>
+
+<span class="tok-k">def</span> <span class="tok-f">search</span>(a: SearchArgs):
+    hits = [v <span class="tok-k">for</span> k, v <span class="tok-k">in</span> NOTES.items() <span class="tok-k">if</span> a.query.lower() <span class="tok-k">in</span> k]
+    <span class="tok-k">return</span> json.dumps(hits) <span class="tok-k">if</span> hits <span class="tok-k">else</span> <span class="tok-s">"[]"</span>
+
+<span class="tok-k">def</span> <span class="tok-f">save_note</span>(a: SaveArgs, idem_key: str):
+    <span class="tok-k">if</span> idem_key <span class="tok-k">in</span> SAVED:                 <span class="tok-c"># Day 28: idempotency — retry is safe</span>
+        <span class="tok-k">return</span> <span class="tok-s">f"already saved (key {idem_key[:8]})"</span>
+    SAVED[idem_key] = (a.title, a.body)
+    <span class="tok-k">return</span> <span class="tok-s">f"saved '{a.title}'"</span>
+
+<span class="tok-c"># ---- registry: name, schema, fn, and READ/WRITE tag (Day 28) ----</span>
+TOOLS = {
+    <span class="tok-s">"calc"</span>:      {<span class="tok-s">"schema"</span>: CalcArgs,   <span class="tok-s">"fn"</span>: calc,      <span class="tok-s">"kind"</span>: <span class="tok-s">"read"</span>},
+    <span class="tok-s">"search"</span>:    {<span class="tok-s">"schema"</span>: SearchArgs, <span class="tok-s">"fn"</span>: search,    <span class="tok-s">"kind"</span>: <span class="tok-s">"read"</span>},
+    <span class="tok-s">"save_note"</span>: {<span class="tok-s">"schema"</span>: SaveArgs,   <span class="tok-s">"fn"</span>: save_note, <span class="tok-s">"kind"</span>: <span class="tok-s">"write"</span>},
+}</code></pre>
+
+  <div class="callout warning">
+    <span class="label">Lab caveat</span>
+    <p>The <code>eval()</code> calculator and in-memory dicts are for the lab only. In production a calculator tool uses a safe expression parser, not <code>eval</code>, and the notes store is a real database. The point here is the agent loop and its guards, not the tools themselves.</p>
+  </div>
+
+  <h2>Checkpoint 1 &middot; The ReAct loop with structured tool calls</h2>
+  <div class="prose">
+    <p>Now the core. We use Claude's native tool calling so the model returns a structured tool name and a JSON args object (Day 21's "enforce structure with tool calling"). Each turn: send the conversation, read the model's chosen tool, validate the args with that tool's Pydantic schema, and, on failure, feed the exact error back so the next turn can self-correct (Day 27). A <code>max_steps</code> cap bounds the loop (Day 28). We log every step into a trajectory list (Day 29).</p>
+  </div>
+
+  <pre><code><span class="tok-k">import</span> anthropic
+client = anthropic.Anthropic()   <span class="tok-c"># reads ANTHROPIC_API_KEY</span>
+
+<span class="tok-c"># Anthropic tool specs derived from the Pydantic schemas</span>
+TOOL_SPECS = [
+    {<span class="tok-s">"name"</span>: name,
+     <span class="tok-s">"description"</span>: spec[<span class="tok-s">"schema"</span>].__doc__ <span class="tok-k">or</span> name,
+     <span class="tok-s">"input_schema"</span>: spec[<span class="tok-s">"schema"</span>].model_json_schema()}
+    <span class="tok-k">for</span> name, spec <span class="tok-k">in</span> TOOLS.items()
+]
+
+<span class="tok-k">def</span> <span class="tok-f">run_agent</span>(user_msg, approver, max_steps=<span class="tok-n">8</span>):
+    messages = [{<span class="tok-s">"role"</span>: <span class="tok-s">"user"</span>, <span class="tok-s">"content"</span>: user_msg}]
+    trajectory = []                                  <span class="tok-c"># Day 29: the trace</span>
+
+    <span class="tok-k">for</span> step <span class="tok-k">in</span> range(max_steps):                     <span class="tok-c"># Day 28: hard cap</span>
+        resp = client.messages.create(
+            model=<span class="tok-s">"claude-sonnet-4-5"</span>, max_tokens=<span class="tok-n">1024</span>,
+            tools=TOOL_SPECS, messages=messages,
+            system=(<span class="tok-s">"You are a careful assistant. Use search for facts in the "</span>
+                    <span class="tok-s">"notes store, calc for arithmetic, save_note to persist a note. "</span>
+                    <span class="tok-s">"When done, reply with a final answer and no tool call."</span>))
+
+        tool_uses = [b <span class="tok-k">for</span> b <span class="tok-k">in</span> resp.content <span class="tok-k">if</span> b.type == <span class="tok-s">"tool_use"</span>]
+        <span class="tok-k">if</span> <span class="tok-k">not</span> tool_uses:                            <span class="tok-c"># final answer → stop</span>
+            text = <span class="tok-s">""</span>.join(b.text <span class="tok-k">for</span> b <span class="tok-k">in</span> resp.content <span class="tok-k">if</span> b.type == <span class="tok-s">"text"</span>)
+            trajectory.append({<span class="tok-s">"step"</span>: step, <span class="tok-s">"final"</span>: text})
+            <span class="tok-k">return</span> text, trajectory
+
+        messages.append({<span class="tok-s">"role"</span>: <span class="tok-s">"assistant"</span>, <span class="tok-s">"content"</span>: resp.content})
+        results = []
+        <span class="tok-k">for</span> tu <span class="tok-k">in</span> tool_uses:
+            obs = dispatch(tu.name, tu.input, approver)   <span class="tok-c"># validate + gate + run</span>
+            trajectory.append({<span class="tok-s">"step"</span>: step, <span class="tok-s">"tool"</span>: tu.name,
+                               <span class="tok-s">"args"</span>: tu.input, <span class="tok-s">"obs"</span>: obs})
+            results.append({<span class="tok-s">"type"</span>: <span class="tok-s">"tool_result"</span>, <span class="tok-s">"tool_use_id"</span>: tu.id,
+                            <span class="tok-s">"content"</span>: obs})
+        messages.append({<span class="tok-s">"role"</span>: <span class="tok-s">"user"</span>, <span class="tok-s">"content"</span>: results})  <span class="tok-c"># Observation</span>
+
+    <span class="tok-k">return</span> <span class="tok-s">"stopped: hit max_steps"</span>, trajectory      <span class="tok-c"># Day 28 backstop fired</span></code></pre>
+
+  <h2>Checkpoint 2 &middot; dispatch: validation, approval gate, idempotency</h2>
+  <div class="prose">
+    <p>The <code>dispatch</code> function is where the reliability layers live. It validates the args against the tool's Pydantic schema and, on <code>ValidationError</code>, returns the error text as the observation, that string becomes the model's next-turn signal and lets it self-correct (Day 27). If the tool is a write, it routes through the approval gate before executing and attaches an idempotency key so a retry cannot double-write (Day 28).</p>
+  </div>
+
+  <pre><code><span class="tok-k">def</span> <span class="tok-f">dispatch</span>(name, raw_args, approver):
+    spec = TOOLS.get(name)
+    <span class="tok-k">if</span> spec <span class="tok-k">is</span> <span class="tok-k">None</span>:
+        <span class="tok-k">return</span> <span class="tok-s">f"error: no such tool '{name}'"</span>     <span class="tok-c"># registry check (Day 28)</span>
+    <span class="tok-k">try</span>:
+        args = spec[<span class="tok-s">"schema"</span>](**raw_args)          <span class="tok-c"># Pydantic validation (Day 21)</span>
+    <span class="tok-k">except</span> ValidationError <span class="tok-k">as</span> e:
+        <span class="tok-k">return</span> <span class="tok-s">f"validation error, fix the args and retry: {e}"</span>   <span class="tok-c"># self-correct</span>
+
+    <span class="tok-k">if</span> spec[<span class="tok-s">"kind"</span>] == <span class="tok-s">"write"</span>:               <span class="tok-c"># Day 28: gate the write</span>
+        <span class="tok-k">if</span> <span class="tok-k">not</span> approver(name, args.model_dump()):
+            <span class="tok-k">return</span> <span class="tok-s">"action rejected by approver"</span>
+        idem = hashlib.sha256(json.dumps(args.model_dump(),
+                              sort_keys=<span class="tok-k">True</span>).encode()).hexdigest()
+        <span class="tok-k">return</span> spec[<span class="tok-s">"fn"</span>](args, idem)         <span class="tok-c"># idempotency key passed in</span>
+    <span class="tok-k">return</span> spec[<span class="tok-s">"fn"</span>](args)                    <span class="tok-c"># reads run freely</span>
+
+<span class="tok-c"># approver: a policy or a human. Auto-approve, else ask on console.</span>
+<span class="tok-k">def</span> <span class="tok-f">auto_approve</span>(name, args): <span class="tok-k">return</span> <span class="tok-k">True</span>
+<span class="tok-k">def</span> <span class="tok-f">human_approve</span>(name, args):
+    <span class="tok-k">return</span> input(<span class="tok-s">f"approve {name}({args})? [y/N] "</span>).strip().lower() == <span class="tok-s">"y"</span>
+
+<span class="tok-c"># run it:</span>
+ans, traj = run_agent(<span class="tok-s">"What is our return window, and save a note titled "</span>
+                      <span class="tok-s">"'policy' with the answer."</span>, approver=human_approve)
+print(ans)
+<span class="tok-k">for</span> s <span class="tok-k">in</span> traj: print(s)</code></pre>
+
+  <div class="callout concept">
+    <span class="label">What you just built, in interview terms</span>
+    <p>"A ReAct agent with structured tool calls validated by Pydantic, parse errors fed back as self-correction, a read/write tool split with an approval gate and idempotency on the write, a max-steps backstop, and a trajectory log." That single sentence is most of Module 4, and every clause is a few lines you can point to.</p>
+  </div>
+
+  <h2>Checkpoint 3 &middot; One evaluation: tool-call accuracy</h2>
+  <div class="prose">
+    <p>Finally, add the layer-2 eval from Day 29. Define a few scripted tasks, each with the tool you expect the agent to call. Run the agent (with <code>auto_approve</code> so it is non-interactive), pull the tool names from the trajectory, and score whether the expected tool was used. Print a pass/fail table. This is the smallest honest agent eval, and it already catches the most common failure: calling the wrong tool.</p>
+  </div>
+
+  <pre><code><span class="tok-c"># scripted tasks: prompt → the tool we expect to see in the trajectory</span>
+CASES = [
+    {<span class="tok-s">"msg"</span>: <span class="tok-s">"What is 12% of 250?"</span>,                 <span class="tok-s">"expect"</span>: <span class="tok-s">"calc"</span>},
+    {<span class="tok-s">"msg"</span>: <span class="tok-s">"What is our return policy?"</span>,            <span class="tok-s">"expect"</span>: <span class="tok-s">"search"</span>},
+    {<span class="tok-s">"msg"</span>: <span class="tok-s">"Save a note titled 'x' saying hello."</span>,  <span class="tok-s">"expect"</span>: <span class="tok-s">"save_note"</span>},
+]
+
+<span class="tok-k">def</span> <span class="tok-f">eval_tool_accuracy</span>(cases):
+    passed = <span class="tok-n">0</span>
+    <span class="tok-k">for</span> c <span class="tok-k">in</span> cases:
+        _, traj = run_agent(c[<span class="tok-s">"msg"</span>], approver=auto_approve)
+        used = {s[<span class="tok-s">"tool"</span>] <span class="tok-k">for</span> s <span class="tok-k">in</span> traj <span class="tok-k">if</span> <span class="tok-s">"tool"</span> <span class="tok-k">in</span> s}
+        ok = c[<span class="tok-s">"expect"</span>] <span class="tok-k">in</span> used
+        passed += ok
+        print(<span class="tok-s">f"{'PASS' if ok else 'FAIL'}  {c['msg'][:34]:34}  "</span>
+              <span class="tok-s">f"expected={c['expect']:9} used={used}"</span>)
+    print(<span class="tok-s">f"\ntool-call accuracy: {passed}/{len(cases)}"</span>)
+
+eval_tool_accuracy(CASES)</code></pre>
+
+  <div class="prose">
+    <p>That is the full capstone: an agent, its guards, its trajectory, and one real eval. You can now extend it, more tools, a trajectory check that a read precedes a write, loop detection, without changing the shape.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Build checkpoints &mdash; do these, reveal the solution after</h2>
+  <p class="muted">These are the lab's graded checkpoints. Attempt each before opening the solution; the solution code is what you should converge to.</p>
+
+  <div class="callout practice">
+    <span class="label">Checkpoint A &mdash; parse-error feedback</span>
+    <p>Force the model to send a bad <code>calc</code> argument (e.g. by asking it to "compute the average of the team's feelings"), and make the agent <em>recover</em> rather than crash. What in the code above already handles this, and how would you confirm it worked from the trajectory?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>It is already handled in <code>dispatch</code>: when the Pydantic model rejects the args, the <code>except ValidationError</code> branch returns the error string as the observation instead of raising. That string becomes the model's next-turn input, so it can self-correct, the exact Day 27 pattern (a cheap, reliable signal: the validator). To confirm from the trajectory, look for a step whose <code>obs</code> starts with "validation error, fix the args and retry" followed by a later step where the same tool is called with corrected args (or the agent abandons that tool). The key property to articulate in an interview: the error is fed <em>back into the loop</em>, not swallowed or thrown, which is what turns a parse failure into a recoverable, observable event. If you want it stricter, cap the number of consecutive validation failures on the same tool so a model that cannot produce valid args eventually stops rather than burning all steps.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Checkpoint B &mdash; prove the approval gate and idempotency</span>
+    <p>Run the agent with <code>human_approve</code> and (1) reject a <code>save_note</code>, then (2) approve a save and trigger the same logical save twice. What should the trajectory show in each case, and which lines guarantee it?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>(1) On rejection, the gate in <code>dispatch</code> returns "action rejected by approver" as the observation and the write never executes, <code>SAVED</code> stays empty and the agent must continue or finalize without having persisted anything. The guaranteeing lines are the <code>if spec["kind"] == "write"</code> block calling <code>approver(...)</code> before <code>spec["fn"]</code>, so no write runs without approval (Day 28's draft, pause, approve, execute). (2) On a repeated save, the idempotency key is a sha256 of the sorted args, so the same logical note produces the same key; the first call stores it, and the second hits the <code>if idem_key in SAVED</code> guard in <code>save_note</code> and returns "already saved" without writing again. The trajectory shows two <code>save_note</code> observations, one "saved 'x'" and one "already saved", proving the retry was safe. The senior point: you did not prevent the retry, you made it idempotent, which is the correct posture for any side-effecting tool an agent can re-issue.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Checkpoint C &mdash; extend the eval to a trajectory check</span>
+    <p>Layer-2 tool-call accuracy passes a task as long as the right tool appears anywhere. Add a minimal <em>trajectory</em> assertion (Day 29) for a task like "look up the return policy, then save it" that fails a run which saved <em>without</em> first searching. Sketch the check.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Tool-call accuracy is necessary but not sufficient, it would pass a run that saved a hallucinated policy without ever searching, the classic "right answer, wrong trajectory" bug. The trajectory check asserts <em>order</em>: extract the ordered list of tool names from the trajectory and require that a <code>search</code> step appears before any <code>save_note</code> step. Sketch:</p>
+    <pre><code><span class="tok-k">def</span> <span class="tok-f">policy_ok</span>(traj):
+    seq = [s[<span class="tok-s">"tool"</span>] <span class="tok-k">for</span> s <span class="tok-k">in</span> traj <span class="tok-k">if</span> <span class="tok-s">"tool"</span> <span class="tok-k">in</span> s]
+    <span class="tok-k">if</span> <span class="tok-s">"save_note"</span> <span class="tok-k">in</span> seq:
+        <span class="tok-k">return</span> <span class="tok-s">"search"</span> <span class="tok-k">in</span> seq[:seq.index(<span class="tok-s">"save_note"</span>)]
+    <span class="tok-k">return</span> <span class="tok-k">True</span>   <span class="tok-c"># no write → nothing to verify</span></code></pre>
+    <p>A run that saves before searching fails <code>policy_ok</code> even though it would pass tool-call accuracy, which is the whole point of trajectory eval: it scores the path, not just the presence of the right tool. In a real system this is where you encode the written policy ("verify before mutate"), and you would add the failing case to your golden set so it cannot regress.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>LangGraph variant (optional)</h2>
+  <div class="prose">
+    <p>The same agent in LangGraph trades the hand-rolled loop for a stateful graph runtime, which is the upgrade you make when control flow gets complex (Day 25): you get checkpoints, cycles, and <code>interrupt</code>-based approval for free. The plain loop above is the right teaching tool because every mechanism is visible; the framework version is what you reach for once the graph has many nodes, real human-in-the-loop pauses, or persisted state.</p>
+  </div>
+
+  <pre><code><span class="tok-c"># sketch: LangGraph prebuilt ReAct agent + interrupt-based approval</span>
+<span class="tok-k">from</span> langgraph.prebuilt <span class="tok-k">import</span> create_react_agent
+<span class="tok-k">from</span> langgraph.checkpoint.memory <span class="tok-k">import</span> MemorySaver
+
+agent = create_react_agent(
+    model=<span class="tok-s">"anthropic:claude-sonnet-4-5"</span>,
+    tools=[calc_tool, search_tool, save_tool],     <span class="tok-c"># same tools, LangChain-wrapped</span>
+    checkpointer=MemorySaver(),                     <span class="tok-c"># enables interrupt + resume</span>
+)
+<span class="tok-c"># a write tool can call interrupt() internally to pause for approval (Day 28),</span>
+<span class="tok-c"># then resume with agent.invoke(Command(resume=...), config).</span></code></pre>
+
+  <hr class="section-rule">
+
+  <h2>Module 4 review &mdash; rapid q-list</h2>
+  <p class="muted">The Agents &amp; Tool Use slice in one pass. Say each key out loud; if any feels shaky, reread that day before moving to Module 5.</p>
+  <ul class="q-list">
+    <li>What is an agent and how is it different from a chain? (Day 22)
+      <div class="a">Key: agent = LLM has autonomy over control flow (picks next step + tool in a loop); chain = fixed, dev-wired pipeline.</div></li>
+    <li>When should you NOT use an agent? (Day 22)
+      <div class="a">Key: small/scoped/deterministic task, tight latency, single-prompt-expressible, safety-critical. Knowing when not to is senior signal.</div></li>
+    <li>What makes a good tool definition? (Day 23)
+      <div class="a">Key: action-verb name, "use this when / do NOT use when" docstring, tight typed params, return description; negative scoping matters.</div></li>
+    <li>What is the ReAct loop and why is it the single-agent default? (Day 24)
+      <div class="a">Key: interleaves Thought &rarr; Action &rarr; Observation; simple, debuggable from the trace, good for a handful of tool calls.</div></li>
+    <li>LangChain vs LangGraph &mdash; when does the upgrade pay off? (Day 25)
+      <div class="a">Key: LangChain = integrations/chains; LangGraph = stateful graph runtime (cycles, interrupts, checkpoints); upgrade when control flow gets complex.</div></li>
+    <li>Short-term vs long-term vs episodic memory? (Day 26)
+      <div class="a">Key: short = working context (pruned); long = durable user facts (vector/KV by user_id); episodic = summaries of past sessions.</div></li>
+    <li>When does reflection actually help, and how do you fix a tool-call loop? (Day 27)
+      <div class="a">Key: reflect only with a cheap reliable signal (code runs / JSON parses / SQL returns); fix loops by detecting repeated (tool,args), surfacing it, capping max_steps.</div></li>
+    <li>How do you sleep at night with a non-deterministic agent? (Day 28)
+      <div class="a">Key: five layers, constrain action space, trace every call, eval, guardrails/approval, canary + rollback; split read/write, idempotency on writes.</div></li>
+    <li>How do you evaluate an agent, and is "right answer, wrong tool" a bug? (Day 29)
+      <div class="a">Key: final-answer + tool-call accuracy + trajectory + online/safety; wrong tool is a bug (luck breaks under data shift); τ-bench checks final state vs policy.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (extend the lab, 20&ndash;30 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Take the agent you built and add <strong>loop detection</strong> from Day 27. Maintain a list of recent (tool name, args) hashes; if the same hash appears twice in a row, inject an observation ("you already called this and it did not help, try a different tool or query") instead of dispatching again, and confirm it breaks a deliberately induced loop (e.g. a search query that returns nothing). Then add a fourth tool of your own (a real read tool, perhaps a tiny RAG lookup over a few text snippets) and extend the eval's <code>CASES</code> to cover it. See the Anthropic <a href="https://docs.claude.com/en/docs/build-with-claude/tool-use/overview">tool use docs</a>, the <a href="https://langchain-ai.github.io/langgraph/">LangGraph docs</a>, and <a href="https://docs.pydantic.dev/latest/">Pydantic docs</a> for validation patterns.</p>
+    <p class="muted" style="font-size:13.5px">If you have no API key yet, run the loop with a stubbed model function that returns scripted tool calls; everything except the live Claude call (validation, gate, idempotency, trajectory, eval) runs offline. See <a href="../../tools.html">Tools &amp; Claude</a> to set up access.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>This lab is a scale model of the Skill Store you shipped in MaiQ, where users author, share, and run their own agents directly in chat. The same primitives are here: a tool registry, typed and validated tool calls, a read/write distinction, and guards so a user-defined behavior cannot do something unsafe. When an interviewer asks "have you actually built agentic systems," you can point past the toy: "I built a platform where end users compose their own agents in conversation, so I had to think hard about exactly what this lab demonstrates, structured tool calls, validation and self-correction, gated writes, and bounded loops." And because you also built an LLM-as-judge evaluation framework, the eval step is not new ground for you, it is the same measure-before-you-trust habit applied to agent trajectories. The lab gives you a clean, code-level vocabulary for a system you genuinely shipped.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>You built a real ReAct agent end to end: a plain loop, typed tools, structured tool calls validated by Pydantic, parse errors fed back as self-correction, a read/write split with an approval gate and idempotency on the write, a max-steps backstop, a trajectory log, and one tool-call-accuracy eval, plus a trajectory check that fails "right answer, wrong path." Every clause traces to a day in Module 4, and the LangGraph variant shows where you would graduate when control flow grows. That completes Agents &amp; Tool Use. Module 5 turns the evaluation you tasted here into the central discipline of an AI engineer's job.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d30">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Next module: why evaluation is the job, the skill that separates a demo from a production AI system.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d29-agent-evaluation.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 29 &middot; Evaluating agents</div></a>
+    <a data-nav="next" class="next" href="../m05-evaluation/d31-why-eval-is-the-job.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 31 &middot; Why evaluation is the job</div></a>
+  </div>
+
+  <div class="foot">Module 4 &middot; Agents &amp; Tool Use &middot; Day 30 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dashboard — AI Engineer Mastery</title>
+<link rel="stylesheet" href="assets/base.css">
+<link rel="stylesheet" href="assets/app.css">
+</head>
+<body>
+<div class="wrap wrap-wide" id="app" style="padding-top:8px">
+  <div class="muted-center" id="loading"><span class="spinner"></span> Loading your dashboard…</div>
+</div>
+
+<script src="assets/api.js"></script>
+<script>
+if (!requireAuth()) { /* redirected */ }
+renderNav("dash");
+
+async function load() {
+  let user, curriculum, progress, stats, meta;
+  try {
+    [user, curriculum, progress, stats, meta] = await Promise.all([
+      me(), getCurriculum(), getProgress(), getReviewStats(), getMeta(),
+    ]);
+  } catch (e) {
+    document.getElementById("loading").innerHTML = "Could not load: " + escapeHtml(e.message);
+    return;
+  }
+
+  const doneDays = new Set(progress.completed_days);
+  // next incomplete lesson
+  const allLessons = curriculum.flatMap((m) => m.lessons).sort((a, b) => a.day - b.day);
+  const next = allLessons.find((l) => !doneDays.has(l.day)) || allLessons[allLessons.length - 1];
+
+  const html = `
+    <div class="hero" style="padding:30px 0 6px">
+      <div class="eyebrow">Welcome back, ${escapeHtml(user.display_name)}</div>
+      <h1 style="font-size:2rem">Today's training</h1>
+    </div>
+
+    <div class="today">
+      <div style="flex:1; min-width:240px">
+        <div class="big">Day ${next.day} ${doneDays.has(next.day) ? "· you're all caught up" : "· up next"}</div>
+        <h2>${escapeHtml(next.title)}</h2>
+        <p class="muted" style="margin:0">${next.est_minutes} min · ${"●".repeat(next.difficulty)}${"○".repeat(3 - next.difficulty)}</p>
+      </div>
+      <a class="btn primary" href="lesson.html?day=${next.day}">${doneDays.has(next.day) ? "Revisit" : "Start"} Day ${next.day} &rarr;</a>
+      ${stats.due_now > 0 ? `<a class="btn" href="review.html">Review ${stats.due_now} due card${stats.due_now > 1 ? "s" : ""}</a>` : ""}
+    </div>
+
+    <div class="stat-grid">
+      <div class="stat"><div class="num gold">${progress.pct}%</div><div class="label">${progress.completed_days.length}/${progress.total} lessons</div></div>
+      <div class="stat"><div class="num">${user.current_streak} &#128293;</div><div class="label">day streak (best ${user.longest_streak})</div></div>
+      <div class="stat"><div class="num">${stats.due_now}</div><div class="label">cards due now</div></div>
+      <div class="stat"><div class="num">${stats.reviewed_today}</div><div class="label">reviewed today</div></div>
+    </div>
+
+    <div class="progress-wrap panel" style="max-width:680px">
+      <div class="progress-track"><div class="progress-fill" style="width:${progress.pct}%"></div></div>
+      <div class="progress-label"><b>${progress.completed_days.length}</b> of ${progress.total} days complete &middot; <b>${progress.pct}%</b></div>
+    </div>
+
+    <h2>The path</h2>
+    <div id="modules"></div>
+
+    <div class="foot">
+      Powered by your own stack &middot; SRS engine: <b>${meta.srs_engine}</b> &middot;
+      AI tutor: <b>${meta.ai_enabled ? "live" : "set ANTHROPIC_API_KEY to enable"}</b> &middot;
+      DB: <b>${meta.db}</b> &middot; ${meta.lessons} lessons &middot; ${meta.questions} questions
+    </div>`;
+  const app = document.getElementById("app");
+  app.innerHTML = html;
+
+  const mods = curriculum
+    .map((m) => {
+      const days = m.lessons
+        .map(
+          (l) =>
+            `<li class="day ${doneDays.has(l.day) ? "done" : ""}">
+               <input type="checkbox" ${doneDays.has(l.day) ? "checked" : ""} onclick="toggle(event, ${l.id}, ${l.day})">
+               <span class="dnum">Day ${l.day}</span>
+               <a href="lesson.html?day=${l.day}">${escapeHtml(l.title)}</a>
+               <span class="dtag">${l.est_minutes} min</span>
+             </li>`
+        )
+        .join("");
+      return `<div class="module">
+          <header><span class="mnum">${String(m.number).padStart(2, "0")}</span>
+            <span class="mtitle" ${m.is_core ? 'style="color:var(--gold)"' : ""}>${escapeHtml(m.title)}</span>
+            <span class="pill ${m.is_core ? "gold" : ""} mtag">${escapeHtml(m.week)}${m.is_core ? " · core" : ""}</span>
+          </header>
+          <ul class="days">${days}</ul>
+        </div>`;
+    })
+    .join("");
+  document.getElementById("modules").innerHTML = mods;
+}
+
+async function toggle(e, lessonId, day) {
+  const checked = e.target.checked;
+  e.target.closest(".day").classList.toggle("done", checked);
+  try {
+    await setProgress(lessonId, checked);
+    if (checked) toast("Day " + day + " complete");
+  } catch (ex) {
+    toast("Could not save: " + ex.message);
+    e.target.checked = !checked;
+  }
+}
+
+load();
+</script>
+</body>
+</html>

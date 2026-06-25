@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 35 · Observability &amp; tracing</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 5 &middot; Evaluation &amp; Observability</span>
+    <span class="pill">Day 35</span>
+    <span class="pill">55 min</span>
+    <span class="diff" title="Difficulty: intermediate"><i class="on"></i><i class="on"></i><i></i></span>
+  </div>
+
+  <h1>Observability &amp; tracing</h1>
+  <p class="lede">Evaluation tells you whether the system is good. Observability tells you what it actually did, request by request, when something goes wrong at 2 a.m. Without tracing, an LLM app is a black box that occasionally and inexplicably fails. Today you make it transparent.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Explain a trace as a span tree and read tokens, cost, and latency off every span.</li>
+      <li>Say what you log on every request and what you must never log.</li>
+      <li>Define SLOs for an LLM endpoint that capture quality, not just uptime.</li>
+      <li>Describe a cost dashboard and the levers it surfaces.</li>
+      <li>Write structured logs that are queryable instead of prose you grep in despair.</li>
+    </ul>
+  </div>
+
+  <h2>The unit of observability: the trace</h2>
+  <div class="prose">
+    <p>An LLM request is rarely a single call. One user message can fan out into a retrieval, two tool calls, and three LLM invocations, each with its own latency and cost. When the final answer is wrong or slow, "the request failed" tells you nothing. You need to see <em>inside</em> it.</p>
+    <p>A <strong>trace</strong> is the full record of one request, structured as a <strong>span tree</strong>. A span is one unit of work, an LLM call, a tool call, a retrieval, with a start time, a duration, and attributes. Spans nest: the top-level request span contains child spans for each step, which can contain their own children. Each span carries the data that matters for that step:</p>
+    <ul>
+      <li><strong>LLM spans</strong>, model, prompt version, temperature, input and output token counts, computed cost, latency, and the stop reason.</li>
+      <li><strong>Tool spans</strong>, tool name, arguments, result (or error), latency.</li>
+      <li><strong>Retrieval spans</strong>, the query, the retrieved document IDs and scores, top-k, latency.</li>
+    </ul>
+    <p>Read top to bottom, a trace is a complete, timed story of what the system did. You can see instantly that the slow request spent 1.9 of its 2.3 seconds in one tool call, or that the wrong answer came from a retrieval span that returned the wrong document. That is the difference between debugging and guessing.</p>
+  </div>
+
+  <div class="diagram">  ONE TRACE  =  span tree for a single user request
+  (each span: name · latency · tokens/cost where applicable)
+
+  ▸ request  "What's our refund window and is item #A12 eligible?"   2.34s
+    ├─ retrieval.hybrid          0.08s   k=8, top doc_returns#p3 (0.81)
+    ├─ llm.plan                  0.41s   in 1,240 tok · out 90 tok · $0.004
+    ├─ tool.lookup_order(A12)    1.52s   ← 65% of total latency lives here
+    │     └─ http GET /orders    1.49s   200 OK
+    ├─ llm.answer                0.30s   in 1,610 tok · out 140 tok · $0.006
+    └─ guardrail.citation_check  0.01s   pass
+       ───────────────────────────────────────────────
+       totals: 3,080 tok · $0.010 · 2.34s · stop=end_turn</div>
+
+  <div class="prose">
+    <p>This is standardized. The open standard is <strong>OpenTelemetry (OTel)</strong>, with traces exported over <strong>OTLP</strong> to a backend. For LLM apps specifically, tools like <strong>LangSmith</strong> and <strong>Langfuse</strong> give you this span-tree view out of the box, with token and cost accounting per span and the prompt/response captured. You instrument once; you read traces forever.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"My observability unit is a trace per request, a span tree where each LLM, tool, and retrieval span records its own tokens, cost, and latency. I export it via OpenTelemetry over OTLP, or use LangSmith or Langfuse for the LLM-native view. When a request is slow or wrong, the trace localizes it immediately, which span ate the latency, which retrieval returned the wrong document, so I debug from evidence instead of guessing."</p>
+  </div>
+
+  <h2>What to log every request, and what NEVER to log</h2>
+  <div class="prose">
+    <p>Logging is a deliberate choice, not "log everything." You want enough to debug and to reconstruct any decision, without creating a privacy liability or a cost explosion. Per request, log:</p>
+    <ul>
+      <li><strong>Versioning</strong>, prompt version, model name, temperature and other sampling params. Without the prompt version you cannot tell which prompt produced a bad answer after you have changed it twice.</li>
+      <li><strong>Performance and cost</strong>, input and output token counts, per-span and total latency, computed cost.</li>
+      <li><strong>The decision trail</strong>, tool calls with their arguments, retrieved document IDs and scores, the stop reason. This is what lets you replay why the system did what it did.</li>
+      <li><strong>Correlation identifiers</strong>, a request ID, and a <strong>hashed</strong> user and session ID so you can group a user's interactions and trace a complaint to its request, without storing who they are.</li>
+    </ul>
+  </div>
+
+  <div class="callout warning">
+    <span class="label">Never log raw PII</span>
+    <p>Do not write raw personally identifiable information, names, emails, payment details, health data, into your logs or traces. Logs get shipped to third-party backends, retained for months, and read by many engineers; raw PII there is a compliance breach (GDPR and friends) waiting to happen. <b>Hash or pseudonymize user and session identifiers, redact or omit sensitive fields, and log document IDs rather than raw document contents where you can.</b> You can still debug, you group by the hashed ID and pull the doc by its ID, you just never persist the sensitive payload itself. Decide this <em>before</em> you ship, because retrofitting redaction after a leak is too late.</p>
+  </div>
+
+  <div class="prose">
+    <p>This is, incidentally, a place your Infosys background is directly relevant: named-entity redaction of unstructured text is exactly the technique you reach for to strip PII out of anything you must log. The instinct to redact before persisting is the senior move.</p>
+  </div>
+
+  <h2>SLOs for an LLM endpoint</h2>
+  <div class="prose">
+    <p>A <strong>Service Level Objective (SLO)</strong> is a target you commit to and alert on. For a normal web service these are latency and error rate. An LLM endpoint needs those <em>plus</em> quality and cost SLOs, because an LLM endpoint can be 100 percent "up", returning HTTP 200, while quietly returning garbage. Uptime is not quality. The set worth defining:</p>
+    <ul>
+      <li><strong>Latency, p95 and p99.</strong> Tail latency, not the average, because the average hides the slow requests that actually frustrate users. Set a budget (e.g. p95 under 2s) and alert when it is breached.</li>
+      <li><strong>Error rate and refusal rate.</strong> Not just 5xx errors, but how often the model <em>refuses</em> or returns an empty/unusable answer. A climbing refusal rate is a real degradation that uptime monitoring will never see.</li>
+      <li><strong>Cost per request budget.</strong> An SLO on spend. LLM costs scale with tokens and can silently explode when prompts grow or an agent loops; a cost-per-request alert catches the runaway before the invoice does.</li>
+      <li><strong>A quality floor on a rolling sample.</strong> Continuously run your LLM-as-judge over a small rolling sample of live traffic and alert if, say, faithfulness on that sample drops below a threshold. This is the SLO that catches silent quality regressions, the system is up, fast, and cheap, but the answers got worse, and only a sampled quality metric will tell you.</li>
+    </ul>
+    <p>The throughline: a healthy LLM endpoint is fast at the tail, rarely refuses, stays inside its cost budget, and holds a faithfulness floor. Monitor only uptime and you are blind to three of the four ways it can fail.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Say this in an interview</span>
+    <p>"For an LLM endpoint I set four SLOs: p95/p99 latency, error-plus-refusal rate, a cost-per-request budget, and a faithfulness floor measured by an LLM-as-judge over a rolling sample of live traffic. The last one matters most and people forget it, the endpoint can be up, fast, and cheap while the answers silently degrade, and only a sampled quality metric catches that."</p>
+  </div>
+
+  <h2>Cost dashboards and their levers</h2>
+  <div class="prose">
+    <p>Because cost is token-driven and can run away invisibly, you watch it on a dashboard built from the same trace data. The metrics that actually drive decisions:</p>
+    <ul>
+      <li><strong>Cost per request</strong> (and its trend), the headline number. A creeping rise usually means prompts are growing or context is bloating.</li>
+      <li><strong>Cache-hit rate</strong>, the single biggest cost lever. Prompt caching and semantic caching only help if requests actually hit the cache; a low hit rate is money left on the table and a prompt for investigation (we cover caching properly in Module 7).</li>
+      <li><strong>Model mix</strong>, what fraction of traffic goes to the expensive large model versus a cheaper one. Surfacing this is how you spot that 90 percent of traffic is paying for a frontier model when a smaller one would do, which is a routing opportunity.</li>
+      <li><strong>Token distribution</strong>, input versus output tokens, since output tokens cost more and dominate latency. A shift here explains a cost or latency change.</li>
+    </ul>
+    <p>A cost dashboard turns spend from a monthly surprise into a controllable, attributable metric. Every one of these levers, caching, routing, shorter context, comes back in Module 7; observability is what tells you which lever to pull.</p>
+  </div>
+
+  <h2>Structured logging, so you can actually query it</h2>
+  <div class="prose">
+    <p>One discipline underpins all of the above: log <strong>structured</strong> data (key-value JSON), not free-form prose. A log line like <code>"the answer was slow for some user"</code> is unsearchable; you cannot aggregate it, alert on it, or build a dashboard from it. A structured event can be queried, grouped, and graphed:</p>
+  </div>
+
+<pre><code><span class="tok-c"># BAD: prose log — ungreppable, unaggregatable</span>
+log.info(<span class="tok-s">f"answered question for a user, took a while, used the big model"</span>)
+
+<span class="tok-c"># GOOD: structured event — queryable, alertable, dashboard-ready</span>
+log.info(<span class="tok-s">"llm_request"</span>, extra={
+    <span class="tok-s">"request_id"</span>:    req_id,
+    <span class="tok-s">"user_hash"</span>:     hash_user(user_id),   <span class="tok-c"># hashed, never raw</span>
+    <span class="tok-s">"prompt_version"</span>: <span class="tok-s">"answer_v7"</span>,
+    <span class="tok-s">"model"</span>:         <span class="tok-s">"claude-sonnet-4-5"</span>,
+    <span class="tok-s">"input_tokens"</span>:  <span class="tok-n">1610</span>,
+    <span class="tok-s">"output_tokens"</span>: <span class="tok-n">140</span>,
+    <span class="tok-s">"cost_usd"</span>:      <span class="tok-n">0.010</span>,
+    <span class="tok-s">"latency_ms"</span>:    <span class="tok-n">2340</span>,
+    <span class="tok-s">"tool_calls"</span>:    [<span class="tok-s">"lookup_order"</span>],
+    <span class="tok-s">"doc_ids"</span>:       [<span class="tok-s">"doc_returns#p3"</span>],
+    <span class="tok-s">"stop_reason"</span>:   <span class="tok-s">"end_turn"</span>,
+    <span class="tok-s">"refused"</span>:       <span class="tok-k">False</span>,
+})
+</code></pre>
+
+  <div class="prose">
+    <p>With structured events you can answer real questions in one query, "show p95 latency for prompt_version answer_v7", "what is the refusal rate by model this week", "which doc_ids appear in low-rated answers". That is observability you can operate, not logs you scroll through after the incident. Structured logging is the unglamorous foundation that makes the span tree, the SLOs, and the cost dashboard all possible.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: debug a latency spike from the trace</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>Alert fires: p95 latency jumped from 2.1s to 4.8s. No errors. With observability, watch it resolve in minutes.</p>
+    <p><strong>1. Slice the dashboard.</strong> Structured logs show the spike is isolated to <code>prompt_version: answer_v8</code>, shipped this morning. Other versions are flat.</p>
+    <p><strong>2. Open a slow trace for v8.</strong> The span tree shows the <code>retrieval.hybrid</code> span ballooned from 0.08s to 2.6s, everything else is normal.</p>
+    <p><strong>3. Read the retrieval span attributes.</strong> top-k jumped from 8 to 50, the v8 change raised top-k to "improve recall" and nobody load-tested it; at k=50 the reranker downstream is now scoring 50 candidates per query.</p>
+    <p><strong>4. Cross-check cost.</strong> The cost dashboard confirms cost per request rose in lockstep (more reranking, more tokens). Two SLOs breached from one change.</p>
+    <p><strong>5. Act.</strong> Roll back top-k to 12 (a middle ground), latency and cost return to budget; queue an offline experiment to find the real recall-versus-cost sweet spot (Module 5's whole method).</p>
+  </div>
+  <div class="prose">
+    <p>Without tracing this is hours of speculation. With it, the span tree pointed straight at the retrieval span, the structured logs tied it to a specific prompt version, and the cost dashboard corroborated the cause. Observability turned a mystery into a five-step diagnosis.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Say each answer out loud in full sentences, as if to an interviewer. Then open the solution and compare. The gap is your lesson.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>Your LLM endpoint reports 99.98 percent uptime and the on-call dashboard is all green, yet support tickets say the assistant has become useless this week. How is this possible, and what was missing from your monitoring?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Uptime measures whether the service responds, not whether the answer is any good. An LLM endpoint can return HTTP 200 with a fast, well-formed, completely wrong or unhelpful answer, so it is "up" while quality has collapsed (a model change, a retrieval regression, a prompt edit). What was missing is a <strong>quality SLO</strong>: a faithfulness (or correctness) floor measured by an LLM-as-judge over a rolling sample of live traffic, alerting when it drops. Likely also missing is a <strong>refusal-rate</strong> metric, if the model started refusing or hedging more, that is degradation invisible to uptime. The fix is to add those two to the SLO set alongside latency and errors, so quality regressions page someone instead of waiting for tickets. The principle: for LLM systems, uptime is necessary but nowhere near sufficient, you must monitor quality directly.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>A new engineer adds <code>log.info(f"user {email} asked: {question}, we answered: {answer}")</code> to help debugging. Name every problem with this line and rewrite the logging approach.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Three problems. (1) <strong>Raw PII</strong>: it logs the user's email and likely their question/answer content verbatim, which ships to log backends, is retained for months, and is readable by many engineers, a GDPR-class compliance breach. (2) <strong>Unstructured prose</strong>: a single f-string is unsearchable and unaggregatable, you cannot compute p95 latency or refusal rate from it, so it is near-useless for actual observability. (3) <strong>Missing the data that matters</strong>: no prompt version, model, tokens, cost, latency, or request ID, the things you actually need to debug. Rewrite: emit a <em>structured</em> event with hashed <code>user_hash</code> (never raw email), redact or omit sensitive content (log document IDs, not raw text), and include prompt_version, model, input/output tokens, cost, latency, tool_calls, stop_reason, and refused. Now it is queryable and privacy-safe. Visakh's Infosys named-entity redaction is exactly the tool for stripping PII before anything is persisted.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>Your monthly LLM bill doubled with no traffic increase. You have full tracing. Walk through how you would localize the cause, and name the two dashboard metrics most likely to reveal it.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Cost is token-driven, so a flat-traffic doubling means tokens per request roughly doubled or the model mix shifted toward something expensive. Localize it with the cost dashboard and traces. The two metrics most likely to reveal it: (1) <strong>cost per request trend</strong>, confirms the rise is per-request, not volume, and dates it to a change; and (2) <strong>token distribution (input vs output) and/or model mix</strong>, shows whether prompts/context bloated (input tokens up, e.g. someone stuffed more history or larger chunks into context, or an agent started looping and re-sending context) or whether traffic started routing to a pricier model. A low <strong>cache-hit rate</strong> is the other prime suspect, if a change broke prompt-cache reuse, every request now pays full price. Then open representative traces from before and after to see exactly which span's tokens grew. The fix follows the cause: trim context, fix the routing, restore cache reuse, all Module 7 levers, but observability is what tells you which one.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's Evaluation &amp; Observability slice and common 2026 screens. Drill the one-line keys, then expand each into a 90-second answer with Claude using protocol prompt #2.</p>
+  <ul class="q-list">
+    <li>What does a production tracing pipeline look like for an LLM app?
+      <div class="a">Key: a trace per request as a span tree (LLM / tool / retrieval spans), each span recording tokens, cost, and latency, exported via OpenTelemetry over OTLP, viewed in LangSmith or Langfuse.</div></li>
+    <li>What do you log every request, and what do you NOT log?
+      <div class="a">Key: log prompt version, model, temp, input/output tokens, latency, cost, tool calls + args, doc IDs, stop reason, hashed user/session ID. Never log raw PII, hash IDs and redact sensitive content.</div></li>
+    <li>What SLOs would you set for an LLM endpoint?
+      <div class="a">Key: p95/p99 latency, error + refusal rate, cost-per-request budget, and a faithfulness floor on a rolling sample. Quality SLOs matter because the endpoint can be up while answers silently degrade.</div></li>
+    <li>Why is uptime an insufficient health metric for an LLM service?
+      <div class="a">Key: it can return 200 with a fast, well-formed, wrong answer, up but useless. You must monitor quality directly (sampled faithfulness) and refusal rate, not just availability.</div></li>
+    <li>How do you keep LLM cost under control with observability?
+      <div class="a">Key: a cost dashboard, cost per request trend, cache-hit rate (biggest lever), model mix, input/output token distribution. Surfaces which lever (caching, routing, shorter context) to pull.</div></li>
+    <li>Why structured logging over prose logs?
+      <div class="a">Key: structured key-value events are queryable, aggregatable, and alertable (compute p95, refusal rate, group by prompt version); prose f-strings are ungreppable and useless for real observability.</div></li>
+    <li>A request is slow but returns no error. How do you find the cause?
+      <div class="a">Key: open its trace and read the span tree, find which span (often a tool call or oversized retrieval) ate the latency, then tie it to a prompt version via structured logs and cross-check the cost dashboard.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (15&ndash;25 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Instrument a small LLM call you have running. The fastest path: sign up for free Langfuse or LangSmith and wrap a Claude call so you get a span tree with token and cost accounting, read your own trace and find where the time and tokens went (LangSmith tracing docs: <a href="https://docs.smith.langchain.com/">docs.smith.langchain.com</a>; Langfuse docs: <a href="https://langfuse.com/docs">langfuse.com/docs</a>; the open standard, OpenTelemetry: <a href="https://opentelemetry.io/docs/">opentelemetry.io/docs</a>). If you prefer no new accounts, emit your own <strong>structured</strong> JSON log per call with the fields from the worked example (prompt_version, model, input/output tokens, cost, latency, stop_reason, hashed user id) and confirm you could compute p95 latency and refusal rate from a day of those lines. Then write down the four SLOs you would set for this endpoint and the threshold for each, that one-page SLO sheet is what a senior brings to a design review.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>Observability is where your Einbliq background gives you an unusually strong answer. At Einbliq you did streaming analytics and built observability with Grafana, which is exactly this skill applied to a different system: instrument the pipeline, surface latency and throughput, watch dashboards, alert on degradation. When an interviewer asks "how would you observe an LLM system," you can say you have done production observability before and then translate it, the span tree is the LLM-native version of the traces and metrics you already worked with, and the SLOs extend the latency-and-error monitoring you know with LLM-specific quality and cost dimensions. On MaiQ this closes the loop with your evaluation work: tracing every retrieval and LLM span with tokens and cost is precisely how an experiment like your 37 percent cost cut gets measured and attributed in production, you cannot prove a per-request cost change without per-span cost data. And your Infosys named-entity redaction is the concrete technique for stripping PII before anything hits the logs, which is the one non-negotiable rule of LLM logging.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>The unit of LLM observability is a trace per request, a span tree where every LLM, tool, and retrieval span carries its own tokens, cost, and latency (OpenTelemetry / OTLP, or LangSmith / Langfuse). Log the versioning, performance, decision trail, and hashed identifiers you need to debug, and never persist raw PII. Set SLOs that include quality and cost, p95/p99 latency, error and refusal rate, cost-per-request budget, and a faithfulness floor on a rolling sample, because uptime alone is blind to silent degradation. Watch cost on a dashboard (cost per request, cache-hit rate, model mix) and log everything structured so it is queryable. Observability is how a black box becomes a system you can actually operate.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d35">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: the capstone lab, build a real LLM-as-judge harness end to end and calibrate it against your own labels.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d34-offline-online-eval.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 34 &middot; Offline vs online eval</div></a>
+    <a data-nav="next" class="next" href="d36-evaluation-lab.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 36 &middot; Lab &mdash; an LLM-as-judge harness</div></a>
+  </div>
+
+  <div class="foot">Module 5 &middot; Evaluation &amp; Observability &middot; Day 35 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

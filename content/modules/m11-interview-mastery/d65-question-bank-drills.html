@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 65 · Rapid-fire question-bank drills</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 11 &middot; Interview Mastery</span>
+    <span class="pill">Day 65</span>
+    <span class="pill">45 min</span>
+    <span class="diff" title="Difficulty: intermediate"><i class="on"></i><i class="on"></i><i></i></span>
+  </div>
+
+  <h1>Rapid-fire question-bank drills</h1>
+  <p class="lede">Knowing a thing and being able to say it crisply under mild pressure are different skills. Today is pure retrieval practice: a tight set of cross-module questions you drill out loud until the one-liners are automatic.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Answer twenty-five core questions across every module in one or two clean sentences each.</li>
+      <li>Run a spaced-repetition self-test instead of passively rereading notes.</li>
+      <li>Use Claude as a grader (protocol #2) and a mock interviewer (protocol #3).</li>
+      <li>Diagnose which one-liners you actually own versus the ones you only recognize.</li>
+    </ul>
+  </div>
+
+  <h2>How to use this page</h2>
+  <div class="prose">
+    <p>This is not a reading lesson; it is a workout. Recognition is a trap: you read the answer key, think "yes, I know that," and move on, but recognition is not retrieval. The only thing that builds in the interview room is your ability to <em>produce</em> the answer cold. So the protocol is strict:</p>
+    <ul>
+      <li><strong>Cover the key.</strong> Read only the question, then say the answer out loud in full sentences. The "say it out loud" rule is non-negotiable; silent answering hides the gaps that speaking exposes.</li>
+      <li><strong>The 90-second rule.</strong> Give yourself up to 90 seconds per question to speak a complete answer, not a fragment. If you cannot fill 60 seconds, you do not own it yet.</li>
+      <li><strong>Then reveal and grade.</strong> Compare against the one-line key. Mark each question one of three ways below, and let spacing do the rest.</li>
+    </ul>
+  </div>
+
+  <div class="diagram">  the three-bucket spaced loop
+  ┌─────────────┐   said it clean,    ┌──────────────────────┐
+  │  GREEN  ✓   │── hit the key  ────▶│  revisit in ~7 days   │
+  └─────────────┘                     └──────────────────────┘
+  ┌─────────────┐   shaky, missed    ┌──────────────────────┐
+  │  AMBER  ~   │── part of the key ─▶│  revisit tomorrow     │
+  └─────────────┘                     └──────────────────────┘
+  ┌─────────────┐   blanked or        ┌──────────────────────┐
+  │  RED   ✗    │── wrong  ──────────▶│  revisit today + the  │
+  └─────────────┘                     │  source lesson now    │
+                                      └──────────────────────┘</div>
+
+  <div class="callout concept">
+    <span class="label">Why spacing beats cramming</span>
+    <p>Retrieving an answer just as you are about to forget it is what moves it to durable memory. Rereading does almost nothing by comparison. Promote a question to a longer interval each time you answer it clean; reset it to "today" the moment you miss. The full bank lives at <a href="../../question-bank.html">Question Bank</a>; this page is the high-yield core to cycle daily.</p>
+  </div>
+
+  <h2>Drill set A &mdash; Foundations, prompting, and RAG</h2>
+  <p class="muted">Modules 1 to 3. The bedrock. If any of these are AMBER, fix them first; everything later assumes them.</p>
+  <ul class="q-list">
+    <li>Explain how an LLM generates text to a smart non-engineer.
+      <div class="a">Key: next-token prediction over a vocabulary, looped; context steers the distribution.</div></li>
+    <li>Why do LLMs hallucinate, mechanistically?
+      <div class="a">Key: the objective rewards plausible continuations; knowledge is lossy and parametric; high probability is not truth.</div></li>
+    <li>How is AI engineering different from ML engineering?
+      <div class="a">Key: ML trains custom models from data (slow, data-centric); AI eng builds apps on foundation models via API (fast, prompt-centric).</div></li>
+    <li>Prompt engineering versus context engineering?
+      <div class="a">Key: prompt = static contract written once; context = the dynamic per-turn supply chain (chunks, history, tool results, order). Most prod failures are context failures.</div></li>
+    <li>How do you enforce structured output, and where does it break?
+      <div class="a">Key: tool/function calling (schema-enforced) &gt; Pydantic validators &gt; JSON mode &gt; prompt; breaks on over-generated optionals, similar enums, truncation, deep nesting.</div></li>
+    <li>Walk through a vanilla RAG pipeline and name its most common failure.
+      <div class="a">Key: ingest, chunk, embed, index, retrieve, generate; ~70-75% of bad answers are retrieval (bad chunking/embeddings, no reranker, wrong top-k).</div></li>
+    <li>What is hybrid search and how do you combine the scores?
+      <div class="a">Key: BM25 + dense in parallel, fused via RRF (rank-only, scale-free); RRF avoids the score-scale mismatch of raw weighting.</div></li>
+    <li>What is reranking and where does it sit?
+      <div class="a">Key: rescore the top 50-100 with a cross-encoder (joint query+chunk); a precision boost between retrieval and generation.</div></li>
+  </ul>
+
+  <h2>Drill set B &mdash; Agents, evaluation, and adaptation</h2>
+  <p class="muted">Modules 4 to 6. Judgment-heavy; interviewers probe "when NOT to" hard here.</p>
+  <ul class="q-list">
+    <li>What is an agent, and how is it different from a chain?
+      <div class="a">Key: agent = the LLM owns control flow (picks the next step and tool in a loop); chain = a fixed, dev-wired pipeline.</div></li>
+    <li>When should you NOT use an agent?
+      <div class="a">Key: small, scoped, deterministic, latency-tight, or single-prompt-expressible tasks; knowing when not to is senior signal.</div></li>
+    <li>What is the ReAct loop and why is it the single-agent default?
+      <div class="a">Key: interleaves Thought, Action, Observation; simple and debuggable straight from the trace; fine for a handful of tool calls.</div></li>
+    <li>What is a hallucinated tool call and how do you prevent it?
+      <div class="a">Key: a nonexistent name or schema-violating args; prevent via structured tool calling, registry validation, tight typed params, self-correction.</div></li>
+    <li>Agents are non-deterministic &mdash; how do you sleep at night?
+      <div class="a">Key: five layers &mdash; constrain the action space, trace every call, eval (trajectory + output), guardrails/approval, canary + rollback.</div></li>
+    <li>What is LLM-as-judge and where does it break?
+      <div class="a">Key: scales human eval cheaply; biases are position, verbosity, self-preference; calibrate against humans (kappa / Spearman &ge; ~0.6).</div></li>
+    <li>What RAG metrics do you report, and which do you trust most?
+      <div class="a">Key: faithfulness (trust most), answer relevancy, contextual precision/recall.</div></li>
+    <li>Prompting vs RAG vs fine-tuning &mdash; how do you choose?
+      <div class="a">Key: climb the effort ladder; start prompting + RAG + few-shot; fine-tune for form/style/latency/cost, never to inject new facts.</div></li>
+    <li>What is LoRA and why is it efficient?
+      <div class="a">Key: freeze the base, train small low-rank adapter matrices; ~99% fewer trainable params, swappable adapters.</div></li>
+  </ul>
+
+  <h2>Drill set C &mdash; Serving, system design, and GenAI design</h2>
+  <p class="muted">Modules 7 to 10. The senior differentiators: numbers, trade-offs, and ops.</p>
+  <ul class="q-list">
+    <li>What inference-time optimizations exist, and when does each apply?
+      <div class="a">Key: prompt caching, KV caching, continuous batching, quantization, speculative decoding &mdash; in roughly that order of reach.</div></li>
+    <li>What is prompt caching and how do you implement it properly?
+      <div class="a">Key: mark a stable cacheable prefix, put static content first; cached input billed ~10%, ~5 min TTL; biggest single cost lever.</div></li>
+    <li>How do you handle 429s from a provider?
+      <div class="a">Key: respect Retry-After, exponential backoff with jitter, cap attempts, only retry idempotent calls.</div></li>
+    <li>Walk through your system-design methodology.
+      <div class="a">Key: clarify (functional + non-functional) &rarr; estimate (QPS, storage) &rarr; high-level arch &rarr; data model &rarr; deep-dive the bottleneck &rarr; name trade-offs &rarr; ops.</div></li>
+    <li>Explain the CAP theorem in practice.
+      <div class="a">Key: under a partition you pick consistency or availability; real systems tune within CP/AP, often framed as PACELC.</div></li>
+    <li>What is training-serving skew and how do you prevent it?
+      <div class="a">Key: features/transforms differ between train and serve; share the transform pipeline and log served features.</div></li>
+    <li>Design a production RAG assistant for company docs.
+      <div class="a">Key: ingestion (parse, parent-child chunk, embed) &rarr; hybrid retrieval + rerank + tenant filters &rarr; grounded generation with citations &rarr; eval + observability + cost controls.</div></li>
+    <li>Design an LLM gateway.
+      <div class="a">Key: one entry point doing auth, routing/model selection, per-tenant rate limiting, prompt + semantic caching, retries/fallback, cost metering, tracing.</div></li>
+    <li>How do you cut LLM spend ~50% without dropping quality?
+      <div class="a">Key: prompt caching (biggest lever), semantic cache, model routing, shorter context, batch.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: grading your own answer with Claude</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>Question drilled: <em>"What is hybrid search and how do you combine the scores?"</em> Your spoken answer: <em>"You run keyword and vector search together and merge them, usually with reciprocal rank fusion so the scales line up."</em></p>
+    <p>Paste both into Claude with protocol prompt #2 and it returns something like: <em>"Solid core. You named both retrievers and RRF, and you correctly flagged the scale problem RRF solves. To reach a senior answer, add WHY raw weighted fusion is fragile (BM25 and cosine live on different, unbounded scales, so a fixed weight is arbitrary) and WHEN you would prefer weighted fusion anyway (when you have tuned weights on a labeled set). Score: 8/10."</em></p>
+  </div>
+  <div class="prose">
+    <p>That is the loop in miniature: you produce cold, Claude grades against the bar, you absorb the one missing nuance, and the question graduates to a longer interval. The grader is not there to praise you; it is there to find the half-sentence that separates "correct" from "senior."</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; run these as drills, not reading</h2>
+  <p class="muted">These are meta-drills about the drilling itself. Do them once to calibrate your loop, then run the bank daily.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>Run all of Drill set A out loud, timing each answer. Bucket each question GREEN, AMBER, or RED honestly. Now: what does a RED in set A tell you about your readiness for sets B and C, and what should you do about it?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>A RED in set A is a higher-priority fix than any RED in B or C, because Foundations and RAG are load-bearing for everything downstream: you cannot give a senior agent or GenAI-design answer if the RAG primitives underneath are shaky. The correct move is to stop drilling forward, open the source lesson for that RED today, and re-drill the question before touching set B. Depth-first on the foundations beats breadth-first across modules. If most of set A is GREEN, you have earned the right to spend your reps on the judgment-heavy questions in B and C, which is where interviews are actually won.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>You consistently answer "when should you NOT use an agent?" cleanly when reading the key, but blank on it when a friend asks you cold. Diagnose the failure and prescribe the fix.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>This is the recognition-versus-retrieval trap: reading the key feels like knowing because it is a cued recall, but a cold question is uncued, which is the real interview condition. The fix is to never grade yourself while looking at the key. Cover it, speak the full answer, and only then reveal. To force uncued retrieval, use Claude as a mock interviewer (protocol #3) so the question arrives without its answer attached, ideally with a follow-up that you cannot predict. Recognition graduates to retrieval only when you have produced the answer with nothing on screen but the question.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>Design a five-minute daily warm-up from this page that keeps all twenty-five questions fresh over a two-week interview-prep sprint, without re-drilling GREENs every day.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Keep a tiny three-column list (GREEN / AMBER / RED) seeded from your first full pass. Each morning: drill every RED and AMBER (these are few, so it fits five minutes), plus a rotating slice of GREENs, roughly one-third of them, so each GREEN resurfaces about every three days rather than daily. Move questions between columns by that morning's performance: a missed GREEN drops to RED, a clean RED rises to AMBER then GREEN over successive days. By the end of two weeks the RED column should be empty and the AMBER column small, which is your readiness signal. The discipline is letting GREENs rest so your scarce time lands on what is actually weak.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">Meta-questions an interviewer (or you) can ask about how you prepare, plus a sample of the bank itself. The keys are deliberately one line; that is the format you are training.</p>
+  <ul class="q-list">
+    <li>How do you keep your interview knowledge sharp across a dozen topics?
+      <div class="a">Key: spaced retrieval on a one-line bank, said out loud; promote on a clean hit, reset on a miss; revisit the source lesson on a RED.</div></li>
+    <li>What is the difference between recognizing an answer and retrieving it?
+      <div class="a">Key: recognition is cued and feels like mastery; retrieval is uncued and is the interview condition; only cover-and-speak builds the latter.</div></li>
+    <li>Explain how an LLM generates text to a smart non-engineer.
+      <div class="a">Key: next-token prediction over a vocabulary, looped; context steers the distribution.</div></li>
+    <li>When should you NOT use an agent?
+      <div class="a">Key: small, scoped, deterministic, latency-tight, single-prompt tasks; knowing when not to is the senior tell.</div></li>
+    <li>Walk through your system-design methodology in one breath.
+      <div class="a">Key: clarify, estimate, architect, data model, deep-dive the bottleneck, trade-offs, ops.</div></li>
+    <li>How do you cut LLM cost ~50% without losing quality?
+      <div class="a">Key: prompt caching first, then semantic cache, model routing, shorter context, batch.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (15&ndash;20 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Open a Claude chat and set up your mock-interviewer loop with protocol prompt #3: <em>"You are a senior AI engineer interviewing me. Ask me one question at a time pulled from LLM foundations, RAG, agents, evaluation, or GenAI system design. Do not show me the answer. After I respond, ask exactly one sharp follow-up, then score my combined answer out of 10 and move to the next question. Run ten questions."</em> Answer each <strong>out loud</strong> before typing. Log your scores; anything under 7 goes into tomorrow's RED column.</p>
+    <p class="muted" style="font-size:13.5px">The unpredictable follow-up is the value: it is exactly the "explain that further" pressure of a real loop. Full bank for sourcing: <a href="../../question-bank.html">Question Bank</a>.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your edge in rapid-fire</span>
+    <p>Your strongest one-liners are the ones you can immediately back with a real example, and that is where your MaiQ work pays off in seconds. "Most RAG failures are retrieval, not generation" lands harder when you can add "I isolated exactly that and fixed it in chunking and BM25-plus-dense fusion." "Prompt caching is the biggest cost lever" lands harder next to "I cut inference cost 37% with an LLM-as-judge harness driving the experiments." Drill the abstract one-liner first so it is automatic, then attach the one-sentence proof from your own work. In rapid-fire, the candidate who answers crisply <em>and</em> has lived it is unmistakable.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>Recognition is a trap; only cover-the-key, speak-out-loud retrieval builds interview reflexes. Bucket every question GREEN, AMBER, or RED and let spacing put your reps where they matter, longer intervals for what you own, "today" for what you miss. Use Claude as both grader (protocol #2) and cold mock interviewer (protocol #3) so questions arrive uncued. Keep the bank alive daily, even five minutes, and the answers stop being recall and start being reflex.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d65">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: a reusable playbook for the live system-design round.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d64-your-project-stories.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 64 &middot; Your project stories (STAR)</div></a>
+    <a data-nav="next" class="next" href="d66-system-design-playbook.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 66 &middot; System design mock playbook</div></a>
+  </div>
+
+  <div class="foot">Module 11 &middot; Interview Mastery &middot; Day 65 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 21 · Lab, a measured hybrid-RAG</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 3 &middot; RAG &amp; Retrieval</span>
+    <span class="pill">Day 21</span>
+    <span class="pill">120 min</span>
+    <span class="diff" title="Difficulty: advanced"><i class="on"></i><i class="on"></i><i class="on"></i></span>
+  </div>
+
+  <h1>Lab, a measured hybrid-RAG</h1>
+  <p class="lede">This is the module capstone. You will build a small but real hybrid RAG over ~20 documents, parent-child chunking, BM25 plus dense plus RRF fusion, optional rerank, generate-with-citations, then build a tiny golden set and <em>measure</em> recall@k before and after adding the reranker. Every piece you learned this module, assembled and proven.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Assemble an end-to-end hybrid RAG: chunk, embed, index, retrieve, fuse, rerank, generate.</li>
+      <li>Implement parent-child chunking and RRF fusion in plain Python you understand line by line.</li>
+      <li>Generate grounded answers that cite their source chunks.</li>
+      <li>Build a small golden set and compute recall@k and MRR over it.</li>
+      <li>Quantify the reranker's effect with a before/after delta, the measured-improvement habit.</li>
+    </ul>
+  </div>
+
+  <h2>The build, end to end</h2>
+  <div class="prose">
+    <p>Here is the pipeline you are assembling. Keep this picture open as you work the checkpoints, each checkpoint builds one box.</p>
+  </div>
+
+  <div class="diagram">  ~20 docs
+     │  CP1  parent-child chunk
+     ▼
+  parents (big) ── children (small, embedded)
+     │  CP2  embed + index (dense) AND build BM25
+     ▼
+  query ─┬─► dense top-N ─┐
+         └─► BM25  top-N ─┤  CP3  RRF fusion → fused top-N
+                          ▼
+                 CP4  (optional) cross-encoder rerank → top-k
+                          │   return PARENT of each child chunk
+                          ▼
+                 CP5  generate-with-citations  [1][2]…
+                          │
+  golden set ──► CP6  recall@k / MRR, reranker OFF vs ON  ← the whole point</div>
+
+  <div class="prose">
+    <p><strong>Setup.</strong> A virtual environment and three small libraries. No GPU needed; the models below run on CPU.</p>
+  </div>
+
+  <pre><code><span class="tok-c"># pip install sentence-transformers rank_bm25 numpy</span>
+<span class="tok-c"># (pgvector optional; this lab uses numpy for the dense index so it runs anywhere)</span>
+<span class="tok-k">import</span> numpy <span class="tok-k">as</span> np
+<span class="tok-k">from</span> sentence_transformers <span class="tok-k">import</span> SentenceTransformer, CrossEncoder
+<span class="tok-k">from</span> rank_bm25 <span class="tok-k">import</span> BM25Okapi
+
+embedder = SentenceTransformer(<span class="tok-s">"sentence-transformers/all-MiniLM-L6-v2"</span>)
+reranker = CrossEncoder(<span class="tok-s">"cross-encoder/ms-marco-MiniLM-L-6-v2"</span>)</code></pre>
+
+  <hr class="section-rule">
+
+  <h2>Checkpoint 1 &mdash; parent-child chunking</h2>
+  <div class="callout practice">
+    <span class="label">Build</span>
+    <p>Take ~20 documents (paste docs, README sections, or wiki pages into a list of strings). Split each into <strong>parent</strong> blocks of a few paragraphs, and each parent into smaller <strong>child</strong> chunks (~2&ndash;3 sentences) that you will embed. Keep a mapping so that retrieving a child lets you return its parent. Why: you <em>index small</em> (precise matching) but <em>return large</em> (enough context for the generator), the parent-child idea from Day 14.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>A deliberately simple splitter, swap in a real sentence splitter later. The data model is the lesson: every child knows its parent.</p>
+    <pre><code><span class="tok-k">def</span> <span class="tok-f">chunk_docs</span>(docs, parent_chars=<span class="tok-n">900</span>, child_chars=<span class="tok-n">300</span>):
+    parents, children = [], []
+    <span class="tok-k">for</span> doc_id, text <span class="tok-k">in</span> <span class="tok-f">enumerate</span>(docs):
+        <span class="tok-k">for</span> p_start <span class="tok-k">in</span> <span class="tok-f">range</span>(<span class="tok-n">0</span>, <span class="tok-f">len</span>(text), parent_chars):
+            parent = text[p_start:p_start + parent_chars]
+            pid = <span class="tok-f">len</span>(parents)
+            parents.append({<span class="tok-s">"pid"</span>: pid, <span class="tok-s">"doc"</span>: doc_id, <span class="tok-s">"text"</span>: parent})
+            <span class="tok-k">for</span> c_start <span class="tok-k">in</span> <span class="tok-f">range</span>(<span class="tok-n">0</span>, <span class="tok-f">len</span>(parent), child_chars):
+                children.append({
+                    <span class="tok-s">"cid"</span>: <span class="tok-f">len</span>(children),
+                    <span class="tok-s">"pid"</span>: pid,                       <span class="tok-c"># link back to parent</span>
+                    <span class="tok-s">"text"</span>: parent[c_start:c_start + child_chars],
+                })
+    <span class="tok-k">return</span> parents, children
+
+parents, children = chunk_docs(docs)
+child_texts = [c[<span class="tok-s">"text"</span>] <span class="tok-k">for</span> c <span class="tok-k">in</span> children]</code></pre>
+    <p>Real systems use token-aware, sentence-respecting splitters and overlap; character windows are fine to <em>learn</em> the structure. The non-negotiable part is the <code>pid</code> link: retrieval scores children, generation reads parents.</p>
+  </div></details>
+
+  <h2>Checkpoint 2 &mdash; embed, index, and BM25</h2>
+  <div class="callout practice">
+    <span class="label">Build</span>
+    <p>Embed every child chunk into a matrix (your dense index). In parallel, build a BM25 index over the same child texts (tokenized). Two retrievers over the same units: dense for semantics, BM25 for exact terms (Day 15&ndash;16). If you have pgvector available, you may store the embeddings there instead of numpy; the lab stays in numpy so it runs anywhere.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <pre><code><span class="tok-c"># Dense index: one normalized vector per child (cosine == dot on unit vectors).</span>
+emb = embedder.encode(child_texts, normalize_embeddings=<span class="tok-k">True</span>)
+emb = np.asarray(emb, dtype=<span class="tok-s">"float32"</span>)            <span class="tok-c"># shape (n_children, dim)</span>
+
+<span class="tok-c"># BM25 index over the same child texts (lowercased whitespace tokens).</span>
+tokenized = [t.lower().split() <span class="tok-k">for</span> t <span class="tok-k">in</span> child_texts]
+bm25 = BM25Okapi(tokenized)
+
+<span class="tok-k">def</span> <span class="tok-f">dense_search</span>(query, n=<span class="tok-n">20</span>):
+    q = embedder.encode([query], normalize_embeddings=<span class="tok-k">True</span>)[<span class="tok-n">0</span>]
+    scores = emb @ q                                  <span class="tok-c"># cosine similarity</span>
+    <span class="tok-k">return</span> np.argsort(-scores)[:n].tolist()           <span class="tok-c"># child indices, best first</span>
+
+<span class="tok-k">def</span> <span class="tok-f">bm25_search</span>(query, n=<span class="tok-n">20</span>):
+    scores = bm25.get_scores(query.lower().split())
+    <span class="tok-k">return</span> np.argsort(-scores)[:n].tolist()</code></pre>
+    <p>Both functions return <em>ranked child indices</em>, a uniform shape, which is what makes the next step (fusion by rank) clean. Brute-force numpy cosine is fine at ~20 docs; at scale you would swap in an ANN index or pgvector (Day 16), but the interface stays the same.</p>
+  </div></details>
+
+  <h2>Checkpoint 3 &mdash; RRF fusion</h2>
+  <div class="callout practice">
+    <span class="label">Build</span>
+    <p>Fuse the two ranked lists with <strong>Reciprocal Rank Fusion</strong>. RRF scores each item by <code>sum over lists of 1/(k + rank)</code> (a common <code>k</code> is 60), then re-sorts. Why RRF and not score-addition: BM25 and cosine live on different, incomparable scales, so adding raw scores is meaningless; RRF uses only <em>ranks</em>, so it is scale-free (Day 17).</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <pre><code><span class="tok-k">def</span> <span class="tok-f">rrf_fuse</span>(ranked_lists, k=<span class="tok-n">60</span>, n=<span class="tok-n">20</span>):
+    scores = {}
+    <span class="tok-k">for</span> lst <span class="tok-k">in</span> ranked_lists:
+        <span class="tok-k">for</span> rank, cid <span class="tok-k">in</span> <span class="tok-f">enumerate</span>(lst):          <span class="tok-c"># rank 0 = best</span>
+            scores[cid] = scores.get(cid, <span class="tok-n">0.0</span>) + <span class="tok-n">1.0</span> / (k + rank + <span class="tok-n">1</span>)
+    fused = <span class="tok-f">sorted</span>(scores, key=scores.get, reverse=<span class="tok-k">True</span>)
+    <span class="tok-k">return</span> fused[:n]
+
+<span class="tok-k">def</span> <span class="tok-f">first_stage</span>(query, n=<span class="tok-n">20</span>):
+    <span class="tok-k">return</span> rrf_fuse([dense_search(query, n), bm25_search(query, n)], n=n)</code></pre>
+    <p>That is the entire hybrid retriever. An item ranked highly by <em>either</em> retriever floats up; an item ranked highly by <em>both</em> floats highest. No score normalization, no tuning of relative weights, which is exactly why RRF is the pragmatic default for combining heterogeneous rankers.</p>
+  </div></details>
+
+  <h2>Checkpoint 4 &mdash; optional rerank, return parents</h2>
+  <div class="callout practice">
+    <span class="label">Build</span>
+    <p>Add a switchable reranker: when on, rescore the fused child candidates with the cross-encoder and keep the top-k; when off, just take the fused top-k. Either way, map the surviving children to their <strong>parents</strong> (dedup by <code>pid</code>) and return those for generation. The switch matters: Checkpoint 6 measures recall with it off vs on.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <pre><code><span class="tok-k">def</span> <span class="tok-f">retrieve</span>(query, k=<span class="tok-n">5</span>, use_reranker=<span class="tok-k">True</span>, first_n=<span class="tok-n">20</span>):
+    cand = first_stage(query, n=first_n)              <span class="tok-c"># fused child indices</span>
+    <span class="tok-k">if</span> use_reranker:
+        pairs  = [(query, child_texts[c]) <span class="tok-k">for</span> c <span class="tok-k">in</span> cand]
+        scores = reranker.predict(pairs)              <span class="tok-c"># joint (query, child) scoring</span>
+        cand   = [c <span class="tok-k">for</span> c, _ <span class="tok-k">in</span>
+                  <span class="tok-f">sorted</span>(<span class="tok-f">zip</span>(cand, scores), key=<span class="tok-k">lambda</span> x: x[<span class="tok-n">1</span>], reverse=<span class="tok-k">True</span>)]
+    <span class="tok-c"># take top-k children, then dedupe to their parents (order preserved)</span>
+    seen, parents_out = <span class="tok-f">set</span>(), []
+    <span class="tok-k">for</span> c <span class="tok-k">in</span> cand:
+        pid = children[c][<span class="tok-s">"pid"</span>]
+        <span class="tok-k">if</span> pid <span class="tok-k">not in</span> seen:
+            seen.add(pid); parents_out.append(parents[pid])
+        <span class="tok-k">if</span> <span class="tok-f">len</span>(parents_out) == k:
+            <span class="tok-k">break</span>
+    <span class="tok-k">return</span> parents_out</code></pre>
+    <p>One function, one boolean, two behaviors, that boolean is your experiment. Returning parents (not children) is the parent-child payoff: precise matching on small units, full context for the generator.</p>
+  </div></details>
+
+  <h2>Checkpoint 5 &mdash; generate with citations</h2>
+  <div class="callout practice">
+    <span class="label">Build</span>
+    <p>Feed the retrieved parents to an LLM with a strict instruction: answer <em>only</em> from the provided context, cite each claim with the chunk number it came from, and say "I don't know" if the context does not contain the answer. Citations make the answer auditable and force grounding, the anti-hallucination posture from Day 1.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <pre><code><span class="tok-k">def</span> <span class="tok-f">build_prompt</span>(query, parents_out):
+    ctx = <span class="tok-s">"\n\n"</span>.join(<span class="tok-s">f"[{i+1}] {p['text']}"</span>
+                       <span class="tok-k">for</span> i, p <span class="tok-k">in</span> <span class="tok-f">enumerate</span>(parents_out))
+    <span class="tok-k">return</span> (
+        <span class="tok-s">"Answer the question using ONLY the context below. "</span>
+        <span class="tok-s">"Cite sources inline like [1], [2]. If the answer is not in "</span>
+        <span class="tok-s">"the context, say 'I don't know.'\n\n"</span>
+        <span class="tok-s">f"Context:\n{ctx}\n\nQuestion: {query}\nAnswer:"</span>
+    )
+
+<span class="tok-c"># Then call your LLM (Claude API) with build_prompt(query, retrieve(query)).</span>
+<span class="tok-c"># prompt = build_prompt(q, retrieve(q, k=5, use_reranker=True))</span>
+<span class="tok-c"># answer = client.messages.create(model=..., messages=[{"role":"user",</span>
+<span class="tok-c">#          "content": prompt}]).content[0].text</span></code></pre>
+    <p>Notice this lab keeps generation thin on purpose: the engineering value of the module is in retrieval and measurement, and the generator is a grounded, citing wrapper around it. The "I don't know" escape hatch is what stops the model from inventing an answer when retrieval genuinely failed.</p>
+  </div></details>
+
+  <h2>Checkpoint 6 &mdash; the golden set and the measured delta</h2>
+  <div class="callout practice">
+    <span class="label">Build (the point of the whole lab)</span>
+    <p>Hand-label a tiny golden set: 8&ndash;12 questions, each with the set of <code>ideal_pids</code> (which parent chunks actually contain the answer). Compute <strong>recall@k</strong> and <strong>MRR</strong> over it, twice, once with <code>use_reranker=False</code>, once <code>True</code>, and print the delta. This is the Day 20 discipline made concrete: do not claim the reranker helps, <em>show</em> it.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <pre><code>golden = [
+    {<span class="tok-s">"q"</span>: <span class="tok-s">"what is the webhook retry limit on Pro?"</span>, <span class="tok-s">"ideal_pids"</span>: {<span class="tok-n">12</span>, <span class="tok-n">13</span>}},
+    {<span class="tok-s">"q"</span>: <span class="tok-s">"how do I rotate an API key?"</span>,           <span class="tok-s">"ideal_pids"</span>: {<span class="tok-n">4</span>}},
+    <span class="tok-c"># … 8-12 total, ideal_pids = parents that truly answer it</span>
+]
+
+<span class="tok-k">def</span> <span class="tok-f">evaluate</span>(golden, k=<span class="tok-n">5</span>, use_reranker=<span class="tok-k">True</span>):
+    recalls, rrs = [], []
+    <span class="tok-k">for</span> ex <span class="tok-k">in</span> golden:
+        got = [p[<span class="tok-s">"pid"</span>] <span class="tok-k">for</span> p <span class="tok-k">in</span> retrieve(ex[<span class="tok-s">"q"</span>], k=k, use_reranker=use_reranker)]
+        ideal = ex[<span class="tok-s">"ideal_pids"</span>]
+        recalls.append(<span class="tok-f">len</span>(ideal &amp; <span class="tok-f">set</span>(got)) / <span class="tok-f">len</span>(ideal))   <span class="tok-c"># recall@k</span>
+        rr = <span class="tok-n">0.0</span>
+        <span class="tok-k">for</span> rank, pid <span class="tok-k">in</span> <span class="tok-f">enumerate</span>(got):                  <span class="tok-c"># first relevant's reciprocal rank</span>
+            <span class="tok-k">if</span> pid <span class="tok-k">in</span> ideal:
+                rr = <span class="tok-n">1.0</span> / (rank + <span class="tok-n">1</span>); <span class="tok-k">break</span>
+        rrs.append(rr)
+    <span class="tok-k">return</span> <span class="tok-f">sum</span>(recalls) / <span class="tok-f">len</span>(recalls), <span class="tok-f">sum</span>(rrs) / <span class="tok-f">len</span>(rrs)
+
+r_off, mrr_off = evaluate(golden, k=<span class="tok-n">5</span>, use_reranker=<span class="tok-k">False</span>)
+r_on,  mrr_on  = evaluate(golden, k=<span class="tok-n">5</span>, use_reranker=<span class="tok-k">True</span>)
+<span class="tok-f">print</span>(<span class="tok-s">f"reranker OFF  recall@5={r_off:.2f}  MRR={mrr_off:.2f}"</span>)
+<span class="tok-f">print</span>(<span class="tok-s">f"reranker ON   recall@5={r_on:.2f}  MRR={mrr_on:.2f}"</span>)</code></pre>
+    <p>Read it honestly. The reranker typically lifts MRR most (it reorders, pulling the right parent higher) and lifts recall@5 when the relevant child was in the fused top-20 but ranked below 5. If recall@5 barely moves, that is a finding, not a failure: it tells you the fused first stage was already surfacing the chunk in the top-5, so the reranker's value here is ordering, not coverage, and you would widen <code>first_n</code> or revisit chunking to chase the remaining misses. Either way you now have a <em>number</em>, which is the entire habit this module exists to build.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: read one before/after run</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>A run of the lab over 20 product-doc pages with a 10-question golden set might print:</p>
+  </div>
+  <div class="diagram">  reranker OFF   recall@5 = 0.70   MRR = 0.58
+  reranker ON    recall@5 = 0.80   MRR = 0.74
+                 Δrecall@5 = +0.10  ΔMRR = +0.16
+
+  interpretation:
+   • MRR jumped most → the reranker mainly REORDERED (right parent now higher).
+   • recall@5 rose too → on 1 query the answer-parent was in the fused top-20
+     but below rank 5; the cross-encoder lifted it into the window.
+   • the 2 still-failing queries: inspect them. Missing from fused top-20?
+     → that's a FIRST-STAGE problem (chunking / embedder / widen first_n),
+       NOT something more reranking can fix.</div>
+  <div class="prose">
+    <p>This is the loop in miniature. You did not ship the reranker because a blog said to; you measured a +0.10 recall and +0.16 MRR on <em>your</em> data, then used the residual failures to point at the <em>next</em> fix (first-stage coverage, not reranking). That is the difference between tuning and guessing, and it is the same loop that, run 11+ times with cost tracked alongside quality, produces a result like "37% cheaper at a 2% quality drop." You have now built, end to end, the machine that produces numbers like that.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Module 3 review &mdash; can you answer these cold?</h2>
+  <p class="muted">Quick self-check across the whole module. One line each; if any is shaky, revisit that day before moving to agents.</p>
+  <ul class="q-list">
+    <li>Walk through a vanilla RAG pipeline, then say where most failures occur.
+      <div class="a">Key: ingest &rarr; chunk &rarr; embed &rarr; index &rarr; retrieve &rarr; generate; ~70-75% of bad answers are retrieval failures.</div></li>
+    <li>Compare fixed / semantic / sentence-window / parent-child chunking.
+      <div class="a">Key: fixed = N-token+overlap; semantic = similarity splits; sentence-window = index sentence, expand at retrieval; parent-child = index small, return parent (good default).</div></li>
+    <li>BM25 vs dense, and why combine them with RRF?
+      <div class="a">Key: BM25 = exact-term bag-of-words (codes, names); dense = semantic vectors; RRF fuses by rank, scale-free, so neither score scale dominates.</div></li>
+    <li>What does a reranker do and where does it sit?
+      <div class="a">Key: cross-encoder rescoring the fused top 50-100, joint (query, chunk) read, a precision stage before generation.</div></li>
+    <li>When do query transformations (decomposition / step-back / HyDE) help vs hurt?
+      <div class="a">Key: help ambiguous/multi-hop/vocab-mismatch queries; hurt precise, well-specified ones; gate them, do not apply reflexively.</div></li>
+    <li>What is agentic RAG versus vanilla?
+      <div class="a">Key: vanilla = fixed retrieve-then-generate; agentic = retrieval is a tool the agent calls with crafted args and iterates.</div></li>
+    <li>Which retrieval metric do you optimize first, and how do you prove a change?
+      <div class="a">Key: recall@k (the downstream ceiling); prove via offline golden set &rarr; shadow/interleave &rarr; guarded online A/B.</div></li>
+    <li>How do you cut RAG cost ~30% without losing quality?
+      <div class="a">Key: embed once, cache reranks, route, lower top-k, smaller generator, prompt caching, validated on the golden set (e.g. 37% cut at ~2% drop).</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (push the lab further)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>You already built the core. Extend it: (1) add an MMR pass (Day 18) after reranking and check whether per-slice diversity helps multi-faceted questions; (2) add a HyDE variant (Day 19), generate a hypothetical answer, embed <em>that</em> for the dense leg, and measure the recall delta; (3) if you have Postgres, move the dense index into <a href="https://github.com/pgvector/pgvector">pgvector</a> and confirm the same recall numbers. Reference the <a href="https://www.sbert.net/examples/applications/retrieve_rerank/README.html">sentence-transformers retrieve-and-rerank guide</a> and the <a href="https://docs.ragas.io/en/stable/concepts/metrics/available_metrics/">RAGAS metrics</a> as you formalize evaluation.</p>
+    <p class="muted" style="font-size:13.5px">Treat each extension as an experiment: change one thing, run <code>evaluate()</code>, keep it only if recall@k or MRR improves without a latency you cannot afford. That is the whole job.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>This lab is a scaled-down replica of what you ship on MaiQ: hybrid retrieval (BM25 plus dense, fused with RRF) into pgvector behind a FastAPI ingestion service, with an LLM-as-judge evaluation framework measuring quality. Building it by hand here gives you something most candidates lack, the ability to whiteboard the entire pipeline from chunking to a measured reranker delta without hand-waving, and to point at the exact knob behind your 37% cost cut at a 2% retrieval drop. In an interview, offering to sketch this end to end, then narrating where you would measure and what you would expect to move, is a far stronger signal than naming tools. You now own both the build and the proof.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>You assembled a complete hybrid RAG: parent-child chunking, dense plus BM25 retrieval fused with RRF, an optional cross-encoder reranker, and grounded generation with citations, then you measured recall@k and MRR with the reranker off versus on. The measurement is the lesson: a +0.10 recall delta on your own golden set beats any amount of intuition, and the residual failures point you at the next fix. This is the machine that turns "I think this is better" into "this is better, by this much, at this cost", the same loop behind a 37%-cheaper, 2%-drop result. Module 3 done; next you give the model autonomy and it becomes an agent.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d21">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Next module: what an agent actually is, and how it differs from the chains you have been building.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d20-evaluating-retrieval.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 20 &middot; Evaluating retrieval</div></a>
+    <a data-nav="next" class="next" href="../m04-agents/d22-what-is-an-agent.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 22 &middot; What is an agent?</div></a>
+  </div>
+
+  <div class="foot">Module 3 &middot; RAG &amp; Retrieval &middot; Day 21 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

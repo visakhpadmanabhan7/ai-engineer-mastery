@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson — AI Engineer Mastery</title>
+<link rel="stylesheet" href="assets/base.css">
+<link rel="stylesheet" href="assets/app.css">
+</head>
+<body>
+<div class="wrap" id="app">
+  <div class="muted-center" id="loading"><span class="spinner"></span> Loading lesson…</div>
+</div>
+
+<script src="assets/api.js"></script>
+<script>
+if (!requireAuth()) { /* redirected */ }
+renderNav("");
+
+const day = parseInt(qs("day") || "1");
+let lesson = null;
+let done = false;
+let session_id = null;
+
+async function load() {
+  let notes, progress, status;
+  try {
+    [lesson, notes, progress, status] = await Promise.all([
+      getLesson(day), getNotes(), getProgress(), tutorStatus(),
+    ]);
+  } catch (e) {
+    document.getElementById("app").innerHTML = "Could not load: " + escapeHtml(e.message);
+    return;
+  }
+
+  done = (progress.completed_days || []).includes(day);
+  const aiOn = !!status.ai_enabled;
+  const lessonNotes = (notes || [])
+    .filter((n) => n.lesson_id === lesson.id)
+    .sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));
+
+  const prevHref = `lesson.html?day=${day - 1}`;
+  const nextHref = `lesson.html?day=${day + 1}`;
+
+  const html = `
+    <div class="lesson-actions" style="margin-top:14px">
+      <a class="btn" href="index.html">&larr; Dashboard</a>
+      ${day > 1 ? `<a class="btn ghost" href="${prevHref}">&larr; Day ${day - 1}</a>` : ""}
+      ${day < 68 ? `<a class="btn ghost" href="${nextHref}">Day ${day + 1} &rarr;</a>` : ""}
+    </div>
+
+    <div id="lessonBody"></div>
+
+    <div class="lesson-actions">
+      <button class="btn ${done ? "" : "primary"}" id="completeBtn">${done ? "&#10003; Completed" : "Mark complete"}</button>
+    </div>
+
+    <h2>Go deeper with the tutor</h2>
+    ${aiOn ? "" : `<div class="ai-off">The AI tutor is not configured yet. You can still send a message and you will get a helpful reply.</div>`}
+    <div class="lesson-actions" style="margin-bottom:8px">
+      <button class="btn ghost" id="suggestBtn">Explain one level deeper, then quiz me</button>
+    </div>
+    <div class="chat-log" id="chatLog"></div>
+    <div class="composer">
+      <textarea id="chatInput" placeholder="Ask the tutor about this lesson…"></textarea>
+      <button class="btn primary" id="sendBtn">Send</button>
+    </div>
+
+    <h2>Your notes</h2>
+    <div class="note-box">
+      <textarea id="noteInput" placeholder="Jot down a takeaway from this lesson…"></textarea>
+      <div class="lesson-actions" style="margin-top:10px">
+        <button class="btn primary" id="saveNoteBtn">Save note</button>
+      </div>
+    </div>
+    <div id="noteList"></div>`;
+
+  const app = document.getElementById("app");
+  app.innerHTML = html;
+
+  // Render trusted lesson HTML raw (do NOT escape).
+  document.getElementById("lessonBody").innerHTML = lesson.body_html;
+
+  // Existing notes, newest first.
+  const noteList = document.getElementById("noteList");
+  lessonNotes.forEach((n) => noteList.appendChild(noteItem(n.content)));
+
+  // Mark complete toggle.
+  const completeBtn = document.getElementById("completeBtn");
+  completeBtn.addEventListener("click", async () => {
+    const next = !done;
+    completeBtn.disabled = true;
+    try {
+      await setProgress(lesson.id, next);
+      done = next;
+      completeBtn.classList.toggle("primary", !done);
+      completeBtn.innerHTML = done ? "&#10003; Completed" : "Mark complete";
+      toast(done ? "Day " + day + " complete" : "Marked incomplete");
+    } catch (e) {
+      toast(e.message);
+    } finally {
+      completeBtn.disabled = false;
+    }
+  });
+
+  // Suggested prompt fills the composer.
+  document.getElementById("suggestBtn").addEventListener("click", () => {
+    const input = document.getElementById("chatInput");
+    input.value = "Explain this lesson one level deeper with an analogy, then quiz me one question at a time.";
+    input.focus();
+  });
+
+  // Tutor chat send.
+  const sendBtn = document.getElementById("sendBtn");
+  const chatInput = document.getElementById("chatInput");
+  sendBtn.addEventListener("click", sendMessage);
+  chatInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); sendMessage(); }
+  });
+
+  // Save note.
+  document.getElementById("saveNoteBtn").addEventListener("click", saveNote);
+}
+
+function noteItem(content) {
+  const div = document.createElement("div");
+  div.className = "note-item";
+  div.innerHTML = escapeHtml(content);
+  return div;
+}
+
+function bubble(role, who) {
+  const log = document.getElementById("chatLog");
+  const div = document.createElement("div");
+  div.className = "msg " + role;
+  if (who) {
+    const w = document.createElement("div");
+    w.className = "who";
+    w.textContent = who;
+    div.appendChild(w);
+  }
+  const body = document.createElement("span");
+  div.appendChild(body);
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+  return body;
+}
+
+async function sendMessage() {
+  const input = document.getElementById("chatInput");
+  const sendBtn = document.getElementById("sendBtn");
+  const log = document.getElementById("chatLog");
+  const message = input.value.trim();
+  if (!message) return;
+
+  bubble("user").textContent = message;
+  input.value = "";
+  const assistant = bubble("assistant", "Tutor");
+
+  sendBtn.disabled = true;
+  input.disabled = true;
+  try {
+    session_id = await tutorStream(
+      { kind: "deepen", lesson_id: lesson.id, session_id, message },
+      (chunk) => {
+        assistant.textContent += chunk;
+        log.scrollTop = log.scrollHeight;
+      }
+    );
+  } catch (e) {
+    assistant.textContent += (assistant.textContent ? "\n\n" : "") + "Error: " + e.message;
+    toast(e.message);
+  } finally {
+    sendBtn.disabled = false;
+    input.disabled = false;
+    input.focus();
+  }
+}
+
+async function saveNote() {
+  const input = document.getElementById("noteInput");
+  const btn = document.getElementById("saveNoteBtn");
+  const text = input.value.trim();
+  if (!text) return;
+  btn.disabled = true;
+  try {
+    await createNote(text, lesson.id);
+    document.getElementById("noteList").prepend(noteItem(text));
+    input.value = "";
+    toast("Note saved");
+  } catch (e) {
+    toast(e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+load();
+</script>
+</body>
+</html>

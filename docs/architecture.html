@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Architecture — AI Engineer Mastery</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<div class="topbar"><div class="inner">
+  <span class="brand"><span class="dot"></span> AI Engineer Mastery</span>
+  <nav class="navlinks">
+    <a href="index.html">Overview</a>
+    <a href="architecture.html" class="active">Architecture</a>
+    <a href="deploy.html">Deploy</a>
+    <a href="https://github.com/visakhpadmanabhan7/ai-engineer-mastery">GitHub</a>
+  </nav>
+</div></div>
+
+<div class="wrap wrap-wide">
+
+  <div class="hero">
+    <div class="eyebrow">Architecture &middot; how it actually works</div>
+    <h1>Architecture</h1>
+    <p class="lede">A single async FastAPI service that ingests a bundled curriculum into a database on startup, schedules a question bank with the FSRS-6 spaced-repetition algorithm, and fronts a <strong>provider-agnostic AI tutor</strong> that streams over any LLM you plug in. One process, no build step on the frontend, and the same code path on SQLite or any managed Postgres.</p>
+    <div class="meta-row" style="margin-top:18px">
+      <span class="pill gold">FastAPI async</span>
+      <span class="pill">SQLAlchemy 2.0 async</span>
+      <span class="pill">Pydantic v2</span>
+      <span class="pill teal">Anthropic / Groq / OpenAI-compatible</span>
+      <span class="pill violet">FSRS-6</span>
+      <span class="pill green">pgvector &rarr; JSON fallback</span>
+    </div>
+    <div class="meta-row" style="margin-top:16px">
+      <a class="btn ghost" href="index.html">&larr; Overview</a>
+      <a class="btn ghost" href="deploy.html">Deploy it free</a>
+      <a class="btn ghost" href="https://github.com/visakhpadmanabhan7/ai-engineer-mastery">Source on GitHub</a>
+    </div>
+  </div>
+
+  <div class="callout connect">
+    <span class="label">The one-line mental model</span>
+    <p>Browser (vanilla JS) &rarr; <code>api.js</code> &rarr; FastAPI routers &rarr; thin services (<code>ai</code>, <code>srs</code>, <code>ingest</code>, <code>activity</code>) &rarr; the database and the chosen LLM. Routers own HTTP and auth; services own the logic; SQLAlchemy and the provider SDKs own I/O. Nothing in a router talks to a provider SDK directly.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <!-- ============================================================ 1. LIFECYCLE -->
+  <h2>1 &middot; Request lifecycle and components</h2>
+  <p>The whole stack is one <code>uvicorn</code> process. On boot, the <code>lifespan</code> context manager runs <code>init_db()</code>, ingests <code>content/</code> into the database, and seeds the dev user; then the routers serve, and the frontend is mounted last as static files so every <code>/api/*</code> path wins over the SPA.</p>
+
+  <div class="diagram">                          BROWSER  (frontend/ — plain HTML + assets/api.js, no build step)
+                          dashboard · lesson · review · tutor · mock · analytics
+                                            │
+                                            │  fetch() JSON  ·  Authorization: Bearer &lt;JWT&gt;
+                                            │  (tutor replies arrive as a streamed text/plain body)
+                                            ▼
+   ┌─────────────────────────────────────────────────────────────────────────────────────┐
+   │  FastAPI app  (backend/app/main.py)                                                    │
+   │    CORSMiddleware · StaticFiles mounted at "/" LAST so /api/* resolves first           │
+   │                                                                                        │
+   │    routers/         deps.get_current_user  ──decode JWT──▶  User                       │
+   │    ├─ auth          register · login            (JWT + bcrypt)                          │
+   │    ├─ lessons       /api/curriculum · /api/lessons/{day}                                │
+   │    ├─ progress      /api/progress               mark complete, bump streak             │
+   │    ├─ review        /api/review/queue · /grade  ─────────────┐                          │
+   │    ├─ tutor         /api/tutor/chat (stream) · /grade ─────┐  │                          │
+   │    ├─ analytics     /api/analytics              weak areas │  │                          │
+   │    └─ notes         per-lesson notes → tutor context      │  │                          │
+   │                                                            │  │                          │
+   │    services/   ai (provider-agnostic) ──┐   srs (FSRS-6) ◀─┘  │                          │
+   │                activity (streaks)       │   ingest (content/) │                          │
+   └────────────────────────────────────────┼────────────────────┼──────────────────────────┘
+                                            │                    │
+                       ┌────────────────────┘                    ▼
+                       ▼                              ┌───────────────────────────────┐
+        ┌───────────────────────────────┐            │  DATABASE  (async SQLAlchemy)  │
+        │  LLM PROVIDER (you pick one)   │            │  SQLite (aiosqlite) local      │
+        │  Anthropic  ·  Groq  ·  any    │            │  Postgres (asyncpg) in prod    │
+        │  OpenAI-compatible host        │            │  pgvector when available,      │
+        │  tutor model + judge model     │            │  JSON-encoded vectors if not   │
+        └───────────────────────────────┘            └───────────────────────────────┘</div>
+
+  <div class="callout concept">
+    <span class="label">Why one process</span>
+    <p>No message broker, no separate worker, no frontend build pipeline. The frontend is static files served by the same app; the only optional external dependencies are a Postgres URL and one LLM key. That keeps the free-tier deploy to a single web service and makes the repo runnable with <code>./run.sh</code> and zero configuration.</p>
+  </div>
+
+  <!-- ============================================================ 2. STACK -->
+  <h2>2 &middot; Tech stack and the "why"</h2>
+  <table>
+    <tr><th>Layer</th><th>Choice</th><th>Why this, here</th></tr>
+    <tr><td>Web framework</td><td><b>FastAPI</b>, fully async</td><td>Async end to end so a slow streamed LLM call never blocks a worker. Free OpenAPI at <code>/docs</code> and Pydantic-validated request bodies with no extra code.</td></tr>
+    <tr><td>ORM</td><td><b>SQLAlchemy 2.0</b> async (<code>Mapped</code> / <code>mapped_column</code>)</td><td>The modern typed mapping style; <code>async_sessionmaker</code> with <code>expire_on_commit=False</code> so objects stay usable after commit inside async handlers.</td></tr>
+    <tr><td>Schemas</td><td><b>Pydantic v2</b> + <code>pydantic-settings</code></td><td>Request/response contracts in <code>schemas.py</code>; all config (DB URL, provider keys, content path) loaded and validated from env / <code>backend/.env</code>.</td></tr>
+    <tr><td>DB drivers</td><td><b>aiosqlite</b> (local) &middot; <b>asyncpg</b> (prod)</td><td>SQLite by default means zero external services to run the app; the same models switch to asyncpg-backed Postgres just by changing <code>DATABASE_URL</code>.</td></tr>
+    <tr><td>Vectors</td><td><b>pgvector</b>, optional</td><td>Real 384-dim vector columns (HNSW-indexable) when the extension is present; transparently falls back to JSON text otherwise, so it runs on any managed Postgres.</td></tr>
+    <tr><td>Auth</td><td><b>PyJWT</b> + <b>bcrypt</b></td><td>Stateless bearer tokens (HS256, 7-day expiry); passwords sha256-prehashed before bcrypt to dodge the 72-byte truncation pitfall and the brittle passlib/bcrypt coupling.</td></tr>
+    <tr><td>Spaced repetition</td><td><b>fsrs</b> (FSRS-6)</td><td>2026 state-of-the-art scheduler, roughly 30% fewer reviews than SM-2 for the same retention; a built-in SM-2 fallback keeps reviews working if the import shape changes.</td></tr>
+    <tr><td>LLM SDKs</td><td><b>anthropic</b> &middot; <b>openai</b></td><td>Two clients cover three+ providers: the Anthropic SDK for Claude, and the OpenAI SDK pointed at any OpenAI-compatible host (Groq, Together, OpenRouter, local Ollama) via <code>OPENAI_BASE_URL</code>. Imported lazily so the app runs without both installed.</td></tr>
+    <tr><td>Content parsing</td><td><b>BeautifulSoup</b></td><td><code>services/ingest.py</code> parses the bundled lesson HTML and the <code>question-bank.html</code> <code>.q-list</code> items (prompt + <code>Key:</code> answer) into <code>Question</code> rows on startup.</td></tr>
+    <tr><td>Packaging</td><td><b>Docker</b> + compose</td><td><code>docker compose</code> brings up API + Postgres(pgvector) + Redis; the image honors <code>$PORT</code> for managed hosts. <code>render.yaml</code> gives a one-click deploy.</td></tr>
+    <tr><td>Frontend</td><td><b>Vanilla JS</b>, no build</td><td>Plain HTML pages plus a single <code>api.js</code> fetch layer and two CSS files. No bundler, no node_modules, nothing to compile or to break.</td></tr>
+  </table>
+
+  <!-- ============================================================ 3. DATA MODEL -->
+  <h2>3 &middot; Data model</h2>
+  <p>Eleven tables in <code>models.py</code>, in three groups: identity and habit (<code>User</code>), content (<code>Module</code>, <code>Lesson</code>, <code>Question</code>), and per-user activity (everything else). Embeddings live on <code>Lesson</code> and <code>Note</code> through the portable <code>Vector</code> type (see section 6).</p>
+
+  <div class="diagram">  User ─────┬──< Progress >────── Lesson ──── Module ──< Question
+   (auth,    │                       │  ▲         (11)        │
+   streaks)  ├──< ReviewCard >──── Question      │            │ (answer_key)
+             │     (FSRS state)                  │            │
+             ├──< ReviewLog  >──── Question      │            │
+             ├──< Note >─────────── Lesson? (embedding)       │
+             ├──< TutorSession >──< TutorMessage │            │
+             └──< Attempt >─────── Question? · Lesson? · topic ┘
+                  (score 0-10, feedback, model_answer → analytics)
+
+   "<"  = one-to-many        "?" = nullable FK
+   Module 1──< Lesson 1──< (embedding)        Module 1──< Question</div>
+
+  <table>
+    <tr><th>Table</th><th>Holds</th><th>Key fields / relationships</th></tr>
+    <tr><td><b>User</b></td><td>Account + habit state</td><td><code>email</code> (unique), <code>hashed_password</code>, <code>current_streak</code> / <code>longest_streak</code> / <code>last_active_date</code>, <code>daily_goal_lessons</code>. Owns <code>progress</code> and <code>cards</code> (cascade delete).</td></tr>
+    <tr><td><b>Module</b></td><td>One of 11 curriculum modules</td><td><code>number</code>, <code>title</code>, <code>week</code>, <code>is_core</code>; <code>lessons</code> ordered by day.</td></tr>
+    <tr><td><b>Lesson</b></td><td>One of the 68 lessons</td><td><code>day</code> (unique), <code>body_html</code>, <code>summary</code>, <code>difficulty</code>, <code>est_minutes</code>, optional <code>embedding</code>; belongs to a Module.</td></tr>
+    <tr><td><b>Question</b></td><td>Interview-bank item</td><td><code>prompt</code> + <code>answer_key</code>, <code>topic</code>, <code>difficulty</code>, <code>source</code>; optional Module FK. The deck the SRS schedules.</td></tr>
+    <tr><td><b>Progress</b></td><td>Lesson completion per user</td><td><code>status</code>, <code>completed_at</code>, <code>time_spent_seconds</code>; unique on <code>(user_id, lesson_id)</code>.</td></tr>
+    <tr><td><b>ReviewCard</b></td><td>Per-user FSRS state for one question</td><td><code>due</code> (indexed, drives the queue), <code>fsrs_state</code> (full Card round-tripped as JSON), <code>state</code> / <code>reps</code> / <code>lapses</code>; unique on <code>(user_id, question_id)</code>.</td></tr>
+    <tr><td><b>ReviewLog</b></td><td>Every grade event</td><td><code>rating</code> (1 again &middot; 2 hard &middot; 3 good &middot; 4 easy), <code>reviewed_at</code>; feeds "reviewed today" and activity.</td></tr>
+    <tr><td><b>Note</b></td><td>Per-lesson learner note</td><td><code>content</code>, optional <code>lesson_id</code>, optional <code>embedding</code>; the most recent notes become tutor context.</td></tr>
+    <tr><td><b>TutorSession</b></td><td>A tutor conversation</td><td><code>kind</code> (<code>deepen</code> / <code>grade</code> / <code>mock</code> / <code>chat</code>), <code>title</code>; owns its messages (cascade).</td></tr>
+    <tr><td><b>TutorMessage</b></td><td>One turn in a session</td><td><code>role</code> (user / assistant), <code>content</code>, ordered by <code>id</code>.</td></tr>
+    <tr><td><b>Attempt</b></td><td>A graded answer</td><td><code>kind</code> (grade / mock / practice), <code>topic</code> (indexed), <code>score</code> (0-10), <code>feedback</code>, <code>model_answer</code>. The raw material for weak-area analytics.</td></tr>
+  </table>
+
+  <!-- ============================================================ 4. AI TUTOR -->
+  <h2>4 &middot; The provider-agnostic AI tutor</h2>
+  <p>All LLM access goes through <code>services/ai.py</code>. Routers call <code>stream_chat(...)</code> or <code>grade(...)</code> and never touch a provider SDK. The provider is resolved once from config: <code>LLM_PROVIDER</code> may be <code>anthropic</code>, <code>groq</code>, <code>none</code>, or <code>auto</code>, and <code>auto</code> picks Groq if its key is set, else Anthropic, else <code>none</code>.</p>
+
+  <div class="grid cols-2">
+    <div class="panel">
+      <h4 style="color:var(--gold)">Two providers, one interface</h4>
+      <p class="muted" style="font-size:14.5px">The clients are created lazily inside getters (<code>_anthropic()</code> / <code>_openai()</code>) so the SDK only needs to be installed for the provider you actually use. The OpenAI client is pointed at <code>OPENAI_BASE_URL</code> (default Groq), so Groq, Together, OpenRouter, and local Ollama all reuse the same code path.</p>
+    </div>
+    <div class="panel">
+      <h4 style="color:var(--teal)">Two capabilities</h4>
+      <p class="muted" style="font-size:14.5px"><b>Streamed</b> <code>stream_chat</code> for teaching, deepen, and mock interviews (async generator yielding text deltas). <b>Structured</b> <code>grade</code> for scoring: it requests JSON only, then defensively extracts and normalizes <code>score</code> / <code>feedback</code> / <code>one_fix</code> / <code>model_answer</code> even if the model wraps it in fences.</p>
+    </div>
+  </div>
+
+  <h3>Tutor vs judge: a deliberate cost split</h3>
+  <p>Every provider runs the same pattern: a strong model teaches and runs mock interviews, a small fast model grades. Quality where it matters, cost and latency where it does not.</p>
+  <table>
+    <tr><th>Role</th><th>Anthropic</th><th>Groq / OpenAI-compatible</th><th>Used by</th></tr>
+    <tr><td><b>Tutor</b> (teach, deepen, mock)</td><td><code>claude-opus-4-8</code></td><td><code>llama-3.3-70b-versatile</code></td><td>streamed <code>stream_chat</code>, up to 2000 tokens</td></tr>
+    <tr><td><b>Judge</b> (grade an answer)</td><td><code>claude-haiku-4-5</code></td><td><code>llama-3.1-8b-instant</code></td><td>structured <code>grade</code>, JSON-only, 900 tokens</td></tr>
+  </table>
+
+  <div class="callout concept">
+    <span class="label">Three modes, one system prompt builder</span>
+    <p><code>system_for(kind, context)</code> assembles the persona. A shared <code>VISAKH_CONTEXT</code> grounds the tutor in the learner's real, citable work (so explanations anchor to concrete experience and never fabricate beyond it), a <code>VOICE</code> block enforces a precise senior register and American English, and the <code>kind</code> swaps in the right teaching contract: <b>deepen</b> teaches one level past a textbook then asks probing questions one at a time; <b>mock</b> runs an escalating interview and withholds model answers until you respond, then scores; the default <b>chat</b> answers rigorously with a hint before the full answer.</p>
+  </div>
+
+  <h3>The streaming detail that matters</h3>
+  <p>The tutor reply is an HTTP <code>StreamingResponse</code> of <code>text/plain</code>. The request-scoped DB session is closing while bytes are still flowing to the browser, so the assistant turn cannot be persisted on it. The generator accumulates the streamed chunks and, after the stream ends, opens a <strong>fresh</strong> <code>SessionLocal()</code> to write the assistant message:</p>
+  <pre><code>    <span class="tok-k">async def</span> <span class="tok-f">gen</span>():
+        acc: list[str] = []
+        <span class="tok-k">async for</span> chunk <span class="tok-k">in</span> ai.stream_chat(system, api_messages):
+            acc.append(chunk)
+            <span class="tok-k">yield</span> chunk
+        <span class="tok-c"># persist with a fresh session — the request session is already closing</span>
+        <span class="tok-k">async with</span> SessionLocal() <span class="tok-k">as</span> s2:
+            s2.add(TutorMessage(session_id=session_id, role=<span class="tok-s">"assistant"</span>, content=<span class="tok-s">""</span>.join(acc)))
+            <span class="tok-k">await</span> s2.commit()</code></pre>
+  <p>The user turn and the streak bump are committed <em>before</em> streaming starts, and the new session id is returned to the client in an <code>X-Session-Id</code> header (with <code>X-Accel-Buffering: no</code> so proxies do not buffer the stream). Multi-turn coherence comes from replaying the session's prior messages on each call.</p>
+
+  <div class="callout key">
+    <span class="label">Graceful degradation</span>
+    <p>With no key, <code>provider()</code> resolves to <code>none</code>: <code>stream_chat</code> yields one friendly message explaining how to enable the tutor, and <code>grade</code> returns a null score with the same hint. Network or model errors are caught and surfaced inline rather than crashing the request. Everything else in the app (curriculum, progress, the full FSRS review loop, analytics) works with no LLM at all.</p>
+  </div>
+
+  <!-- ============================================================ 5. SRS -->
+  <h2>5 &middot; Spaced repetition (FSRS-6)</h2>
+  <p>Scheduling lives in <code>services/srs.py</code> behind a tiny public surface: <code>new_card()</code>, <code>review(blob, rating, now)</code>, and <code>engine_name()</code>. On import it constructs an FSRS <code>Scheduler</code>; if that import fails or the library's API differs, it logs a warning and silently uses a compact SM-2 implementation, so the review loop never goes down.</p>
+
+  <div class="grid cols-2">
+    <div class="panel">
+      <h4 style="color:var(--violet)">The review queue</h4>
+      <p class="muted" style="font-size:14.5px"><code>GET /api/review/queue</code> returns, in order: <b>due cards</b> (<code>ReviewCard.due &le; now</code>, joined to their question, ordered by due date), then backfills up to the limit with <b>brand-new questions</b> that have no card yet (capped at 15 new per call). The query uses the indexed <code>due</code> column so the hot path stays cheap as the deck grows.</p>
+    </div>
+    <div class="panel">
+      <h4 style="color:var(--amber)">4-button grading</h4>
+      <p class="muted" style="font-size:14.5px"><code>POST /api/review/grade</code> takes a rating of 1 to 4 (Again / Hard / Good / Easy), runs the scheduler, then writes the next <code>due</code>, the serialized <code>fsrs_state</code>, the new <code>state</code>, and increments <code>reps</code> (and <code>lapses</code> on an Again). Every grade is also appended to <code>ReviewLog</code> and bumps the daily streak.</p>
+    </div>
+  </div>
+
+  <p>FSRS state is stored as JSON, not as fixed columns. The library's full <code>Card</code> is dumped with <code>to_dict()</code> into <code>fsrs_state</code> and rebuilt with <code>from_dict()</code> on the next review, which keeps persistence tolerant of library version changes; only <code>due</code> and <code>state</code> are broken out as real columns (the former indexed for the queue). The 4-button rating maps cleanly onto the SM-2 quality scale in the fallback path, so a card's history survives an engine switch.</p>
+
+  <div class="callout concept">
+    <span class="label">Why FSRS over SM-2</span>
+    <p>SM-2 (the classic Anki algorithm) tracks one ease factor and a fixed interval ladder. FSRS-6 models memory with separate <b>difficulty</b> and <b>stability</b> states and predicts the recall probability of each card, scheduling the next review at a target retention. In practice that means roughly 30% fewer reviews than SM-2 for the same retention, the right default for an interview-prep deck where review time is the scarce resource. The SM-2 fallback exists only so the feature degrades instead of failing.</p>
+  </div>
+
+  <!-- ============================================================ 6. DB PORTABILITY -->
+  <h2>6 &middot; Database portability</h2>
+  <p>The same models and the same engine code run on SQLite locally and on any managed Postgres in production. Two pieces make that work: a portable vector column type, and URL normalization for host-provided connection strings.</p>
+
+  <h3>The portable <code>Vector</code> type</h3>
+  <p><code>Vector</code> is a SQLAlchemy <code>TypeDecorator</code>. At connection time it checks the dialect and a module-level <code>PGVECTOR_OK</code> flag: on Postgres-with-the-extension it becomes a real <code>pgvector</code> column (HNSW-indexable, 384-dim for <code>all-MiniLM-L6-v2</code>); everywhere else it becomes a <code>Text</code> column and the embedding is JSON-encoded on the way in and decoded on the way out. The Python interface is identical either way, so application code never branches on the backend.</p>
+  <pre><code>    <span class="tok-k">def</span> <span class="tok-f">load_dialect_impl</span>(self, dialect):
+        <span class="tok-k">if</span> self._use_pg(dialect):            <span class="tok-c"># postgresql AND PGVECTOR_OK</span>
+            <span class="tok-k">from</span> pgvector.sqlalchemy <span class="tok-k">import</span> Vector <span class="tok-k">as</span> PGVector
+            <span class="tok-k">return</span> dialect.type_descriptor(PGVector(self.dim))
+        <span class="tok-k">return</span> dialect.type_descriptor(Text())   <span class="tok-c"># JSON-encoded list elsewhere</span></code></pre>
+  <p>The flag is set during <code>init_db()</code>: it runs <code>CREATE EXTENSION IF NOT EXISTS vector</code> in its <em>own</em> transaction (so a failure on a host that does not grant the extension cannot abort the subsequent <code>create_all</code>), and only sets <code>PGVECTOR_OK = True</code> if that succeeds. On any Postgres without pgvector, the app logs a warning and quietly uses JSON columns; it still deploys and runs.</p>
+
+  <h3><code>postgres://</code> &rarr; asyncpg URL normalization</h3>
+  <p>Managed hosts (Render, Neon, Supabase) hand out <code>postgres://...</code> URLs that the async driver will not accept as-is. The <code>db_url</code> property rewrites them so you can paste the host's URL verbatim:</p>
+  <table>
+    <tr><th>Step</th><th>Transform</th></tr>
+    <tr><td>1. Scheme alias</td><td><code>postgres://</code> &rarr; <code>postgresql://</code></td></tr>
+    <tr><td>2. Async driver</td><td><code>postgresql://</code> &rarr; <code>postgresql+asyncpg://</code> (if not already)</td></tr>
+    <tr><td>3. Strip libpq params</td><td>drop the <code>?sslmode=require&hellip;</code> query string (asyncpg rejects libpq query params)</td></tr>
+  </table>
+  <p>SSL is handled separately and out of band: <code>pg_ssl_enabled</code> turns on when <code>PG_SSL</code> is set or the raw URL contained <code>sslmode=require</code> / <code>ssl=true</code>, and the engine is then created with <code>connect_args={"ssl": True}</code>. So the stripped <code>sslmode</code> is not lost; it is re-applied the way asyncpg expects. <code>pool_pre_ping=True</code> keeps idle connections healthy on hosts that drop them.</p>
+
+  <!-- ============================================================ 7. AUTH -->
+  <h2>7 &middot; Authentication flow</h2>
+  <div class="diagram">  POST /api/auth/register|login
+       password ──▶ sha256 digest ──▶ base64 (44 bytes, &lt; bcrypt's 72) ──▶ bcrypt.hashpw / checkpw
+                                                              │
+                                                        on success
+                                                              ▼
+                          create_access_token(email)  ──▶  JWT  { sub: email, iat, exp:+7d }  (HS256)
+                                                              │
+   every protected call:  Authorization: Bearer &lt;JWT&gt;          │
+       deps.get_current_user ──▶ decode_token ──▶ sub ──▶ SELECT User WHERE email = sub
+                                     │ invalid/expired ──▶ 401 Bearer challenge
+                                     ▼
+                                  User  ──▶  router handler</div>
+  <p>Tokens are stateless: there is no session table, so the JWT secret and a 7-day expiry are the whole story. Passwords are <strong>sha256-prehashed then base64-encoded</strong> before bcrypt, which sidesteps bcrypt's silent 72-byte truncation (long passphrases stay fully significant) and avoids the brittle passlib/bcrypt version coupling. <code>verify_password</code> and <code>decode_token</code> both fail closed: any exception returns <code>False</code> / <code>None</code> rather than leaking a 500. Protected routes depend on <code>get_current_user</code>, which resolves the bearer token to a real <code>User</code> row or raises a 401 with a <code>WWW-Authenticate: Bearer</code> challenge.</p>
+
+  <!-- ============================================================ 8. DESIGN DECISIONS -->
+  <h2>8 &middot; Design decisions</h2>
+  <div class="grid cols-2">
+    <div class="panel">
+      <h4 style="color:var(--gold)">Build on the stack it teaches</h4>
+      <p class="muted" style="font-size:14.5px">The curriculum covers async Python services, RAG, evaluation, and system design, so the app is deliberately FastAPI + async SQLAlchemy + Postgres/pgvector + an LLM API. Running and extending it <em>is</em> the lab. That is also why pgvector, embeddings, and the LLM-as-judge grader are first-class even though the bundled deck would run on plain text.</p>
+    </div>
+    <div class="panel">
+      <h4 style="color:var(--teal)">Provider-agnostic, BYO key</h4>
+      <p class="muted" style="font-size:14.5px">No vendor lock-in and no required spend: one config switch chooses Anthropic, Groq (free tier), or any OpenAI-compatible host. The tutor/judge split is the same everywhere, and the app degrades to fully working with no key at all. SDK imports are lazy so you install only what you use.</p>
+    </div>
+    <div class="panel">
+      <h4 style="color:var(--violet)">Vanilla-JS frontend, no build</h4>
+      <p class="muted" style="font-size:14.5px">Plain HTML, one <code>api.js</code> fetch layer, two CSS files. No bundler, no <code>node_modules</code>, nothing to compile, audit, or break. The frontend is served as static files by the same FastAPI process, which keeps the deploy a single web service. The backend is the interesting part; the UI stays out of its way.</p>
+    </div>
+    <div class="panel">
+      <h4 style="color:var(--amber)">Bundle the content</h4>
+      <p class="muted" style="font-size:14.5px">The 68 lessons and the question bank (with answer keys) live in <code>content/</code> and are ingested on startup, so the repo stands alone with no external CMS, network call, or dependency on the <code>Resume-app</code> it was extracted from. Self-contained content is also what makes the free one-click deploy possible.</p>
+    </div>
+    <div class="panel">
+      <h4 style="color:var(--green)">SQLite default, Postgres-ready</h4>
+      <p class="muted" style="font-size:14.5px">Default to SQLite so the barrier to running it is <code>./run.sh</code>, while the portable <code>Vector</code> type and URL normalization mean production Postgres needs only a connection string, with no schema changes and no pgvector requirement. One codebase, two deployment shapes.</p>
+    </div>
+    <div class="panel">
+      <h4 style="color:var(--blue)">Thin routers, thin services</h4>
+      <p class="muted" style="font-size:14.5px">Routers own HTTP, auth, and persistence; services (<code>ai</code>, <code>srs</code>, <code>ingest</code>, <code>activity</code>) own logic and are swappable in isolation. That boundary is what lets the SRS engine and the LLM provider each fall back or change without the routers knowing.</p>
+    </div>
+  </div>
+
+  <div class="callout connect">
+    <span class="label">Where to read next</span>
+    <p>The provider abstraction is in <code>backend/app/services/ai.py</code>; scheduling in <code>services/srs.py</code>; the portable vector type and models in <code>models.py</code>; engine, <code>PGVECTOR_OK</code>, and <code>init_db</code> in <code>database.py</code>; the streaming tutor route in <code>routers/tutor.py</code>; URL and provider resolution in <code>config.py</code>. Live OpenAPI is at <code>/docs</code> while the server runs.</p>
+  </div>
+
+  <div class="foot">
+    AI Engineer Mastery &middot; <a href="index.html">Overview</a> &middot; <a href="deploy.html">Deploy</a> &middot;
+    <a href="https://github.com/visakhpadmanabhan7/ai-engineer-mastery">GitHub</a> &middot;
+    architecture grounded in <code>backend/app/</code>; curriculum bundled in <code>content/</code>.
+  </div>
+
+</div>
+</body>
+</html>

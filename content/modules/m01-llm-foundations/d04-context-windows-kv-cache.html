@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 4 · Context windows &amp; the KV cache</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 1 &middot; LLM Foundations</span>
+    <span class="pill">Day 4</span>
+    <span class="pill">55 min</span>
+    <span class="diff" title="Difficulty: intermediate"><i class="on"></i><i class="on"></i><i></i></span>
+  </div>
+
+  <h1>Context windows &amp; the KV cache</h1>
+  <p class="lede">"Just put it all in the context" sounds free. It is not. Today you learn what the context window really is, the two-phase shape of inference (prefill then decode), the KV cache that makes generation tractable, why long context is expensive and fallible, and how to budget a window like an engineer.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Define the context window precisely and say what counts against it.</li>
+      <li>Separate the prefill phase from the decode phase and explain why their costs differ.</li>
+      <li>Explain the KV cache: what it stores, why it exists, and what it saves.</li>
+      <li>Explain why attention cost grows roughly quadratically with sequence length, and what that means for price and latency.</li>
+      <li>Recognize "lost in the middle" and budget a context window deliberately.</li>
+    </ul>
+  </div>
+
+  <h2>What the context window actually is</h2>
+  <div class="prose">
+    <p>The <strong>context window</strong> is the maximum number of tokens the model can attend to at once: everything in a single forward pass, the system prompt, the full conversation history, retrieved chunks, tool definitions and tool results, <em>and</em> the tokens it is currently generating, all share one fixed budget. It is not memory in any persistent sense. The model has no recall of a previous request; each call starts blank and sees only what you place inside this window. When people say a model "remembers" earlier in a chat, what is happening is that the application re-sends the prior turns inside the window every time.</p>
+    <p>Two consequences follow immediately. First, the window is a hard ceiling: exceed it and content must be dropped or the request is rejected, which is why context budgeting (below) is a real engineering task. Second, because there is no persistence, anything the model should "know" for this call must be assembled and supplied as context every call, which is the entire premise of RAG (Module 3) and of context engineering (Module 2).</p>
+  </div>
+
+  <h2>1 &middot; Inference has two phases: prefill and decode</h2>
+  <div class="prose">
+    <p>A single generation splits into two very different phases, and conflating them is a classic mistake.</p>
+    <ul>
+      <li><strong>Prefill</strong> processes your entire input prompt in <em>one parallel forward pass</em>. All input tokens are available at once, so the hardware crunches them together. This phase is compute-heavy but fast in wall-clock terms, and it produces the "time to first token." Its cost scales with input length.</li>
+      <li><strong>Decode</strong> generates the output <em>one token at a time</em>, autoregressively (Day 1). Each new token requires its own forward pass, and token <em>n+1</em> cannot begin until token <em>n</em> exists. This phase is serial, so its wall-clock cost scales with the number of <em>output</em> tokens, which is why long answers feel slow even on short prompts.</li>
+    </ul>
+    <p>This is the precise reason, promised on Day 1, that latency depends far more on output length than input length. Prefill consumes the prompt roughly in parallel; decode pays one sequential step per generated token. Hold this two-phase picture, because both prompt caching and the KV cache are optimizations of these two phases respectively.</p>
+  </div>
+
+  <div class="diagram">  ── PREFILL (parallel, one pass over the whole prompt) ──
+    "Summarize this 4,000-token document: …………………"
+       │  all input tokens processed together
+       ▼  → time-to-first-token, and the KV cache is filled here
+
+  ── DECODE (serial, one forward pass PER output token) ──
+    step 1:  …prompt…                         → "The"
+    step 2:  …prompt… "The"                    → " report"
+    step 3:  …prompt… "The" " report"          → " finds"
+    step 4:  …prompt… "The" " report" " finds" → " that"
+       │  each step attends back over everything before it
+       ▼  output latency grows with the NUMBER of output tokens</div>
+
+  <h2>2 &middot; The KV cache: why decode does not recompute everything</h2>
+  <div class="prose">
+    <p>Look at the decode diagram again. Naively, every step re-reads the entire growing sequence, so step 1000 would re-process 999 earlier tokens through every layer. That would make generation catastrophically slow, quadratic in the worst sense, recomputing the same work over and over.</p>
+    <p>The <strong>KV cache</strong> removes that waste. Recall attention from Day 1: each token produces a Query, a Key, and a Value. The crucial observation is that the Keys and Values of <em>already-processed</em> tokens never change as new tokens arrive (causal masking means earlier tokens cannot see later ones). So the model computes each token's Key and Value once and <strong>caches them, per layer</strong>. When generating the next token, the model only computes the <em>new</em> token's Query and attends it against the cached Keys and Values of all prior tokens. It does not recompute the past; it appends to the cache and reads it.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"The KV cache stores the per-layer Key and Value tensors for every token already in the sequence, so each decode step only computes the new token's Query and attends against the cache instead of re-encoding the whole prefix. It turns generation from re-doing O(n) work each step into appending one token's worth, trading GPU memory for a large speed-up." That is the correct, complete statement.</p>
+  </div>
+
+  <div class="prose">
+    <p>The trade-off is memory: the cache grows with the sequence length and must live in fast GPU memory, and for long contexts and many concurrent requests the KV cache, not the model weights, becomes the binding memory constraint. That single fact drives much of LLM serving (Module 7): continuous batching, paged attention, and quantized caches are all about fitting more KV cache into limited memory. The KV cache also explains why <strong>agent loops and long shared prefixes</strong> are where caching pays off most: the same prefix is attended again and again.</p>
+  </div>
+
+  <h2>3 &middot; Why long context is expensive: the quadratic problem</h2>
+  <div class="prose">
+    <p>The reason a 200K-token window is not simply "10x better than 20K" is the cost shape of attention itself. In self-attention, every token attends to every other token it is allowed to see, so the number of pairwise interactions scales with the <em>square</em> of the sequence length. Double the context and the attention computation roughly quadruples. This is the famous "attention is quadratic in sequence length" cost, and although modern systems soften it with optimized kernels (FlashAttention) and architectural tricks, the underlying scaling pressure is real.</p>
+    <p>Concretely, three costs rise as you grow the context:</p>
+    <ul>
+      <li><strong>Money.</strong> Every token in the window is billed (Day 2), so a longer prompt is a directly larger input bill, repeated on every call.</li>
+      <li><strong>Latency.</strong> Prefill has to process more tokens, pushing out time-to-first-token; the KV cache also grows, pressuring memory and throughput.</li>
+      <li><strong>Quality.</strong> More context is not monotonically better, which brings us to the next point.</li>
+    </ul>
+    <p>The senior instinct is therefore the opposite of "stuff the window." It is "supply the <em>smallest</em> set of <em>most relevant</em> tokens that lets the model answer correctly." Relevance beats volume, on cost, speed, and accuracy at once.</p>
+  </div>
+
+  <h2>4 &middot; "Lost in the middle": more context can hurt</h2>
+  <div class="prose">
+    <p>A robust, repeatedly observed finding: when relevant information sits in the <em>middle</em> of a long context, models use it less reliably than when the same information sits near the <strong>beginning or the end</strong>. Performance on "find and use this fact" tends to follow a U-shape across position. Burying the one passage that matters in the middle of 50 mediocre chunks can actively degrade the answer, even though the fact is technically "in context."</p>
+    <p>This reframes long context from a capability you should max out into a resource you should curate. Practical implications you will use constantly:</p>
+    <ul>
+      <li><strong>Position matters.</strong> Put the most important instructions and the most relevant retrieved content near the start or the end of the prompt, not buried in the middle.</li>
+      <li><strong>Fewer, better chunks win.</strong> A reranker that surfaces the top 5 strong chunks usually beats dumping 50, both because of cost and because of lost-in-the-middle.</li>
+      <li><strong>A big window is not a substitute for retrieval.</strong> Retrieval and reranking (Module 3) exist precisely to keep the context short, ordered, and relevant.</li>
+    </ul>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Concept</span>
+    <p>A large context window is permission, not a strategy. The costs (quadratic attention, billed tokens, larger KV cache, lost-in-the-middle) all push the same direction: curate the smallest, most relevant, best-ordered context that answers the question. "Bigger window" and "better retrieval" are not interchangeable.</p>
+  </div>
+
+  <h2>5 &middot; Budgeting a context window in practice</h2>
+  <div class="prose">
+    <p>Treat the window as a fixed token account and allocate it on purpose. A workable mental template:</p>
+  </div>
+
+  <table>
+    <tr><th>Slice</th><th>Rough share</th><th>Notes</th></tr>
+    <tr><td>System prompt / instructions</td><td>small, fixed</td><td>High leverage per token; a stable prefix, so it is the prime candidate for prompt caching.</td></tr>
+    <tr><td>Reserved output space</td><td>set <code>max_tokens</code> for the real answer</td><td>The window must hold the generated tokens too; never let output and input together exceed the limit.</td></tr>
+    <tr><td>Retrieved context (RAG)</td><td>the largest, most compressible slice</td><td>Tune top-k and chunk size; rerank so each chunk earns its place. Cut here first under pressure.</td></tr>
+    <tr><td>Conversation history</td><td>grows over time</td><td>Summarize or truncate old turns rather than carrying everything verbatim.</td></tr>
+    <tr><td>Tool definitions / results</td><td>varies</td><td>In agent loops this accumulates fast; prune stale tool outputs.</td></tr>
+  </table>
+
+  <div class="prose">
+    <p>Two habits separate engineers here. First, <strong>count, do not estimate</strong>: measure each slice with a tokenizer (Day 2), because the model truncates silently and a dropped instruction is a real bug. Second, <strong>order for the U-shape</strong>: keep the must-use content at the edges. The forward link is direct: a stable, well-ordered prefix is exactly what <strong>prompt caching</strong> (Module 7) rewards, because a cached prefix is billed at a fraction of the price and re-served fast. Today you learned <em>why</em> the prefix is special (prefill plus the KV cache); Module 7 turns that into the single biggest cost lever in LLM serving.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: trace prefill, decode, and the cache</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>A request sends a 2,000-token prompt and the model generates a 200-token answer. Trace where the time and memory go, and why a follow-up question in the same chat is cheaper to start.</p>
+  </div>
+  <div class="diagram">  CALL 1
+    prefill:  process 2,000 input tokens in ONE parallel pass
+              → fills the KV cache with K,V for all 2,000 tokens (per layer)
+              → emits the first output token  (this is time-to-first-token)
+
+    decode:   200 serial steps; step i computes only the NEW token's Query,
+              attends it against the cached 2,000+i−1 prior K,V, appends K,V
+              → output latency ≈ 200 sequential passes, NOT 200×2,000 recomputed
+
+    end of call: KV cache now holds ~2,200 tokens of K,V
+
+  CALL 2 (same conversation, +50-token question)
+    the 2,200-token prefix is unchanged → if its KV/prefix is cached
+    (prompt caching, Module 7), prefill mostly reuses it and only the
+    new 50 tokens need processing → cheaper, faster first token</div>
+  <div class="prose">
+    <p>The lesson in one line: <strong>prefill cost tracks input length, decode cost tracks output length, and the KV cache is what makes decode append-cheap instead of recompute-expensive.</strong> Because the prefix is stable across a conversation, it is the natural unit to cache, which is why short, well-structured, front-loaded prompts are not just tidy, they are cheaper and faster on every subsequent turn.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Say each answer out loud in full sentences, as if to an interviewer. Then open the solution and compare. The gap is your lesson.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>A teammate proposes: "Our model has a 200K context window, so let's skip retrieval and just paste all 800 company documents into every prompt." Give the three-part rebuttal (cost, latency, quality).</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>On cost, every token in the window is billed on every call, so pasting 800 documents means paying for an enormous prompt repeatedly, when only a few passages are ever relevant to a given question. On latency, prefill must process all those tokens, pushing time-to-first-token way up, and the KV cache balloons, pressuring memory and throughput. On quality, it is not even more accurate: attention cost is roughly quadratic in sequence length, and "lost in the middle" means the model uses information buried in a huge context less reliably than the same fact in a short, focused one, so drowning the relevant passage among hundreds of irrelevant ones can lower the answer quality. The right move is retrieval plus reranking to supply the smallest, most relevant, best-ordered set of chunks; a big window is permission to be sloppy, not a strategy.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>Explain, to a backend engineer who knows caching but not ML, what the KV cache is and why generation would be unusably slow without it. Then state the cost of having it.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>When the model generates token by token, each new token needs to "look back" at every earlier token through the attention mechanism. For each earlier token, attention needs two derived tensors, a Key and a Value, and crucially those never change once the token is fixed, because a token can only attend to things before it. So instead of recomputing the Keys and Values for the entire growing prefix at every step (which would make step n re-do roughly n tokens of work through every layer, an explosive cost), the model computes each token's Key and Value once and caches them per layer. Generating the next token then only computes that one new token's Query and reads against the cache, so each step appends rather than recomputes. Without it, generation would be quadratic and effectively unusable on long outputs. The cost is memory: the cache grows with sequence length and must sit in fast GPU memory, and for long contexts and many concurrent users it, not the weights, becomes the limiting resource, which is why serving systems work hard to pack and shrink it.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>You are designing a RAG prompt that must fit a 16K-token window: a 1,000-token system prompt, conversation history, retrieved chunks, and room for a 1,500-token answer. History has grown to 9,000 tokens and you are overflowing. Lay out a budgeting plan and the order in which you cut.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Start by reserving the non-negotiable slices: about 1,500 tokens for the output and 1,000 for the system prompt, which leaves roughly 13,500 for history plus retrieved context. Then measure each slice with a tokenizer rather than guessing. The history at 9,000 tokens is both the largest and the most compressible, so cut there first: summarize older turns into a compact running summary and keep only the most recent turns verbatim, which can reclaim most of that 9,000. Next, size the retrieved context to fit what remains by lowering top-k and reranking so the few chunks that survive are the strongest, and place them near the end (or start) of the prompt to respect the lost-in-the-middle U-shape, with the system instructions at the very front. Keep the system prompt as a stable prefix so prompt caching can later make it cheap. The discipline throughout is count, do not estimate, because the model will silently drop tokens and a dropped instruction or the one relevant chunk is a real failure, not a cosmetic one.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's Foundations and LLMOps slices and common 2026 screens. Drill the one-line keys, then expand each into a 90-second answer with Claude using protocol prompt #2.</p>
+  <ul class="q-list">
+    <li>What is the context window, and what counts against it?
+      <div class="a">Key: the max tokens attended in one pass; system prompt, history, retrieved chunks, tool defs/results, and the generated tokens all share one fixed budget; it is not persistent memory.</div></li>
+    <li>Explain prefill vs decode and why latency depends on output length.
+      <div class="a">Key: prefill processes the whole prompt in one parallel pass (time-to-first-token, scales with input); decode generates serially one token per pass (scales with output tokens).</div></li>
+    <li>What is the KV cache and when does it matter most?
+      <div class="a">Key: caches per-layer Key/Value tensors for prior tokens so each step computes only the new Query and attends the cache; biggest win on long shared prefixes and agent loops; costs GPU memory.</div></li>
+    <li>Why is long context expensive, beyond just more billed tokens?
+      <div class="a">Key: self-attention is roughly quadratic in sequence length, prefill latency rises, and the KV cache grows and pressures memory; cost scales worse than linearly.</div></li>
+    <li>What is "lost in the middle" and how do you design around it?
+      <div class="a">Key: models use info in the middle of long contexts less reliably than at the start/end (U-shape); put key content at the edges and prefer fewer, reranked chunks.</div></li>
+    <li>Is a bigger context window a substitute for retrieval?
+      <div class="a">Key: no; cost, latency, and lost-in-the-middle all favor curating the smallest relevant context, which is exactly what retrieval and reranking provide.</div></li>
+    <li>How does this connect to prompt caching?
+      <div class="a">Key: a stable, front-loaded prefix (system prompt, fixed context) can be cached and billed at a fraction of cost and re-served fast, because prefill plus the KV cache make the prefix reusable.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (15&ndash;20 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Feel prefill versus decode directly. Using the <a href="https://docs.claude.com/en/api/messages">Messages API</a>, send a long prompt (a few thousand tokens) and ask for a one-line answer, then time it; next send a short prompt and ask for a long answer (high <code>max_tokens</code>), and time that. Notice that the long <em>output</em> dominates wall-clock time even though its input was tiny: that is decode being serial. Then read the <a href="https://docs.claude.com/en/docs/build-with-claude/prompt-caching">Anthropic prompt caching</a> docs and identify, in one of your real prompts, which part is the stable prefix you would mark as cacheable (usually the system prompt plus fixed context). You are previewing Module 7's biggest cost lever.</p>
+    <p class="muted" style="font-size:13.5px">Reflection (5 min): write the token budget for a feature you would build, allocating the window across system prompt, output, retrieved context, history, and tools, with counts, not adjectives. See <a href="../../tools.html">Tools &amp; Claude</a> for setup.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>This lesson is the why behind your retrieval engineering on MaiQ. Your hybrid retrieval and reranking exist precisely to keep the context window short, relevant, and well-ordered instead of dumping documents into a huge prompt, which is the cost, latency, and lost-in-the-middle problem made concrete. Your 11+ chunking experiments and the 37% cost reduction are this lesson quantified: fewer, better-sized chunks mean fewer input tokens through prefill on every call, which is exactly where the spend lives. And your FastAPI-plus-pgvector pipeline is the machinery that lets you supply the smallest sufficient context rather than relying on a bigger window. When an interviewer asks "why not just use a long context model and skip RAG," you can answer the mechanism, quadratic attention, KV-cache memory pressure, lost-in-the-middle, and then ground it in having measured that curating context beats enlarging it.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>The context window is one fixed token budget shared by prompt, history, retrieved content, tools, and output, and it is not persistent memory. Inference is prefill (parallel, scales with input, fills the KV cache) then decode (serial, scales with output), which is why latency tracks output length. The KV cache makes decode append-cheap by reusing prior tokens' Keys and Values, trading GPU memory for speed. Long context is expensive because attention is roughly quadratic and because "lost in the middle" means more context is not always better. So curate the smallest, most relevant, best-ordered context, and keep a stable front-loaded prefix that prompt caching can later reward.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d04">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: what LLMs are genuinely good at, where they fail, and a clear framework for what to delegate to a model versus not.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d03-sampling-decoding.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 3 &middot; Sampling &amp; decoding</div></a>
+    <a data-nav="next" class="next" href="d05-capabilities-and-limits.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 5 &middot; Capabilities &amp; limits</div></a>
+  </div>
+
+  <div class="foot">Module 1 &middot; LLM Foundations &middot; Day 4 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

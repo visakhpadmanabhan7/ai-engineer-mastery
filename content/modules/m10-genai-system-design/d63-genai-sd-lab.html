@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 63 · Lab — full GenAI design mock</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 10 &middot; GenAI System Design</span>
+    <span class="pill">Day 63</span>
+    <span class="pill">120 min</span>
+    <span class="diff" title="Difficulty: advanced"><i class="on"></i><i class="on"></i><i class="on"></i></span>
+  </div>
+
+  <h1>Lab &mdash; full GenAI design mock</h1>
+  <p class="lede">Four lessons of worked designs. Today you run one yourself, solo, against the clock, the way a real interview feels. You get a fresh prompt, a timed structure, the 11-point checklist, a scoring rubric to grade yourself honestly, and a model answer to compare against once you are done. This is the capstone rep of the whole module.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Run a 45-minute GenAI system-design interview solo, under time pressure, without prompting.</li>
+      <li>Drive the seven-beat framework and recite the 11-point checklist from memory.</li>
+      <li>Self-score your answer against a senior-level rubric and find your two weakest beats.</li>
+      <li>Use Claude as an interviewer/grader via daily-protocol prompt #3.</li>
+      <li>Recall the whole module: RAG assistant, agent platform, gateway, search/ranking.</li>
+    </ul>
+  </div>
+
+  <h2>How to run this lab (read first)</h2>
+  <div class="prose">
+    <p>Treat it like the real thing. Set a timer, work from a blank page (paper or a doc), say your reasoning out loud, and do not peek at the model answer until your timer ends. The point is not to produce a perfect design, it is to find the beats where you stall, so you can drill them before a real loop. Budget 120 minutes total: 5 to read in, 45 to design, 10 to self-score, 60 to review the model answer and re-attempt your two weakest beats.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">The framework you are executing (memorize this)</span>
+    <p><strong>Clarify</strong> (functional + non-functional: scale, tenancy, latency, risk, cost) &rarr; <strong>Estimate</strong> (vectors, storage, QPS, cost/request) &rarr; <strong>Architecture</strong> (offline + online lanes, big picture) &rarr; <strong>Data model</strong> &rarr; <strong>Deep-dive the bottleneck</strong> (for GenAI, almost always retrieval quality or the safety boundary) &rarr; <strong>Trade-offs</strong> (name what you give up) &rarr; <strong>Ops</strong> (eval, observability, cost, reliability). Open by stating this structure out loud, then execute it in order.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>The prompt (start your timer)</h2>
+  <div class="callout example">
+    <span class="label">Your interview question</span>
+    <p><strong>"Design an AI customer-support agent for a fintech. It answers customers from the company's help docs and account data, it must control cost at scale, and it must never give unauthorized financial advice or expose another customer's data. Walk me through your design."</strong></p>
+    <p class="muted" style="font-size:13.5px">This deliberately combines all four module designs: it is a RAG assistant (help docs) + an agent with tools (account data) + cost control (gateway concerns) + hard safety and isolation (fintech). The interviewer will push on cost and on the "never unauthorized advice / never leak data" constraints. Do not start drawing until you have clarified.</p>
+  </div>
+
+  <h2>The timed structure to follow (45 minutes)</h2>
+  <div class="prose">
+    <p>Spend your time roughly like this. If you blow the budget on one beat, move on, an interviewer cares that you cover the surface and go deep <em>somewhere</em>, not that you perfect one box.</p>
+  </div>
+  <div class="diagram">  ┌─ minutes ─┬─ beat ──────────────────────────────────────────────────────────────┐
+  │  0 – 5     │ CLARIFY. Ask: corpus size + freshness · multi-tenant? per-user data   │
+  │            │ access? · latency/streaming · what counts as "advice" vs "info" ·     │
+  │            │ regulatory bar · is "I cannot help with that" acceptable (yes).        │
+  │  5 – 9     │ ESTIMATE. docs→chunks→vectors, storage, QPS, $/query uncached →        │
+  │            │ conclude caching + routing are mandatory; pick datastore.              │
+  │  9 – 20    │ ARCHITECTURE. Draw offline ingestion + online query lanes. Show the    │
+  │            │ agent loop, the RAG retrieval tool, the account-data tool, the        │
+  │            │ gateway in front, and where guardrails sit. Big picture first.         │
+  │ 20 – 26    │ DATA MODEL. chunks (tenant_id, acl) · tool registry + grants ·         │
+  │            │ run/trace log. Note tenant_id is the isolation key everywhere.         │
+  │ 26 – 38    │ DEEP-DIVE (pick the bottleneck = SAFETY here). Tenant/ACL filter in   │
+  │            │ the query · account-tool scope check IN CODE · the "no unauthorized   │
+  │            │ advice" guardrail (input intent classifier + output check + refusal)  │
+  │            │ · grounded citations. THIS is where fintech interviews are won.       │
+  │ 38 – 42    │ TRADE-OFFS. Name 3-4: refusal strictness vs helpfulness, semantic     │
+  │            │ cache risk on personalized answers, model routing vs quality, etc.    │
+  │ 42 – 45    │ OPS. Eval (faithfulness + a "did it give advice / leak" safety eval), │
+  │            │ tracing/audit, per-tenant cost budgets, provider fallback. Recite     │
+  │            │ the 11-point checklist to close.                                       │
+  └────────────┴───────────────────────────────────────────────────────────────────────┘</div>
+
+  <div class="callout key">
+    <span class="label">The 11-point AI-design checklist (recite to close any answer)</span>
+    <p>1. Ingestion &middot; 2. Retrieval (hybrid) &middot; 3. Reranking &middot; 4. Tenant/ACL isolation in the data layer &middot; 5. Grounded generation + citations &middot; 6. Guardrails (faithfulness / safety / refusal) &middot; 7. Eval (offline golden set + online) &middot; 8. Observability (span tree, tokens, cost) &middot; 9. Cost controls (caching, routing, top-k) &middot; 10. Latency budget (streaming) &middot; 11. Failure handling (provider fallback, empty-retrieval path). For an agent-flavored prompt like this one, also hit: tool registry, scope-in-code, idempotency/approval on writes, per-tenant budgets.</p>
+  </div>
+
+  <h2>The scoring rubric (10 minutes, be honest)</h2>
+  <div class="prose">
+    <p>When your timer ends, stop designing and grade what you actually said, not what you meant to say. Score each dimension, then total out of 100. The bands below tell you where you stand for a senior loop.</p>
+  </div>
+  <table>
+    <tr><th>Dimension</th><th>Pts</th><th>What full marks looks like</th></tr>
+    <tr><td><b>Clarified before designing</b></td><td>0&ndash;10</td><td>Asked about tenancy, per-user data access, latency, and what "advice" means, before drawing anything.</td></tr>
+    <tr><td><b>Framework + structure</b></td><td>0&ndash;15</td><td>Stated the seven beats up front and executed them in order; did not jump straight to a box diagram.</td></tr>
+    <tr><td><b>Estimation</b></td><td>0&ndash;10</td><td>Real back-of-envelope: vectors, storage, $/query, and concluded what it forces (caching, datastore).</td></tr>
+    <tr><td><b>Architecture clarity</b></td><td>0&ndash;15</td><td>Clear offline + online lanes; agent loop, RAG tool, account tool, gateway, guardrails all placed.</td></tr>
+    <tr><td><b>Deep-dive on the bottleneck</b></td><td>0&ndash;20</td><td>Went deep on SAFETY: isolation + scope in code, the no-advice guardrail, grounding. Did not just deep-dive the easy part.</td></tr>
+    <tr><td><b>Named trade-offs</b></td><td>0&ndash;10</td><td>Stated 3-4 real trade-offs with what each gives up, unprompted.</td></tr>
+    <tr><td><b>Ops (eval / observability / cost)</b></td><td>0&ndash;10</td><td>Faithfulness + safety eval, tracing/audit, per-tenant budgets, fallback.</td></tr>
+    <tr><td><b>Checklist + communication</b></td><td>0&ndash;10</td><td>Closed with the 11-point checklist; thought out loud, stayed structured under push-back.</td></tr>
+  </table>
+  <div class="prose">
+    <p><strong>Bands:</strong> 85+ = senior-strong, you would clear this round. 70&ndash;84 = solid, tighten your two lowest dimensions. 55&ndash;69 = the bones are there but you are missing depth or structure, re-run after reviewing the model answer. Under 55 = re-study d59&ndash;d62 and run the lab again. Whatever your total, write down the <strong>two lowest-scoring beats</strong>, those are your homework.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Grade yourself with Claude (optional but recommended)</h2>
+  <div class="callout example">
+    <span class="label">Use daily-protocol prompt #3</span>
+    <p>Paste your written design into Claude with this framing, then act on the score: <em>"You are a senior staff engineer interviewing me for an AI Engineer role. Here is the design question and my full answer. Score it out of 100 using these eight dimensions [paste the rubric], quote the exact line where I lost points on each, name the single biggest gap, and ask me the two hardest follow-up questions a real interviewer would ask about cost and about the no-unauthorized-advice guarantee."</em> Then answer those two follow-ups out loud. The follow-ups are where senior interviews are actually decided.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Model answer (do not open until your timer ends)</h2>
+  <details class="solution"><summary>Show the model answer</summary>
+  <div class="body prose">
+    <p><strong>Clarify.</strong> "Before I design: how big is the help-doc corpus and how often does it change? Is this multi-tenant, or one company's customers, and within it do customers only see their own account data (yes, assume strict per-customer isolation)? What is the latency target and is streaming expected? Crucially, what is the line between <em>information</em> ('your statement is due on the 5th') and <em>advice</em> ('you should move your money into X'), because the system must give the first and refuse the second? Is a clear 'I cannot advise on that, here is how to reach a licensed advisor' acceptable (yes, strongly preferred to a risky answer)?" I will assume: ~50k help docs that change weekly, one fintech's customer base with strict per-customer data isolation, p95 under 3s with streaming, regulated context where unauthorized financial advice is a hard no, and refusal-with-handoff is acceptable.</p>
+
+    <p><strong>Estimate.</strong> 50k docs &times; ~8 chunks &asymp; 400k child vectors; at ~6 KB (float32) that is ~2.4 GB, ~0.6 GB int8, comfortably one Postgres + pgvector instance (well under the ~10M ceiling). Traffic say ~30 QPS peak; each answer ~4k input + ~400 output tokens; at ~$5/1M in and ~$15/1M out that is ~$0.026/query, so uncached this runs into real money at volume, caching and model routing are mandatory, not optional. Conclusion stated out loud: pgvector is fine for the corpus, and cost control gets a first-class slot.</p>
+
+    <p><strong>Architecture.</strong> Two lanes. <em>Offline:</em> parse help docs &rarr; parent-child chunk &rarr; embed &rarr; index into pgvector (dense) + full-text (BM25), incremental on doc change. <em>Online:</em> the request enters through an <strong>LLM gateway</strong> (auth, per-tenant rate limit, prompt caching, cost metering, provider fallback). An <strong>input guardrail</strong> classifies intent first: if the query is soliciting financial <em>advice</em>, short-circuit to a scripted refusal-with-handoff and never call the model freely. Otherwise an <strong>agent</strong> runs with exactly two tools: a <code>doc_search</code> tool (hybrid retrieval + rerank over help docs) and an <code>account_lookup</code> tool (this customer's data only). Generation is grounded with citations to the help docs. An <strong>output guardrail</strong> checks the answer for faithfulness and for any advice/leak before it streams out. Everything emits a span tree to observability.</p>
+
+    <p><strong>Data model.</strong> <code>chunk_parent</code> / <code>chunk_child</code> with <code>tenant_id</code> and (here) a doc-visibility field; a <code>tool</code> registry with scopes and risk; a <code>skill_grant</code>-style record so the <code>account_lookup</code> tool is scoped to the authenticated customer; and an append-only <code>run</code>/trace log with tokens, cost, tool calls, and an immutable audit trail (mandatory in fintech). <code>customer_id</code> is the isolation key on every row and every tool call.</p>
+
+    <p><strong>Deep-dive: SAFETY, because that is the bottleneck.</strong> Three guarantees, all enforced in code, never by the prompt: (1) <em>Data isolation:</em> the <code>account_lookup</code> tool takes the <code>customer_id</code> from the authenticated session, not from anything the model produces, and every query carries <code>WHERE customer_id = $session</code>, so the agent physically cannot read another customer's data even if a retrieved doc tries to redirect it via prompt injection. The help-doc retrieval applies the tenant/visibility filter in the query too. (2) <em>No unauthorized advice:</em> a layered guardrail, an input intent classifier catches advice-seeking queries up front and routes them to a refusal-with-handoff; the system prompt and grounding constrain the model to answer only factual account/help info from sources; and an output check (a fast classifier or LLM-as-judge against an "is this financial advice?" rubric) blocks or rewrites any response that crosses the line before it reaches the user. (3) <em>Grounding:</em> answers cite the help-doc source <code>[n]</code> and refuse when retrieval is weak, a confident unsupported answer is exactly the failure a regulated product cannot ship. Write actions (if any, e.g. "freeze my card") require an idempotency key and a human/strong-auth approval gate.</p>
+
+    <p><strong>Trade-offs.</strong> (a) Strict refusal threshold &rarr; fewer dangerous answers but more "I cannot help with that," acceptable here, safety wins. (b) Semantic caching is <em>off</em> for account-specific answers (a near-duplicate query from a different customer must never share a cached answer), exact prompt caching of the static system/instruction prefix stays on as the safe cost lever. (c) Model routing (cheap model for simple FAQ, strong model for nuanced cases) cuts cost but risks mis-routing, so it is gated on intent confidence. (d) Cross-encoder rerank adds latency but lifts grounding precision, worth it.</p>
+
+    <p><strong>Ops.</strong> Eval: faithfulness and answer-relevancy on a golden set, <em>plus</em> a dedicated safety eval, a labeled set of advice-seeking and cross-customer-probe queries that must always refuse, gated in CI so a regression cannot ship. Observability: span tree per request (retrieval, tools, LLM) with tokens/cost/latency, an immutable audit log, and a rolling live faithfulness + safety sample. Cost: prompt caching, intent-gated model routing, tight top-k, per-tenant budgets at the gateway. Reliability: provider fallback chain with a circuit breaker, and a graceful empty-retrieval / refusal path. Close with the 11-point checklist.</p>
+
+    <p><strong>What separates a senior answer here:</strong> spending the deep-dive on the safety boundary (not on chunking), enforcing both isolation and the no-advice rule <em>in code</em> with the model treated as untrusted, turning "never give advice" into a concrete input-classifier + output-check + refusal-handoff mechanism plus a CI safety eval, and naming the cost levers with their risks. If you covered those, you cleared the round.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Module 10 review &mdash; the whole module in one screen</h2>
+  <p class="muted">Answer each in one or two sentences from memory. If any is shaky, reopen that lesson.</p>
+  <ul class="q-list">
+    <li>The seven-beat GenAI design framework, in order.
+      <div class="a">Key: clarify &rarr; estimate &rarr; architecture &rarr; data model &rarr; deep-dive the bottleneck &rarr; trade-offs &rarr; ops (eval/observability/cost/reliability).</div></li>
+    <li>The 11-point AI-design checklist (name as many as you can).
+      <div class="a">Key: ingestion, retrieval, rerank, tenant isolation, grounded gen + citations, guardrails, eval, observability, cost, latency, failure handling.</div></li>
+    <li>RAG assistant (d59): where do most answers go wrong, and what is the deep-dive?
+      <div class="a">Key: ~70-75% is retrieval; deep-dive retrieval, chunking + hybrid + rerank + tenant filter in the query; ground with citations + faithfulness guardrail.</div></li>
+    <li>Agent platform (d60): the one non-negotiable rule.
+      <div class="a">Key: never trust the model to enforce isolation/scope/permissions, code at the tool boundary does it; grant in data, sandboxed per-invocation creds, signed manifests + review for risky skills.</div></li>
+    <li>LLM gateway (d61): order the request path and name the cost lever.
+      <div class="a">Key: auth &rarr; rate limit (token bucket) &rarr; cache &rarr; route &rarr; call + fallback (per-provider breaker) &rarr; stream &rarr; meter; prompt caching is the safe headline cost lever.</div></li>
+    <li>Search/ranking (d62): the funnel and where filters live.
+      <div class="a">Key: candidate generation (hybrid, recall) &rarr; learned rank &rarr; cross-encoder rerank + business rules; hard filters/tenant isolation in the retrieval query, never in the score; NDCG offline, CTR online.</div></li>
+    <li>Capacity numbers you carry into any GenAI design.
+      <div class="a">Key: 1536-dim float32 &asymp; 6 KB (~1.5 KB int8), pgvector to ~10M vectors, GPT-4-class ~ $5/1M in and ~$15/1M out, aim ~90% cache hit on hot reads.</div></li>
+    <li>How do you control LLM cost without losing quality, across all four designs?
+      <div class="a">Key: prompt caching (biggest), semantic cache (with care), model routing, lower top-k, embed once, per-tenant budgets, all validated against a faithfulness/quality floor.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (the lab itself)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>The lab <em>is</em> the build: run the timed mock above on paper, score yourself with the rubric, then paste your answer to <a href="https://docs.claude.com/en/docs/build-with-claude/overview">Claude</a> with daily-protocol prompt #3 for a second grade and the two hardest follow-ups. Then do one more rep with a fresh prompt to lock it in, design <em>"an AI coding assistant that searches a company's private codebase and must never leak code across customers"</em> using the same 45-minute structure and the 11-point checklist. Two timed reps with honest self-scoring is worth more than re-reading the lessons.</p>
+    <p class="muted" style="font-size:13.5px">Keep your two scored answers; on interview week, re-read only your lowest-scoring beats and re-run one mock cold.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>You have shipped pieces of every design in this module, so in a real mock you are not improvising from theory: the RAG assistant is your MaiQ retrieval work (hybrid BM25 + dense, pgvector, the LLM-as-judge evaluation that drove a 37 percent cost cut at a 2 percent quality drop); the agent platform is the Skill Store you built, where users author and run their own agents in chat; the cost and reliability levers are exactly what you tuned. When an interviewer pushes on "how would you control cost" or "how do you guarantee isolation," answer the framework, then ground it: "I have done this in production, the discipline that makes it safe is enforcing isolation in code and proving quality with evaluation before cutting cost." That pairing, structured framework plus shipped experience, is what makes a senior system-design round land.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>A GenAI design mock is a timed execution of one framework: clarify, estimate, architecture, data model, deep-dive the bottleneck, trade-offs, ops, closed with the 11-point checklist. For a fintech support agent the bottleneck is safety, so the deep-dive belongs to isolation-in-code and the no-unauthorized-advice guardrail, not to chunking. Score yourself honestly, write down your two weakest beats, and re-run cold, two timed reps beat endless re-reading. You now have a model answer, a rubric, and a self-grading loop you can repeat before any interview. Next module: turning all of this into your own project stories and interview mastery.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d63">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: Module 11 begins, turning your shipped work into the five stories that win interviews.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d62-design-semantic-search.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 62 &middot; Design a semantic search / ranking system</div></a>
+    <a data-nav="next" class="next" href="../m11-interview-mastery/d64-your-project-stories.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 64 &middot; Your project stories</div></a>
+  </div>
+
+  <div class="foot">Module 10 &middot; GenAI System Design &middot; Day 63 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

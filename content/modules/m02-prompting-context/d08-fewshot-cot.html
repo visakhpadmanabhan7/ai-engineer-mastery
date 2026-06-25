@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 8 · Few-shot &amp; chain-of-thought</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 2 &middot; Prompting &amp; Context</span>
+    <span class="pill">Day 8</span>
+    <span class="pill">55 min</span>
+    <span class="diff" title="Difficulty: intermediate"><i class="on"></i><i class="on"></i><i></i></span>
+  </div>
+
+  <h1>Few-shot &amp; chain-of-thought</h1>
+  <p class="lede">Two of the highest-leverage prompting techniques both work by showing the model something instead of just telling it: examples to pin the shape of an answer, and visible reasoning to improve the substance of one. Both cost tokens, and knowing when not to reach for them is as important as knowing how.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Decide between zero-shot and few-shot for a given task, and justify it.</li>
+      <li>Choose few-shot examples that pin format and edge cases without biasing the model.</li>
+      <li>Explain mechanistically why chain-of-thought helps multi-step reasoning.</li>
+      <li>Price chain-of-thought honestly: more tokens, more latency, and when it is wasted or harmful.</li>
+      <li>Contrast naive "think step by step" with structured reasoning and self-consistency.</li>
+    </ul>
+  </div>
+
+  <h2>Zero-shot vs few-shot: telling vs showing</h2>
+  <div class="prose">
+    <p><strong>Zero-shot</strong> means you describe the task and give no examples. Modern instruction-tuned models are strong zero-shot learners, so this is the right default for simple, unambiguous tasks: "classify the sentiment of this review as positive, negative, or neutral" needs no demonstration.</p>
+    <p><strong>Few-shot</strong> means you include a handful of input&rarr;output examples before the real input. The model infers the pattern from the demonstrations and continues it. This is the seed Day 1 planted: in-context learning is the model recognizing and extending a pattern in its context window, no weights change. Few-shot earns its tokens when:</p>
+    <ul>
+      <li><strong>Format is hard to describe but easy to show.</strong> A specific JSON shape, a custom label taxonomy, a particular bullet style. Two examples often beat a paragraph of format rules.</li>
+      <li><strong>Edge cases need pinning.</strong> Show one example of the tricky case (an ambiguous input mapped to "unknown", a negation handled correctly) and the model generalizes the behavior.</li>
+      <li><strong>The task is subjective or stylistic.</strong> "Match this tone" is far clearer as three samples than as adjectives.</li>
+    </ul>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Concept</span>
+    <p>Few-shot examples are the most reliable way to control the <em>shape and edge-case behavior</em> of an output without writing brittle prose rules. You are teaching by demonstration, exploiting in-context learning. Reach for it when "show, do not tell" is cheaper or clearer than describing the rule, and skip it when a one-line zero-shot instruction already lands.</p>
+  </div>
+
+  <h2>How to choose examples (this is where it goes wrong)</h2>
+  <div class="prose">
+    <p>Bad examples do not just fail to help, they actively mislead. Four rules:</p>
+    <ul>
+      <li><strong>Cover the distribution, including the hard cases.</strong> If you only show easy positives, the model learns "everything is positive." Include an edge case and a negative.</li>
+      <li><strong>Balance the labels.</strong> If three of your three classification examples are "high priority", you have biased the model toward "high". Spread examples across the output classes.</li>
+      <li><strong>Make examples consistent with each other and with your rules.</strong> One example that violates the format you asked for in the system prompt creates a conflict (Day 7's anti-pattern) and the model may follow the example over the instruction.</li>
+      <li><strong>Mind ordering and recency.</strong> Models can be swayed by the last example seen (a recency effect). For classification, shuffle label order across examples so position does not leak signal.</li>
+    </ul>
+    <p>A practical default is two to five examples. More rarely helps proportionally and burns tokens (and pushes the real input further from the instruction). If you find yourself needing fifteen examples to get reliable behavior, that is a signal the task may want fine-tuning instead (Module 6), not a longer prompt.</p>
+  </div>
+
+  <h2>Chain-of-thought: why making reasoning visible helps</h2>
+  <div class="prose">
+    <p>Recall the core mechanism: the model produces one token at a time, and each token is conditioned on everything already in the context, including tokens it just generated. A hard reasoning problem (multi-step arithmetic, a logic puzzle, a multi-hop question) cannot be solved in the single forward pass that produces the first answer token. The intermediate work has nowhere to live.</p>
+    <p><strong>Chain-of-thought (CoT)</strong> fixes this by letting the model write the intermediate steps <em>into the context</em> before committing to a final answer. Each reasoning step becomes tokens the next step can attend to. In effect, generated text serves as a scratchpad: the model offloads working memory into the sequence, and later tokens build on earlier ones. That is why "show your reasoning, then give the answer" reliably lifts accuracy on multi-step problems, and why demanding only the final number on a hard problem often fails.</p>
+  </div>
+
+  <div class="diagram">  WITHOUT CoT  (answer must appear in one shot, no room to compute)
+    Q: A train leaves at 14:05, the trip is 2h50m, then a 35m delay. Arrival?
+    A: 17:30                      ← plausible-looking, frequently wrong
+
+  WITH CoT  (each step is tokens the next step can attend to)
+    Q: ... Arrival?
+    Let me work through it:
+      14:05 + 2h50m = 16:55
+      16:55 + 35m   = 17:30
+    Final answer: 17:30          ← the steps make the arithmetic checkable & correct
+                                    ↑ this line is what downstream code parses</div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"Chain-of-thought works because the model has no hidden scratchpad: its only working memory is the token sequence. By generating intermediate steps, it writes that scratchpad into the context, so each step can condition on the previous one. It trades tokens and latency for the ability to decompose a problem the single forward pass could not solve." Say that and you have explained the mechanism, not just the trick.</p>
+  </div>
+
+  <h2>The cost, and when CoT is the wrong tool</h2>
+  <div class="prose">
+    <p>CoT is not free, and treating it as a default is a common junior mistake.</p>
+    <ul>
+      <li><strong>Tokens and latency.</strong> The reasoning is output, and output is generated serially (Day 1), so a long chain of thought directly increases both cost and time-to-answer. On a high-throughput classification endpoint, paying for paragraphs of reasoning per request is real money.</li>
+      <li><strong>Unnecessary on easy tasks.</strong> If the answer needs no multi-step reasoning (sentiment, simple extraction, lookup-style questions), CoT adds cost and latency for no accuracy gain, and can even introduce errors by overthinking a trivial call.</li>
+      <li><strong>Harmful when it must not leak.</strong> If you only need the final structured answer, free-form reasoning in the output pollutes what your parser sees. Either confine reasoning to a field the parser ignores, or use a model/mode that separates reasoning from the final answer.</li>
+      <li><strong>Reasoning is not a guarantee of truth.</strong> A confident, fluent chain can still reach a wrong answer (it can rationalize). CoT improves the odds on reasoning tasks, it does not make the model correct, which is exactly why you still evaluate (Module 5).</li>
+    </ul>
+    <p>Note the modern wrinkle: today's reasoning models do an internal chain-of-thought automatically. When you use one, you often should <em>not</em> hand-write "think step by step", the model already reasons, and your job shifts to giving it a clear task and clean context. CoT-by-prompt matters most on standard (non-reasoning) models and when you want the reasoning visible and steerable.</p>
+  </div>
+
+  <h2>Structured reasoning and self-consistency</h2>
+  <div class="prose">
+    <p>"Let me think step by step" is the blunt version. Two refinements give more control:</p>
+    <ul>
+      <li><strong>Structured reasoning.</strong> Instead of free-form rambling, name the steps you want: "First list the constraints. Then check each option against them. Then state the answer." This keeps the chain focused, shorter, and easier to evaluate. It also makes the reasoning a predictable place your prompt can shape.</li>
+      <li><strong>Self-consistency.</strong> For a high-stakes reasoning question, sample several independent chains (with temperature &gt; 0) and take the majority answer. Different reasoning paths that converge on the same answer are more trustworthy than a single chain. The cost is running the prompt N times, so reserve it for cases where a wrong answer is expensive.</li>
+    </ul>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: a classifier that needed both</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>Task: route incoming developer questions to one of <code>{bug, feature_request, how_to, billing}</code>. Zero-shot gets the easy ones but keeps mislabeling subtle "how do I make X do Y" questions as bugs. We add two things.</p>
+  </div>
+  <div class="diagram">  SYSTEM:
+    Classify the developer message into exactly one of:
+      bug | feature_request | how_to | billing.
+    Reason briefly in a "reasoning" field, then give the label in a "label" field.
+    Examples:
+      IN:  "The SDK throws a 500 on upload since v2.3."
+      OUT: {"reasoning":"existing behavior broke after an update → defect","label":"bug"}
+      IN:  "How do I paginate the search endpoint?"
+      OUT: {"reasoning":"asking how to use existing, working feature","label":"how_to"}
+      IN:  "Can you add a webhook for failed jobs?"
+      OUT: {"reasoning":"requesting new capability that does not exist","label":"feature_request"}
+
+  USER:
+    "How do I make the retry logic back off exponentially? Right now it hammers the API."</div>
+  <div class="prose">
+    <p>Two techniques are doing two different jobs here. The <strong>few-shot examples</strong> pin the boundary the model kept getting wrong: the "how_to" demo teaches that a "how do I make X do Y" phrasing about existing functionality is usage, not a defect, even when the user is frustrated. The short <strong>chain-of-thought in the "reasoning" field</strong> forces the model to articulate <em>why</em> before committing, which catches the cases that look like bugs on the surface. The new input gets <code>{"reasoning":"asking how to configure existing retry behavior","label":"how_to"}</code> rather than the previous mislabel. Few-shot fixed the <em>shape and boundary</em>; CoT fixed the <em>decision</em>. On Day 9 we will make that JSON a hard guarantee instead of a hope.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Answer out loud in full sentences, as if to an interviewer. Then open the solution and compare. The gap is your lesson.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>You add five few-shot examples to a priority classifier and accuracy gets <em>worse</em> on real traffic. Give two distinct reasons this can happen and how you would diagnose each.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>(1) <em>Label imbalance in the examples.</em> If four of five examples are "high", you taught the model a prior toward "high", so it over-predicts it. Diagnose by checking the label distribution of your examples versus the true distribution, and rebalance. (2) <em>Examples not representative of the real distribution.</em> If your examples are all clean, short messages but production traffic is long and messy, the demonstrations do not match what the model actually sees, so they mislead more than help. Diagnose by drawing your examples from real production traces rather than inventing tidy ones. A third subtle cause: an example whose format contradicts the system-prompt format, creating a conflict the model resolves toward the example. The general lesson: few-shot examples are training signal in miniature, so a biased or unrepresentative set biases the output.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>Your team adds "think step by step" to <em>every</em> prompt in a high-volume extraction service to "make it smarter". Latency and cost jump 40% and quality is flat. What went wrong, and what is the principled rule?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>CoT was applied to a task that does not need multi-step reasoning. Field extraction is mostly pattern-matching, not a chain of inferences, so the reasoning tokens add latency and cost (output is serial) without unlocking any accuracy the single pass lacked. Worse, free-form reasoning may now leak into the output and complicate parsing. The principled rule: use CoT only where the task genuinely requires several dependent steps to reach the answer (math, multi-hop logic, planning). For lookup, extraction, and simple classification, prefer zero-shot or few-shot and keep the output clean. If you do want a sanity check on a hard subset, confine reasoning to a field your parser ignores rather than globally enabling it.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>A finance teammate needs an LLM to compute a multi-step eligibility decision and cannot tolerate a silent wrong answer. They ask whether to use chain-of-thought. What do you recommend, including a technique beyond plain CoT, and what is the catch?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Yes to CoT, because the decision is genuinely multi-step, but go further: use <em>self-consistency</em>. Sample several independent reasoning chains at a non-zero temperature and take the majority decision; chains that independently converge are more trustworthy than one. The catch is cost and latency, you are running the prompt N times, so reserve this for high-stakes calls, not the whole pipeline. Two senior caveats: (a) a fluent chain can still be wrong, so for anything truly load-bearing, validate the decision against deterministic rules or a second check rather than trusting reasoning alone (Module 5); (b) if the logic is fully specified and deterministic, the right answer may be to compute it in code and use the LLM only to read the inputs, not to do the arithmetic.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's Prompting &amp; Context slice and common 2026 screens. Drill the one-line keys, then expand each into a 90-second answer.</p>
+  <ul class="q-list">
+    <li>Few-shot vs zero-shot vs chain-of-thought &mdash; when do you reach for each?
+      <div class="a">Key: zero-shot for simple/clear tasks; few-shot to pin format and edge cases; CoT for multi-step reasoning (costs tokens and latency).</div></li>
+    <li>Mechanistically, why does chain-of-thought improve multi-step reasoning?
+      <div class="a">Key: the token sequence is the model's only working memory; writing intermediate steps gives later tokens a scratchpad to condition on.</div></li>
+    <li>How do you choose few-shot examples, and how can they backfire?
+      <div class="a">Key: cover the distribution incl. edge cases, balance labels, stay consistent with the rules; imbalance or unrepresentative examples bias the output.</div></li>
+    <li>When is chain-of-thought unnecessary or actively harmful?
+      <div class="a">Key: easy/lookup tasks (wasted cost/latency, overthinking), and when reasoning leaks into output a parser must read; confine or skip it.</div></li>
+    <li>What is self-consistency and when is it worth the cost?
+      <div class="a">Key: sample multiple chains, take the majority answer; reserve for high-stakes reasoning where a wrong answer is expensive.</div></li>
+    <li>Does chain-of-thought make the answer correct? Why or why not?
+      <div class="a">Key: no; it improves odds on reasoning tasks but a fluent chain can rationalize a wrong answer, so you still evaluate and validate.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (15&ndash;20 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Pick a small reasoning task with a checkable answer (a word problem, a date/time calculation, a multi-hop "who is older" question). In the Anthropic <a href="https://docs.claude.com/en/docs/build-with-claude/prompt-engineering/chain-of-thought">chain-of-thought guide</a> or Workbench, run it three ways on the same 5 inputs: (1) "answer only", (2) "reason step by step, then answer", (3) sample the CoT version three times and majority-vote. Score accuracy for each. You will feel exactly where CoT earns its tokens and where it does not. Then add two few-shot examples to a small classification task and watch the format lock in.</p>
+    <p class="muted" style="font-size:13.5px">No API key yet? Do it in the Claude web app across separate chats. See <a href="../../tools.html">Tools &amp; Claude</a> to set up access.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>Your evaluation instinct on MaiQ is exactly the discipline this lesson teaches: you do not assume a prompting technique helps, you measure it. The LLM-as-judge framework you built is the right place to A/B "few-shot vs zero-shot" or "CoT vs none" on real inputs and keep only what moves quality, the same way your 11+ retrieval and chunking experiments kept only the changes that paid off. When an interviewer asks "how do you decide whether to add chain-of-thought," answer from that habit: "I treat it as a hypothesis, run it against a labeled set with my judge, and adopt it only where it improves accuracy enough to justify the extra tokens and latency."</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>Zero-shot is the default for simple tasks; few-shot pins format and edge cases by demonstration, so cover the distribution and balance the labels. Chain-of-thought helps multi-step reasoning because the token sequence is the model's only scratchpad, but it costs tokens and latency and is wasted or harmful on easy tasks. Structured reasoning keeps chains focused; self-consistency buys reliability on high-stakes calls at N&times; the cost. Reasoning is not a truth guarantee, so you still evaluate, which is exactly the muscle to build next when we make outputs guaranteed-parseable.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d08">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: stop hoping for valid JSON &mdash; the enforcement ladder, schemas, and Pydantic validation.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d07-anatomy-of-a-prompt.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 7 &middot; Anatomy of a great prompt</div></a>
+    <a data-nav="next" class="next" href="d09-structured-output.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 9 &middot; Structured output &amp; schemas</div></a>
+  </div>
+
+  <div class="foot">Module 2 &middot; Prompting &amp; Context Engineering &middot; Day 8 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 3 · Sampling &amp; decoding</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 1 &middot; LLM Foundations</span>
+    <span class="pill">Day 3</span>
+    <span class="pill">55 min</span>
+    <span class="diff" title="Difficulty: intermediate"><i class="on"></i><i class="on"></i><i></i></span>
+  </div>
+
+  <h1>Sampling &amp; decoding</h1>
+  <p class="lede">The model hands you a distribution over the next token. <em>How you pick from it</em> is decoding, and it is the single most misunderstood knob in production. Today you learn exactly what temperature, top-p, and top-k do, why temperature 0 is still not perfectly reproducible, and how to choose settings on purpose.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Trace the path from raw logits through softmax to a sampled token.</li>
+      <li>Distinguish greedy decoding from sampling, and say when each is right.</li>
+      <li>Explain precisely what temperature, top-p (nucleus), and top-k each change about the distribution.</li>
+      <li>Explain why even temperature 0 is not guaranteed byte-identical across calls.</li>
+      <li>Set <code>max_tokens</code> and stop sequences deliberately, and pick low vs high temperature per task.</li>
+    </ul>
+  </div>
+
+  <h2>From logits to a chosen token</h2>
+  <div class="prose">
+    <p>Recall the end of Day 1: at each step the model produces one <strong>logit</strong> (a raw, unbounded score) for every token in the vocabulary. Logits are not probabilities; they can be any real number, positive or negative. To turn them into a usable distribution, the model applies <strong>softmax</strong>, which exponentiates each logit and normalizes so the values are all positive and sum to 1. Now you have a genuine probability distribution over the next token. Decoding is the rule for converting that distribution into a single concrete choice, and then the loop repeats.</p>
+    <p>Everything you tune at inference time, temperature, top-p, top-k, lives in this one step. None of it touches the weights. You are reshaping or truncating the distribution before drawing from it. That is the entire surface area, and understanding it cleanly separates engineers who can debug "why is the output weird" from those who guess.</p>
+  </div>
+
+  <div class="diagram">  logits  →  [ scale by 1/temperature ]  →  softmax  →  probability distribution
+                                                              │
+                                              [ optional truncation: top-k, top-p ]
+                                                              │
+                                              [ draw a token ]  (or argmax if greedy)
+                                                              │
+                                                     append, repeat the loop</div>
+
+  <h2>1 &middot; Greedy vs sampling</h2>
+  <div class="prose">
+    <p>Two fundamentally different decoding strategies sit at the base of everything:</p>
+    <ul>
+      <li><strong>Greedy decoding</strong> always takes the single highest-probability token (the <code>argmax</code>). It is deterministic given the same distribution, and it tends to be safe but bland, and prone to loops and repetition on open-ended text because it never explores. This is effectively what temperature 0 gives you.</li>
+      <li><strong>Sampling</strong> draws a token <em>randomly in proportion to the probabilities</em>. A token with probability 0.6 is chosen about 60% of the time, one with 0.05 about 5% of the time. This injects controlled variety, which is why two calls can differ, and it is what makes generated text feel natural rather than mechanical.</li>
+    </ul>
+    <p>The knobs below all modify the distribution that sampling draws from. There is also <strong>beam search</strong>, which keeps several candidate sequences alive and expands the most probable overall; it shines for short, single-answer tasks like translation but is rarely used for open-ended chat, so know the name and move on.</p>
+  </div>
+
+  <h2>2 &middot; Temperature: sharpen or flatten the distribution</h2>
+  <div class="prose">
+    <p><strong>Temperature</strong> divides the logits before softmax. That one operation reshapes how peaked the distribution is:</p>
+    <ul>
+      <li><strong>Low temperature</strong> (toward 0) makes the distribution <em>sharper</em>: the top token's probability rises toward 1 and the tail collapses toward 0. At exactly 0 you have effectively greedy decoding, the model becomes (near) deterministic and conservative.</li>
+      <li><strong>Temperature 1</strong> leaves the distribution as the model produced it.</li>
+      <li><strong>High temperature</strong> (above 1) <em>flattens</em> the distribution, lifting unlikely tokens and adding diversity, surprise, and eventually incoherence as it climbs.</li>
+    </ul>
+    <p>Mental model: temperature is a <em>confidence dial</em>. Turn it down and the model commits to its favorite continuation; turn it up and it gambles on the long tail. It does not make the model "smarter" or "more creative" in any deep sense; it only changes how much probability mass the sampler is allowed to wander into.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"Temperature scales the logits before softmax. Below 1 it sharpens the distribution toward the top token and approaches greedy at 0; above 1 it flattens it and admits more of the tail. It controls how peaked the sampling distribution is, nothing more, and it does not alter the model's knowledge." That is the correct, no-hand-waving statement.</p>
+  </div>
+
+  <h2>3 &middot; Top-k and top-p: truncate before you sample</h2>
+  <div class="prose">
+    <p>Temperature reshapes the whole distribution but never removes the garbage tail entirely; a tiny probability times high temperature can still surface a nonsense token. <strong>Truncation</strong> methods fix that by cutting off the tail before sampling.</p>
+    <ul>
+      <li><strong>Top-k</strong> keeps only the <em>k</em> highest-probability tokens, renormalizes their probabilities to sum to 1, and samples from just those. With <code>k=40</code>, the sampler can never pick the 41st-likeliest token. Simple, but the fixed count is blunt: when the model is very confident, 40 candidates is too permissive; when it is uncertain, 40 may be too few.</li>
+      <li><strong>Top-p (nucleus sampling)</strong> keeps the smallest <em>set</em> of top tokens whose cumulative probability reaches <em>p</em> (say 0.9), then samples from that set. The size of the set <em>adapts</em>: when one token dominates, the nucleus might be just 1 or 2 tokens; when the model is unsure, it widens to include many. This is usually the better default because it responds to the model's own confidence.</li>
+    </ul>
+    <p>They compose. A common production recipe is a modest temperature with top-p around 0.9 to 1.0: temperature sets overall adventurousness, top-p guards against the incoherent tail. Many APIs expose temperature and top-p and let you leave the other at its default; tuning both at once is rarely necessary.</p>
+  </div>
+
+  <div class="diagram">  Candidate distribution after softmax (one decode step):
+
+    token        P        top-k=3 ?        top-p=0.9 ?
+    " Paris"   0.78        keep ✓           keep ✓   (cum 0.78)
+    " the"     0.10        keep ✓           keep ✓   (cum 0.88)
+    " a"       0.06        keep ✓           keep ✓   (cum 0.94 ≥ 0.9 → stop)
+    " France"  0.03        drop ✗           drop ✗
+    " cheese"  0.02        drop ✗           drop ✗
+    …tail…     ~0          drop ✗           drop ✗
+
+  top-k=3 fixes the count at 3. top-p=0.9 happened to keep 3 here,
+  but on a flatter step it would keep many more, and on a peaked
+  step (top token 0.97) it would keep just one.</div>
+
+  <h2>4 &middot; Determinism, and why temperature 0 is not a guarantee</h2>
+  <div class="prose">
+    <p>Set temperature to 0 and you select the <code>argmax</code> every step, so in principle the output is reproducible. In practice, do not promise byte-identical output across calls, and certainly not across time. Several real effects break it:</p>
+    <ul>
+      <li><strong>Floating-point non-associativity.</strong> On GPUs, the order in which many parallel operations are summed can vary with batch size, hardware, and kernel scheduling. Tiny numerical differences can flip which of two nearly tied logits is the maximum, and once one token differs, the rest of the sequence can diverge.</li>
+      <li><strong>Mixture-of-Experts routing.</strong> Some large models route tokens to different expert subnetworks, and that routing can depend on what else is in the batch, introducing input-dependent variation beyond your control.</li>
+      <li><strong>Model and infrastructure changes.</strong> A hosted model can be updated, re-quantized, or served on different hardware between your calls. "Same model name" is not "same weights and same math forever."</li>
+    </ul>
+    <p>So temperature 0 buys you <em>near</em>-determinism and the most stable behavior available, which is exactly why you use it for extraction, classification, and tests. But "near" is the operative word. Treat reproducibility as best-effort, write evaluations that tolerate small wording variation, and never build a system that assumes two calls return literally the same string.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Concept</span>
+    <p>Temperature 0 gives you greedy decoding and the best reproducibility a hosted LLM offers, but not a mathematical guarantee. Floating-point summation order on parallel hardware, possible expert routing, and silent model updates can all change a token. Design for "stable," not "identical."</p>
+  </div>
+
+  <h2>5 &middot; Stopping: max_tokens and stop sequences</h2>
+  <div class="prose">
+    <p>Generation is a loop (Day 1), so something has to end it. Three mechanisms do:</p>
+    <ul>
+      <li><strong>The model emits an end-of-sequence token</strong> on its own when it judges the response complete. This is the natural stop.</li>
+      <li><strong><code>max_tokens</code></strong> is a hard cap on output length. It is a safety valve against runaway cost and latency, but beware: if the model has not finished, hitting the cap <em>truncates mid-thought</em>, which commonly produces broken JSON or a cut-off sentence. Set it generously enough for the real answer, and detect when a response was truncated (most APIs report a stop reason like "max_tokens" versus "end_turn").</li>
+      <li><strong>Stop sequences</strong> are strings that, when generated, immediately halt decoding (the stop string itself is usually not included in the output). They are how you carve structured output, for example stopping at <code>\n\n</code>, at a closing tag, or at a delimiter you control, so the model does not ramble past the part you wanted.</li>
+    </ul>
+    <p>These three are your output-length control surface. In agent and tool-calling systems (Module 4) they matter even more, because a truncated tool argument is not a cosmetic bug, it is a malformed action.</p>
+  </div>
+
+  <h2>6 &middot; Choosing settings on purpose</h2>
+  <div class="prose">
+    <p>The decision is governed by one question: <em>does this task have a right answer, or a space of good answers?</em></p>
+  </div>
+
+  <table>
+    <tr><th>Task</th><th>Temperature</th><th>Why</th></tr>
+    <tr><td>Extraction, classification, structured output (JSON)</td><td><b>0&ndash;0.2</b></td><td>One correct answer; you want the most probable, reproducible token, and clean parseable output.</td></tr>
+    <tr><td>RAG answering, factual Q&amp;A, code</td><td><b>0&ndash;0.3</b></td><td>Grounded and faithful matters more than flair; low temperature reduces drift off the retrieved context.</td></tr>
+    <tr><td>Summarization, rewriting, general chat</td><td><b>0.3&ndash;0.7</b></td><td>A little variety reads naturally without inventing facts.</td></tr>
+    <tr><td>Brainstorming, ideation, creative writing, varied drafts</td><td><b>0.7&ndash;1.0+</b></td><td>You explicitly want diversity and surprise across the long tail.</td></tr>
+  </table>
+
+  <div class="prose">
+    <p>The default instinct for most production AI engineering, RAG, agents, extraction, evaluation, is <strong>low</strong>. You usually want the model boring and faithful, then you add controlled variety only where the product genuinely benefits. A frequent bug is leaving a default temperature of 1 on an extraction endpoint and then chasing "flaky" parsing failures that are really just the sampler doing its job.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: temperature reshapes one step</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>Suppose at one decode step the model's logits for four candidate tokens are <code>Paris: 3.0</code>, <code>the: 1.0</code>, <code>a: 0.5</code>, <code>France: 0.2</code>. Watch how temperature (which divides the logits) changes the resulting probabilities after softmax. The exact decimals are illustrative, but the <em>direction</em> is what matters.</p>
+  </div>
+  <div class="diagram">  logits:   Paris 3.0   the 1.0   a 0.5   France 0.2
+
+  T = 0.5  (divide logits by 0.5 → 6.0, 2.0, 1.0, 0.4)  → SHARPER
+    Paris  ≈ 0.95     the ≈ 0.03     a ≈ 0.01    France ≈ 0.01
+    → almost always "Paris"; the sampler barely explores
+
+  T = 1.0  (logits unchanged)                          → AS-IS
+    Paris  ≈ 0.71     the ≈ 0.10     a ≈ 0.06    France ≈ 0.04
+    (remaining mass on the rest of the vocab)
+
+  T = 2.0  (divide logits by 2.0 → 1.5, 0.5, 0.25, 0.1) → FLATTER
+    Paris  ≈ 0.46     the ≈ 0.17     a ≈ 0.13    France ≈ 0.11
+    → "the" / "a" / "France" now realistically get picked</div>
+  <div class="prose">
+    <p>Same model, same logits, same step. Lowering temperature concentrated mass on "Paris" until alternatives effectively vanished; raising it spread mass outward until the underdogs became live options. This is the whole mechanism: you are not changing what the model knows, you are changing how willing the sampler is to leave the favorite. Add top-p on top and you would additionally chop the far tail so the high-temperature case cannot wander into outright nonsense.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Say each answer out loud in full sentences, as if to an interviewer. Then open the solution and compare. The gap is your lesson.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>Your JSON-extraction endpoint occasionally returns malformed output, and a teammate wants to add a retry loop. Before writing any retry code, what is the first setting you check, and what two other decoding controls would you verify?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Check the temperature first: extraction has one correct answer, so it should be 0 (or near 0), and a left-over default of 1 is the most common cause of "flaky" structured output, because the sampler is exploring tokens it should not. Then verify two more controls. First, <code>max_tokens</code>: if the JSON is being truncated mid-object, the output is malformed not because of randomness but because decoding was cut off, and the fix is a larger cap plus detecting the "max_tokens" stop reason. Second, the output-enforcement path itself: for real robustness, move from free-text JSON to schema-enforced tool/function calling (Module 2), which constrains the tokens rather than hoping for them. Retries are a fallback, not the first lever; lower temperature plus enforced structure removes most of the failures the retry loop was papering over.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>A stakeholder insists, "set temperature to 0 so the model is fully deterministic and we can snapshot exact outputs in our tests." How do you respond, and how do you design the tests instead?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Temperature 0 gives greedy decoding and the most stable behavior available, but it is not a hard guarantee of byte-identical output: floating-point summation order on parallel hardware can flip nearly tied logits, some models route tokens through different experts depending on the batch, and the hosted model can be updated or re-served between calls. So an exact-string snapshot test is brittle and will produce false failures. Design the tests to assert on <em>meaning and structure</em> instead: validate that the output parses against the expected schema, that required fields are present and correctly typed, and that key values are correct, optionally using an LLM-as-judge or semantic similarity for free-text fields (Module 5). Keep temperature at 0 for stability, but make the assertions tolerant of trivial wording differences.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>You are building a feature that generates five <em>distinct</em> marketing taglines per request, but the five keep coming back nearly identical. Which knobs do you reach for, and what is the trade-off you are accepting?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Near-identical outputs mean the distribution is too peaked for this task, so raise temperature (say from a default into the 0.7 to 1.0 range) to flatten it and let the sampler explore alternative continuations, and ensure top-p is permissive (around 0.9 to 1.0) so the nucleus is not clamping you to the top one or two tokens. Generating in separate calls, or explicitly asking for varied angles, also helps decorrelate them. The trade-off you accept is the flip side of diversity: higher temperature raises the chance of an off-brand, awkward, or factually loose tagline, so you pair it with a lightweight filter or a second-pass check, and you keep this high-temperature setting scoped to the creative endpoint rather than letting it leak into anything that must be faithful.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's Foundations slice and common 2026 screens. Drill the one-line keys, then expand each into a 90-second answer with Claude using protocol prompt #2.</p>
+  <ul class="q-list">
+    <li>Walk me from logits to a chosen token.
+      <div class="a">Key: model emits a logit per vocab token; softmax (after temperature scaling) makes a distribution; optional top-k/top-p truncation; then sample or argmax.</div></li>
+    <li>What does temperature actually do?
+      <div class="a">Key: divides logits before softmax; below 1 sharpens toward the top token (greedy at 0), above 1 flattens and adds diversity; it does not change the model's knowledge.</div></li>
+    <li>Top-k vs top-p (nucleus): what is the difference and which would you default to?
+      <div class="a">Key: top-k keeps a fixed count; top-p keeps the smallest set reaching cumulative probability p, so it adapts to the model's confidence; default top-p.</div></li>
+    <li>Why might the same prompt give different answers, and how do you reduce it?
+      <div class="a">Key: sampling from a distribution; lower temperature toward 0 (greedy) for near-determinism, but small variation can remain.</div></li>
+    <li>Why is temperature 0 not a hard guarantee of identical output?
+      <div class="a">Key: floating-point non-associativity on GPUs can flip tied logits, MoE routing can depend on the batch, and hosted models get updated; expect "stable," not "identical."</div></li>
+    <li>How do you control output length, and what breaks if you set it wrong?
+      <div class="a">Key: natural end token, max_tokens cap, and stop sequences; too-low max_tokens truncates mid-answer (broken JSON), so detect the truncation stop reason.</div></li>
+    <li>Pick temperatures for extraction, RAG answering, and brainstorming, and justify.
+      <div class="a">Key: extraction ~0 (one right answer, reproducible), RAG ~0 to 0.3 (faithful to context), brainstorming 0.7 to 1.0+ (want diversity).</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (15&ndash;20 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Make the decoding knobs tangible against a real model. Using the <a href="https://docs.claude.com/en/api/messages">Messages API</a>, send the same creative prompt (for example, "Write a one-line slogan for a coffee shop") five times at <code>temperature: 0</code> and note how tightly the outputs cluster. Then send it five times at <code>temperature: 1</code> and watch them spread. Next, take a strict extraction prompt ("Return only the JSON: name, email from this text...") and run it at <code>temperature: 1</code> a few times to provoke variability, then drop to <code>temperature: 0</code> and confirm it stabilizes. Finally, set a deliberately tiny <code>max_tokens</code> on a long answer and observe the truncation plus the stop reason in the response.</p>
+    <p class="muted" style="font-size:13.5px">No API key yet? Reproduce the temperature contrast in the Claude web app by asking the same creative question in fresh chats (high variability) versus a strict "extract these two fields" question (high consistency). See <a href="../../tools.html">Tools &amp; Claude</a> for access setup.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>Decoding settings are a quiet but real part of shipping reliable features on MaiQ. Your retrieval-grounded answers want to stay faithful to the retrieved context, so low temperature is the natural choice: you do not want the sampler wandering off the chunks your hybrid retrieval worked to surface. And your LLM-as-judge evaluation depends on understanding non-determinism directly, because a judge is itself an LLM call, and knowing that even temperature 0 is only near-deterministic is exactly why you evaluate on a sample and look at distributions rather than trusting a single graded output. When an interviewer asks "how do you make LLM output reliable," you can answer the mechanism (temperature, truncation, stop control) and then ground it: "in practice I run extraction and grounded answering near temperature 0, and I built evaluation that tolerates the residual variation rather than assuming identical outputs."</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>Decoding turns the model's next-token distribution into an actual choice, and it is all inference-time, no weights touched. Temperature scales logits to sharpen (toward greedy at 0) or flatten the distribution; top-k and top-p truncate the tail before sampling, with top-p adapting to the model's confidence. Temperature 0 gives the best stability a hosted LLM offers but never a byte-identical guarantee, so design for stable not identical. Control length with max_tokens and stop sequences, and watch for mid-answer truncation. Default low for faithful, reproducible tasks; turn it up only where diversity is the product.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d03">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: the context window and the KV cache, why long context is expensive, and where "lost in the middle" comes from.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d02-tokenization-embeddings.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 2 &middot; Tokenization &amp; embeddings</div></a>
+    <a data-nav="next" class="next" href="d04-context-windows-kv-cache.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 4 &middot; Context windows &amp; the KV cache</div></a>
+  </div>
+
+  <div class="foot">Module 1 &middot; LLM Foundations &middot; Day 3 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 37 · Prompt vs RAG vs fine-tune</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 6 &middot; Fine-tuning &amp; Model Adaptation</span>
+    <span class="pill">Day 37</span>
+    <span class="pill">50 min</span>
+    <span class="diff" title="Difficulty: intermediate"><i class="on"></i><i class="on"></i><i></i></span>
+  </div>
+
+  <h1>Prompt vs RAG vs fine-tune</h1>
+  <p class="lede">The single most common senior-screen question in this space is "when do you fine-tune?" Most candidates reach for it too early. Today you build the decision framework that lets you answer in one breath, and explain the trade-off behind the answer.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Order prompting, fine-tuning, and pretraining on a single effort-and-cost ladder.</li>
+      <li>State the one-line rule: fine-tune to change FORM, RAG to supply fresh FACTS.</li>
+      <li>Explain why fine-tuning to inject changing knowledge is an anti-pattern.</li>
+      <li>Walk a JD-grade decision flowchart from "have I exhausted prompting" to "fine-tune."</li>
+      <li>Combine all three techniques in one system without treating them as rivals.</li>
+    </ul>
+  </div>
+
+  <h2>The framing that makes everything else obvious</h2>
+  <div class="prose">
+    <p>Prompting, RAG, and fine-tuning are not three competing products you pick between once. They are three <strong>different levers on three different problems</strong>, and a real system usually pulls more than one. The mistake juniors make is treating "fine-tune" as the prestige answer, the thing you graduate to. Seniors treat it as the <em>last</em> lever they reach for, because it is the most expensive to build, the slowest to iterate, and the easiest to get wrong.</p>
+    <p>The whole topic collapses into one question you ask about your failure: <em>is the model getting the FORM wrong, or getting the FACTS wrong?</em> Form is style, format, tone, structure, length, latency, cost. Facts are the actual content of the answer: what is true about your product, your customer, today. Those two failures have two different fixes, and confusing them is where teams burn months.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"Fine-tuning changes the model's <strong>behavior</strong>: form, style, format, latency, cost. RAG changes the model's <strong>knowledge at query time</strong>: fresh, specific, auditable facts. I never fine-tune to inject changing knowledge, because the moment the fact changes I would have to retrain. I reach for fine-tuning only after prompting, few-shot, and RAG are exhausted." Say that and the interviewer stops worrying about whether you have shipped this.</p>
+  </div>
+
+  <h2>1 &middot; The effort and cost ladder</h2>
+  <div class="prose">
+    <p>Three techniques, ordered by how much it costs you (in money, data, time, and risk) to adopt them. Always climb from the bottom. Stop at the first rung that solves your problem.</p>
+  </div>
+
+  <div class="diagram">  COST / EFFORT / IRREVERSIBILITY  ▲
+                                   │
+  ┌────────────────────────────────────────────────────────────────┐
+  │  PRETRAINING        train a base model from raw text            │  $$$$$$  months,
+  │                     (you will almost never do this)             │          a cluster
+  ├────────────────────────────────────────────────────────────────┤
+  │  FINE-TUNING        adapt an existing model on your             │  $$$     hours-days,
+  │   (SFT / LoRA)      curated (input → ideal output) pairs        │          GPUs, labeled data
+  ├────────────────────────────────────────────────────────────────┤
+  │  RAG + TOOLS        supply fresh facts / actions at query time  │  $$      a retrieval stack
+  ├────────────────────────────────────────────────────────────────┤
+  │  FEW-SHOT           put 2-5 examples in the prompt              │  $       a few tokens
+  ├────────────────────────────────────────────────────────────────┤
+  │  PROMPTING          system prompt, persona, format contract     │  ¢       minutes, no data
+  └────────────────────────────────────────────────────────────────┘
+                                   │
+                                   ▼  START HERE, climb only when forced</div>
+
+  <div class="prose">
+    <p>Two properties of this ladder do the work for you. First, <strong>each rung is strictly more expensive to iterate on</strong>. Changing a prompt is a one-minute edit; changing a fine-tune is a data-collection, training, and evaluation cycle measured in days. Second, <strong>each rung is more irreversible</strong>. A bad prompt is forgotten; a bad fine-tune is baked into weights you have to retrain away. So the prior is always: solve it at the cheapest rung that works, and only climb when you have proven the rung below cannot.</p>
+    <p>Note what is NOT on the ladder as a knowledge fix: fine-tuning does not appear opposite RAG by accident. RAG sits below it precisely because supplying a fact at query time is cheaper, faster to update, and auditable, whereas teaching a fact by fine-tuning is expensive and goes stale.</p>
+  </div>
+
+  <h2>2 &middot; Fine-tune changes FORM, RAG supplies FACTS</h2>
+  <div class="prose">
+    <p>This is the load-bearing distinction. Fine-tuning reshapes <em>how</em> the model responds. It is the right tool when the problem is a consistent behavior you cannot reliably get with a prompt:</p>
+    <ul>
+      <li><strong>Form / format:</strong> always emit a strict schema, a house JSON shape, a fixed report layout, valid SQL for your dialect.</li>
+      <li><strong>Style / tone:</strong> your brand voice, a terse support register, a specific level of formality, a domain's phrasing.</li>
+      <li><strong>Latency / cost:</strong> fine-tune a small model to match a big model on your narrow task, so you can drop the few-shot examples and the long system prompt and serve cheaper and faster.</li>
+      <li><strong>Hard-to-describe skill:</strong> a classification or extraction boundary you can show with examples but not articulate in rules.</li>
+    </ul>
+    <p>RAG reshapes <em>what</em> the model knows for this one answer. It is the right tool when the problem is content that is specific, fresh, or must be cited:</p>
+    <ul>
+      <li><strong>Fresh facts:</strong> anything that changes after the model's cutoff (prices, policies, today's incident, this customer's account).</li>
+      <li><strong>Private / proprietary content:</strong> your docs, your tickets, your codebase, none of which were in pretraining.</li>
+      <li><strong>Provenance:</strong> you need to cite the exact passage the answer came from, for trust or compliance.</li>
+    </ul>
+  </div>
+
+  <div class="callout warning">
+    <span class="label">The anti-pattern</span>
+    <p><strong>Never fine-tune a model to inject changing knowledge.</strong> Two reasons. First, it does not even work reliably: SFT teaches form far better than it teaches recallable facts, so the model will still confidently hallucinate the specifics. Second, even where it sticks, the fact has a half-life. The day the price, policy, or document changes, your knowledge is wrong and the only fix is another training run. RAG updates by changing a database row. Fine-tuning updates by retraining. For anything that moves, that asymmetry decides it.</p>
+  </div>
+
+  <h2>3 &middot; The decision flowchart</h2>
+  <div class="prose">
+    <p>Run a candidate problem through this top to bottom. The point of the structure is that "fine-tune" is gated behind three cheaper checks, so you cannot arrive there by reflex.</p>
+  </div>
+
+  <div class="diagram">  START: the model's output is not good enough
+        │
+        ▼
+  ┌─────────────────────────────────────────────────────────┐
+  │ Q1. Have I genuinely exhausted PROMPTING?               │
+  │     (clear system prompt, format contract, persona,     │
+  │      explicit constraints, chain-of-thought if needed)  │
+  └───────────────┬───────────────────────┬─────────────────┘
+              NO  │ improve the prompt     │ YES
+                  ▼                        ▼
+            ── fix it cheaply ──     ┌─────────────────────────────────┐
+                                     │ Q2. Is the failure about FACTS  │
+                                     │     (wrong/stale/missing info)? │
+                                     └──────┬──────────────────┬───────┘
+                                       YES  │                  │ NO (it's FORM)
+                                            ▼                  ▼
+                                     ┌──────────────┐   ┌───────────────────────────┐
+                                     │ Add RAG /    │   │ Q3. Did few-shot examples  │
+                                     │ tools.       │   │     in the prompt fix the  │
+                                     │ DO NOT       │   │     form?                  │
+                                     │ fine-tune.   │   └─────┬───────────────┬──────┘
+                                     └──────────────┘     YES │               │ NO
+                                                              ▼               ▼
+                                                        ── ship it ──   ┌──────────────────────────┐
+                                                                        │ Q4. Do I need it for     │
+                                                                        │     LATENCY / COST, or    │
+                                                                        │     is the behavior too   │
+                                                                        │     hard to describe?     │
+                                                                        │     AND do I have (or can │
+                                                                        │     build) LABELED pairs? │
+                                                                        └──────┬────────────┬───────┘
+                                                                          NO   │            │ YES
+                                                                               ▼            ▼
+                                                                       keep prompting   ✦ FINE-TUNE ✦</div>
+
+  <div class="prose">
+    <p>Read the gates as a senior would. Q1 weeds out the majority of cases (most "we need fine-tuning" requests are an under-engineered prompt). Q2 routes every knowledge problem to RAG and explicitly forbids fine-tuning there. Q3 catches the cases where a handful of in-context examples already pin the form, no training required. Only at Q4, when the behavior is genuinely hard to specify, or you need to shed the prompt overhead for latency or cost, AND you can supply labeled examples, does fine-tuning become the right answer.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: a support assistant, three levers</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>You are building a customer-support assistant. Three things are wrong with the first version. Watch each route to a different lever.</p>
+  </div>
+  <div class="diagram">  SYMPTOM                                   →  DIAGNOSIS   →  LEVER
+  ──────────────────────────────────────────────────────────────────────
+  "It answers in long chatty paragraphs;      FORM           PROMPT
+   we want 3 short bullets, formal tone."      (style)         (then few-shot;
+                                                                fine-tune only if it
+                                                                still drifts at scale)
+  ──────────────────────────────────────────────────────────────────────
+  "It invents refund amounts and quotes        FACTS          RAG
+   an old returns policy."                      (fresh,         (retrieve the current
+                                                 specific)       policy + this order)
+  ──────────────────────────────────────────────────────────────────────
+  "Every reply must be a strict JSON ticket    FORM           PROMPT + structured
+   {category, priority, summary} and it          (format)       output → fine-tune the
+   slips ~3% of the time under load."                           small model if the slip
+                                                                rate must hit ~0%.</div>
+  <div class="prose">
+    <p>Notice the shape of the senior answer: the knowledge failure never touches fine-tuning, and the form failures start at the prompt and only escalate to a fine-tune when a cheaper lever provably cannot hold the bar. A weak answer would be "fine-tune it on our support tickets," which conflates all three and would bake a stale returns policy into the weights, the exact anti-pattern.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Say each answer out loud in full sentences, as if to an interviewer. Then open the solution and compare. The gap is your lesson.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>A PM says: "Our model keeps citing last year's pricing. Let's fine-tune it on our current price list so it learns the right numbers." Give the two-sentence pushback and the correct fix.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>That is a FACTS problem, and fine-tuning is the wrong lever twice over: SFT teaches form far more reliably than recallable facts, so it would still hallucinate prices, and even if it stuck, the next price change would require another training run. The fix is RAG: retrieve the current price list at query time and ground the answer in it, which is accurate, auditable, and updates by editing a row instead of retraining. Senior tag-on: "I only fine-tune for behavior I want stable across all queries, never for content that changes."</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>You have a working assistant, but each call ships a 1,200-token system prompt plus 6 few-shot examples to a large, expensive model, and it is too slow and too costly at your volume. Is this ever a legitimate reason to fine-tune? Walk the flowchart.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Yes, this is one of the strongest reasons to fine-tune. Q1: prompting is not failing, it works. Q2: the failure is not facts. Q3: few-shot already fixed the form, that is why it works. Q4: the problem is LATENCY and COST, and you have a corpus of good input/output pairs (your current working outputs). So you fine-tune a smaller model on those pairs to absorb the behavior the long prompt and examples were buying, then serve it with a short prompt and no examples: faster, cheaper, and you can keep RAG for the facts. This is "distill the prompt into the weights," and it is a textbook legitimate fine-tune.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>Can RAG and fine-tuning coexist in one system, or do you have to choose? Give a concrete example of both running together.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>They coexist naturally because they solve orthogonal problems. A clean example: fine-tune a small model so it reliably emits your strict JSON ticket schema in your house tone (FORM), and feed it retrieved, current policy and customer context via RAG (FACTS) so the content is fresh and citable. The fine-tune handles "how to answer," RAG handles "what is true right now." Treating them as rivals is the mistake; the senior framing is "I use the cheapest lever per problem, and a production system usually layers all three: prompt for the contract, RAG for knowledge, a small fine-tune only where form must be airtight or cost must drop."</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's Module 6 slice and common 2026 screens. Drill the one-line keys, then expand each into a 90-second answer with Claude using protocol prompt #2.</p>
+  <ul class="q-list">
+    <li>Prompting vs RAG vs fine-tuning &mdash; how do you choose?
+      <div class="a">Key: effort/cost ladder prompting &lt; fine-tune &lt; pretraining; start with prompting + RAG + few-shot; fine-tune for form/style/latency/cost, not for new facts.</div></li>
+    <li>When is fine-tuning the wrong answer?
+      <div class="a">Key: when you need fresh/changing facts (use RAG), when data is tiny, or when prompting is not yet exhausted.</div></li>
+    <li>Why is fine-tuning to inject knowledge an anti-pattern?
+      <div class="a">Key: SFT teaches form more reliably than recallable facts, and any fact that changes forces a retrain; RAG updates by editing a row.</div></li>
+    <li>Give a legitimate reason to fine-tune even though prompting works.
+      <div class="a">Key: latency/cost &mdash; distill a long prompt + few-shot into a smaller model so you serve cheaper and faster on a narrow task.</div></li>
+    <li>Can RAG and fine-tuning run in the same system?
+      <div class="a">Key: yes, orthogonal problems; fine-tune for form/tone, RAG for fresh facts; production usually layers prompt + RAG + a small fine-tune.</div></li>
+    <li>What is the first question you ask before deciding the lever?
+      <div class="a">Key: is the model getting the FORM wrong or the FACTS wrong; form &rarr; prompt/fine-tune, facts &rarr; RAG.</div></li>
+    <li>Why climb the ladder from the bottom instead of starting with fine-tuning?
+      <div class="a">Key: each rung is more expensive to iterate and more irreversible; solve at the cheapest rung that works, climb only when forced.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (15&ndash;20 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Pick three real failures from any LLM feature you have touched (or invent three plausible ones for a docs assistant). For each, write a one-line diagnosis (FORM or FACTS) and the lever, then justify it against the flowchart in two sentences. Then read the Anthropic guidance on <a href="https://docs.claude.com/en/docs/build-with-claude/prompt-engineering/overview">prompt engineering</a> and the OpenAI <a href="https://platform.openai.com/docs/guides/fine-tuning">fine-tuning guide</a>'s "When to use fine-tuning" section, and check whether your routing agrees with both. The goal is to feel how rarely fine-tuning is the right first move.</p>
+    <p class="muted" style="font-size:13.5px">Stretch: take one FORM case and actually try to fix it with a sharper system prompt plus two few-shot examples in the Claude Workbench. If that closes the gap, you have just demonstrated to yourself why Q1 and Q3 gate so many cases. See <a href="../../tools.html">Tools &amp; Claude</a> for access.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>At MaiQ you have lived the right end of this ladder: your retrieval and grounding work, hybrid BM25-plus-dense fused with RRF into pgvector, exists because the knowledge MaiQ answers over is fresh, private, and must be cited, which is the textbook RAG case, not a fine-tuning case. When an interviewer asks "why didn't you just fine-tune on your docs," you can answer from experience: the content changes, you need provenance, and you update knowledge by re-ingesting, not retraining. That is the strongest possible version of this answer, lived rather than recited, and it sets up tomorrow, where you look inside what fine-tuning actually does so you can name the cases at MaiQ where it genuinely would pay off.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>Prompting, RAG, and fine-tuning are levers on different problems, ordered on a cost-and-irreversibility ladder you climb only when forced. Fine-tuning changes FORM (style, format, latency, cost); RAG supplies FACTS (fresh, specific, auditable). Never fine-tune to inject changing knowledge: it does not reliably stick and it goes stale the moment the fact moves. Gate "fine-tune" behind three cheaper checks, and remember a real system usually runs all three at once.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d37">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: open the hood on fine-tuning itself &mdash; SFT, data prep, and how to avoid catastrophic forgetting.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="../m05-evaluation/d36-evaluation-lab.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 36 &middot; Evaluation lab</div></a>
+    <a data-nav="next" class="next" href="d38-how-finetuning-works.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 38 &middot; How fine-tuning works</div></a>
+  </div>
+
+  <div class="foot">Module 6 &middot; Fine-tuning &amp; Model Adaptation &middot; Day 37 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

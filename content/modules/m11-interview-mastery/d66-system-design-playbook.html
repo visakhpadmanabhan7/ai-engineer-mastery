@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 66 · System design mock playbook</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 11 &middot; Interview Mastery</span>
+    <span class="pill">Day 66</span>
+    <span class="pill">60 min</span>
+    <span class="diff" title="Difficulty: advanced"><i class="on"></i><i class="on"></i><i class="on"></i></span>
+  </div>
+
+  <h1>System design mock playbook</h1>
+  <p class="lede">The live design round is the most learnable interview there is, because it has a structure. Candidates who know the structure look senior; candidates who freelance look nervous. Today you internalize a single reusable script and run it end to end.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Time-box a 45-minute design round into six phases without watching a clock.</li>
+      <li>Open with requirements and estimates instead of jumping to boxes and arrows.</li>
+      <li>Deploy the exact phrases that signal seniority (naming the bottleneck, naming the trade-off).</li>
+      <li>Use the 11-point AI-design checklist as a memory aid so you never forget eval, tenancy, or cost.</li>
+      <li>Avoid the four traps that sink otherwise-strong candidates.</li>
+    </ul>
+  </div>
+
+  <h2>1 &middot; The time-boxed structure</h2>
+  <div class="prose">
+    <p>A design round is roughly 45 minutes. The single biggest mistake is spending it unevenly: forty minutes of architecture and zero on requirements, or all breadth and no depth. The script below is the same one you drilled in Modules 8 to 10, now as a clock you run automatically. The minute markers are a guide, not a cage, but the <em>order</em> is fixed.</p>
+  </div>
+
+  <div class="diagram">  PHASE                       ~time     what "good" looks like
+  ─────────────────────────────────────────────────────────────────────
+  1. CLARIFY requirements      5 min    functional + non-functional;
+                                        scale, latency, consistency, tenancy
+  2. ESTIMATE                  3 min    QPS, storage, a back-of-envelope number
+  3. HIGH-LEVEL architecture   8 min    the boxes + data flow, end to end
+  4. DEEP-DIVE the bottleneck  12 min   pick the hard part, go deep, on purpose
+  5. TRADE-OFFS               10 min    name what you GIVE UP for each choice
+  6. OPERATIONS                5 min    rollout, observability, cost, failure
+  ─────────────────────────────────────────────────────────────────────
+  golden rule: do NOT enter phase 3 until phases 1-2 are done.
+  the interviewer is grading your process as much as your design.</div>
+
+  <div class="prose">
+    <p>Why this order earns points: phases 1 and 2 prove you scope before you build, which is the single clearest seniority signal in the whole round. Phase 4 is where the interview is actually won, because anyone can draw the obvious architecture, but only someone who has built systems knows <em>which</em> part is hard and chooses to spend their time there. Phase 5 is what separates a design from a wish list: a junior lists components, a senior says what each choice costs.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>Open every design round with a clarifying sentence, never a component: <em>"Before I draw anything, let me pin down scale, latency, and consistency, because those three change the whole architecture."</em> That one line tells the interviewer you have done this for real, and it buys you the requirements you need to not over-engineer.</p>
+  </div>
+
+  <h2>2 &middot; Phrases that signal seniority</h2>
+  <div class="prose">
+    <p>Interviewers are pattern-matching for a small set of behaviors. You can trigger them deliberately. These are not tricks; each one is a real senior habit compressed into a sentence you can actually say in the room.</p>
+  </div>
+
+  <table>
+    <tr><th>When you...</th><th>Say something like</th><th>Because it signals</th></tr>
+    <tr><td>Choose where to go deep</td><td>"The bottleneck here is retrieval latency under concurrency, so that is the part I will deep-dive."</td><td>You can identify the hard part and prioritize on purpose.</td></tr>
+    <tr><td>Make any architectural choice</td><td>"I am trading consistency for availability here, because a slightly stale read is fine for this use case."</td><td>You know every choice has a cost and you own it.</td></tr>
+    <tr><td>Pick a default</td><td>"I would start with Postgres and pgvector and only reach for a dedicated vector DB past ten million vectors."</td><td>You match the tool to the scale instead of cargo-culting.</td></tr>
+    <tr><td>Hit a number</td><td>"At roughly 200 QPS and a 1536-dim float32 vector at ~6 KB each, the index fits comfortably in memory."</td><td>You reason quantitatively, not vibes.</td></tr>
+    <tr><td>Reach a fork</td><td>"There are two reasonable paths here; let me state both and the condition that picks between them."</td><td>You think in trade-offs, not single answers.</td></tr>
+    <tr><td>Defer something</td><td>"I will note multi-region as out of scope for v1 and come back if we have time."</td><td>You scope ruthlessly and manage the clock.</td></tr>
+  </table>
+
+  <div class="prose">
+    <p>The two highest-leverage phrases are <strong>"the bottleneck here is X, so I will deep-dive that"</strong> and <strong>"I am trading Y for Z because..."</strong>. Use the first to control the structure of the round and the second every single time you draw a box. If you do nothing else, do those two.</p>
+  </div>
+
+  <h2>3 &middot; The 11-point AI-design checklist</h2>
+  <div class="prose">
+    <p>For an AI or GenAI design prompt, the failure mode is forgetting a whole dimension under pressure, usually evaluation, tenant isolation, or cost. Carry this 11-point checklist as a mental sweep. You do not recite it; you glance down it near the end of phase 5 to make sure nothing is missing.</p>
+  </div>
+
+  <div class="diagram">  THE 11-POINT AI / GenAI DESIGN CHECKLIST
+   1. Ingestion       parsing, chunking strategy (parent-child default)
+   2. Embedding       model choice, dimension, embed-once + cache
+   3. Retrieval       hybrid (BM25 + dense), fusion (RRF), top-k
+   4. Reranking       cross-encoder over top 50-100, precision boost
+   5. Generation      grounded, with citations; prompt + context budget
+   6. Tenancy         per-tenant filter/namespace; NEVER drop the filter
+   7. Evaluation      faithfulness + retrieval metrics; LLM-as-judge harness
+   8. Observability   span tree per request; tokens, cost, latency per span
+   9. Cost controls   prompt caching, routing, top-k, smaller generator
+  10. Latency         p95/p99 budget; where the serial time goes
+  11. Failure/ops     fallbacks, retries on 429, rollout + rollback, SLOs</div>
+
+  <div class="callout concept">
+    <span class="label">How to use it without sounding like a list</span>
+    <p>Weave the points into the flow as you reach them, then near the end say: <em>"Let me sweep the things I have not covered: evaluation, tenant isolation, and cost."</em> The checklist is insurance against the most common deduction in AI design rounds, which is a beautiful retrieval pipeline with no eval, no isolation, and no cost story.</p>
+  </div>
+
+  <h2>4 &middot; The four traps</h2>
+  <div class="callout warning">
+    <span class="label">Each of these sinks strong candidates</span>
+    <p><b>1. Architecture before requirements.</b> Drawing boxes in minute two. You will over-build the wrong thing and signal that you skip scoping. Force phases 1 and 2 first, every time.<br>
+    <b>2. No numbers.</b> A design with no QPS, no storage estimate, no latency budget is a sketch, not a design. Even rough numbers ("call it 100 QPS, low millions of docs") unlock right-sized choices.<br>
+    <b>3. No trade-offs.</b> Listing components without saying what each costs reads as a parts catalog. Every box needs a "which means I give up...".<br>
+    <b>4. Going wide, never deep.</b> Touching twelve components for thirty seconds each. Pick the bottleneck and spend twelve minutes there; depth in one place beats a shallow tour of everything.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: a 30-minute walkthrough skeleton</h2>
+  <div class="prose">
+    <p>Prompt: <em>"Design a production RAG assistant over a company's internal documents, multi-tenant, with cost controls."</em> Here is the skeleton, narrated as you would actually run it, with the clock.</p>
+  </div>
+
+  <div class="callout example">
+    <span class="label">Minutes 0&ndash;5 &middot; Clarify</span>
+    <p>"Let me scope first. <b>Functional:</b> users ask natural-language questions and get grounded answers with citations over their org's docs. <b>Non-functional, the ones that move the design:</b> how many tenants and how isolated must they be? what is the p95 latency target, interactive (~2-3s) or batch? how fresh must answers be after a doc changes? what scale of documents per tenant? I will assume: hundreds of tenants, hard data isolation, interactive latency, near-real-time freshness on upload, low millions of chunks per large tenant."</p>
+  </div>
+
+  <div class="callout example">
+    <span class="label">Minutes 5&ndash;8 &middot; Estimate</span>
+    <p>"Rough numbers: say 200 QPS at peak across tenants. A 1536-dim float32 embedding is about 6 KB, so ten million chunks is roughly 60 GB of raw vectors, which fits in memory on a sensible box, and far less with int8. That tells me I do not need exotic sharding for v1, and that the cost driver will be generation tokens, not storage. Good, that focuses the design."</p>
+  </div>
+
+  <div class="callout example">
+    <span class="label">Minutes 8&ndash;16 &middot; High-level architecture</span>
+    <p>"End to end: an <b>ingestion service</b> (I would build it on FastAPI) parses uploads, chunks parent-child, embeds, and writes vectors plus a tenant_id into pgvector. At query time a <b>retrieval layer</b> runs hybrid search, BM25 fused with dense via RRF, always filtered by tenant_id, returns the top ~50, a <b>cross-encoder reranker</b> cuts that to the top few, and a <b>generation step</b> answers grounded in those chunks with citations. Around it: an <b>eval harness</b>, a <b>tracing</b> layer, and a <b>cost/caching</b> layer. Let me draw the flow." [boxes + arrows]</p>
+  </div>
+
+  <div class="callout example">
+    <span class="label">Minutes 16&ndash;26 &middot; Deep-dive (pick the bottleneck) + trade-offs</span>
+    <p>"The bottleneck here is retrieval <em>quality</em> under a tenant filter at interactive latency, so I will deep-dive that. The reranker is the precision lever but it is a cross-encoder, so it is the latency cost, which means rerank depth is a direct quality-versus-latency trade-off; I would start at top-50 in, top-5 out and tune against the eval set. On tenancy, the non-negotiable is that the tenant filter lives in the <em>data</em> layer, not in the prompt, because asking the LLM to respect isolation is a security hole; I am trading a tiny bit of query flexibility for hard isolation, which is the right trade for company data. On cost, the biggest lever is prompt caching on the stable system+context prefix, then a smaller generator for easy queries via routing; I am trading a little orchestration complexity for a large cost drop. I would embed once and cache reranks rather than recompute."</p>
+  </div>
+
+  <div class="callout example">
+    <span class="label">Minutes 26&ndash;30 &middot; Operations + the sweep</span>
+    <p>"Ops: faithfulness as the quality floor on a rolling sample, a span tree per request with tokens and cost per span, p95/p99 latency SLOs, 429 handling with backoff, and a canary plus rollback for any retrieval change. Let me sweep what I have not said: evaluation, covered; tenant isolation, covered; cost, covered; failure modes, covered. If we had more time I would add multi-region and a feedback loop mining thumbs-down into the golden set, but I would scope those out of v1."</p>
+  </div>
+
+  <div class="prose">
+    <p>Notice what made that strong: it scoped before it drew, put a number on the problem, named the bottleneck out loud and went deep there, stated a trade-off at every fork, put the tenant filter in the data layer (the security-aware move), and ended with an explicit checklist sweep. That is a senior pass, and it is entirely a <em>structure</em> you can rehearse.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Run each as a timed mock out loud. Sketch on paper. Then open the solution and grade your structure, not your wording.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>Your interviewer opens with: <em>"Design a semantic search service for an e-commerce catalog."</em> Within the first 90 seconds, what exactly do you say, and what do you deliberately NOT do yet?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>You enter phase 1 and ask clarifying questions; you deliberately do <em>not</em> draw any architecture. The questions that move this design: catalog size and update rate, query volume (QPS), latency target (search is latency-critical, so likely tens of milliseconds), whether queries are short keyword-like terms or natural language (this decides how much BM25 matters), and whether there are filters like price/category/in-stock that must be respected. The trap you are avoiding is naming "embeddings and a vector DB" in the first breath; for catalog search, exact-match terms (brand names, SKUs, model numbers) mean BM25 is not optional, and you only know how to weight it after you ask. Stating that you are scoping before designing is itself the point being graded.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>Halfway through a RAG-assistant design you realize you are touching every component shallowly and the interviewer looks unconvinced. How do you recover, in the moment?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Recover by explicitly switching from breadth to depth out loud: <em>"I have the end-to-end flow; let me stop touring it and deep-dive the part that actually determines whether this works, which is retrieval quality under the tenant filter."</em> Then go deep on one thing: chunking choice and why, hybrid fusion, rerank depth as a latency trade-off, and how you would measure it with faithfulness and recall@k. The recovery move is naming the bottleneck and committing twelve focused minutes to it. Interviewers forgive an early shallow pass if you visibly correct into depth; what they cannot forgive is thirty minutes of surface with no decision anywhere.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>You finish your design with five minutes left and the interviewer says "looks good." Most candidates relax. What does a senior candidate do with those five minutes?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Run the checklist sweep and pre-empt the weaknesses yourself. Say: <em>"Before we close, let me name what I would worry about in production and how I would handle it."</em> Then hit the three things AI designs most often miss: evaluation (a faithfulness floor and a golden set that is refreshed from prod traces so it does not rot), tenant isolation (the filter is in the data layer, and I would add a test that fails if a query ever returns cross-tenant results), and cost/failure (prompt caching as the main lever, 429 backoff, canary plus rollback). Volunteering your own design's risks is a strong seniority signal, because it shows you think past the happy path. "Looks good" is an invitation to demonstrate exactly that, not a finish line.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's system-design and Interview Mastery slices. Drill the keys, then run a full mock with Claude (protocol #3).</p>
+  <ul class="q-list">
+    <li>Walk through your system-design methodology.
+      <div class="a">Key: clarify (functional + non-functional) &rarr; estimate (QPS, storage) &rarr; high-level arch &rarr; data model &rarr; deep-dive the bottleneck &rarr; trade-offs (name what you give up) &rarr; ops.</div></li>
+    <li>Design a production RAG assistant for company docs.
+      <div class="a">Key: ingestion (parse, parent-child chunk, embed) &rarr; hybrid retrieval + rerank + tenant filters &rarr; grounded generation with citations &rarr; eval + observability + cost; the 11-point checklist.</div></li>
+    <li>Design an LLM gateway.
+      <div class="a">Key: one entry point: auth, routing/model selection, per-tenant rate limiting, prompt + semantic caching, retries/fallback, cost metering, tracing.</div></li>
+    <li>Design real-time LLM inference with cost optimization.
+      <div class="a">Key: continuous batching (2-4x), KV/prefix caching (50%+ on agent loops), quantization, model routing, spot + on-demand mix.</div></li>
+    <li>Describe a hard reliability trade-off you would make in a live design.
+      <div class="a">Key: a real fork (rerank depth vs latency, consistency vs availability, model routing vs simplicity), what you measure, what you give up.</div></li>
+    <li>How do you decide where to deep-dive in a design round?
+      <div class="a">Key: name the bottleneck out loud (the part that determines whether it works), commit your time there; depth in one place beats a shallow tour.</div></li>
+    <li>What capacity numbers should you have memorized?
+      <div class="a">Key: 1536-dim float32 ~6 KB (~1.5 KB int8); GPT-4-class ~$5/1M in, ~$15/1M out; aim ~90% cache-hit on hot reads.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (20&ndash;25 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Run a full timed mock with Claude as interviewer (protocol prompt #3): <em>"You are a staff engineer running a 30-minute system-design interview. Give me ONE AI design prompt, then play the interviewer: ask clarifying-question follow-ups, push back when I skip requirements or numbers, and at the end score me on six axes, requirements, estimates, architecture, depth, trade-offs, and ops, out of 5 each. Start now."</em> Talk through it out loud and sketch on paper while you type. Afterward, ask Claude for the two phases where you scored lowest, and re-run only those.</p>
+    <p class="muted" style="font-size:13.5px">Reference material if you need it mid-mock: pgvector <a href="https://github.com/pgvector/pgvector">docs</a>, and your Modules 8&ndash;10 lessons. The skill being trained is the <em>structure under time pressure</em>, not novel knowledge.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">You have actually built the worked example</span>
+    <p>The RAG-assistant walkthrough above is not hypothetical for you, which is your unfair advantage in this round. You built a FastAPI ingestion service writing into pgvector, you run hybrid retrieval (BM25 fused with dense), and you drove cost down with an LLM-as-judge harness, 37% for a 2% quality drop, which is exactly the "cost controls" and "evaluation" boxes the checklist demands. When you reach the deep-dive, ground it: <em>"In practice I tuned this against an eval harness and found chunk configuration mattered more than the model, here is how."</em> Most candidates design a RAG system they have only read about; you can design one you have operated, and that difference is audible in the trade-off discussion.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>The design round is a fixed-order script: clarify, estimate, architect, deep-dive the bottleneck, trade-offs, ops, and never enter architecture before requirements. The two phrases that carry the most weight are "the bottleneck here is X, so I will deep-dive that" and "I am trading Y for Z because...". Use the 11-point checklist as an end-of-round sweep so you never forget eval, tenancy, or cost. Avoid the four traps, go deep in one place, put numbers on everything, and you turn the scariest round into the most learnable one.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d66">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: the behavioral round and "why this company," done with specifics.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d65-question-bank-drills.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 65 &middot; Rapid-fire question-bank drills</div></a>
+    <a data-nav="next" class="next" href="d67-behavioral-why-company.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 67 &middot; Behavioral &amp; "why this company"</div></a>
+  </div>
+
+  <div class="foot">Module 11 &middot; Interview Mastery &middot; Day 66 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

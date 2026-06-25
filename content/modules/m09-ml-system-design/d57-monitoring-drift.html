@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 57 · Monitoring, drift &amp; retraining</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 9 &middot; ML System Design</span>
+    <span class="pill">Day 57</span>
+    <span class="pill">50 min</span>
+    <span class="diff" title="Difficulty: intermediate"><i class="on"></i><i class="on"></i><i></i></span>
+  </div>
+
+  <h1>Monitoring, drift &amp; retraining</h1>
+  <p class="lede">A deployed model is the start of its job, not the end. The world moves, the model does not, and unless you are watching, it gets worse with no error in the logs. Today is the discipline that separates a real ML system from a one-off: detecting drift, monitoring when labels arrive late, and changing the model safely.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Distinguish data drift, concept drift, and prediction drift, and say which one delayed labels hide.</li>
+      <li>Explain how you monitor accuracy when ground-truth labels arrive days or weeks later.</li>
+      <li>Design a retraining policy: scheduled versus drift-triggered, and the guardrails on both.</li>
+      <li>Run an A/B test on a model change: per-user assignment, guardrail metrics, run to significance.</li>
+      <li>Diagnose the classic "the model decayed silently" failure and the feedback loop that poisons itself.</li>
+    </ul>
+  </div>
+
+  <h2>1 &middot; Three kinds of drift, and why it matters which</h2>
+  <div class="prose">
+    <p>A model learns a relationship from training data. "Drift" is any way the production world diverges from that training snapshot. There are three flavors, and naming the right one tells you what to do:</p>
+    <ul>
+      <li><strong>Data drift</strong> (covariate shift): the <em>inputs</em> change distribution while the underlying relationship holds. New user demographics, a new device type, a marketing campaign bringing a different population. P(x) changed; P(y given x) did not. You can detect this immediately, you do not need labels, just compare the live input distribution to the training one.</li>
+      <li><strong>Concept drift</strong>: the <em>relationship itself</em> changes. The same inputs now map to different outcomes. Fraud tactics evolve, user tastes shift, a pandemic rewrites "normal" behavior. P(y given x) changed. This is the dangerous one because you usually cannot see it without labels, the inputs can look perfectly normal while the model's logic has quietly become wrong.</li>
+      <li><strong>Prediction drift</strong> (label/output shift): the <em>distribution of the model's outputs</em> changes. Suddenly it predicts "fraud" on 8% of transactions instead of the usual 2%. This is a cheap early-warning signal, you can watch it with no labels at all, and a sudden swing flags that something upstream (data or concept) shifted.</li>
+    </ul>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"Data drift is the inputs changing, P(x) shifts, detectable without labels. Concept drift is the relationship changing, P(y given x) shifts, usually invisible until labels arrive, and the more dangerous one. Prediction drift is the output distribution moving, a cheap label-free early warning. So I monitor input distributions and output distributions continuously for an immediate signal, and I track true performance against labels as they land for the ground truth."</p>
+  </div>
+
+  <h2>2 &middot; The hard part: labels arrive late</h2>
+  <div class="prose">
+    <p>You would love to monitor accuracy directly, but ground truth is often delayed. Did this loan default? You find out in months. Was this recommendation good? Maybe when the user converts next week. Was this flagged transaction actually fraud? After a chargeback cycle. This <strong>label lag</strong> is the central monitoring challenge: by the time you can confirm the model got worse, it has been getting worse for weeks. So you layer your signals by how fast they arrive:</p>
+  </div>
+
+  <div class="diagram">  FAST (minutes, no labels)      MEDIUM (hours/days)        SLOW (days/weeks, ground truth)
+  ───────────────────────       ──────────────────         ──────────────────────────────
+  · input drift (P(x))           · proxy outcomes            · true accuracy / AUC vs labels
+  · prediction drift (P(ŷ))      · A/B guardrail metrics     · business metric (revenue,
+  · null/range/schema checks     · user feedback (thumbs)      retention, default rate)
+  · latency, error rate          · escalation/override rate
+        │                              │                              │
+        └──── early warning ───────────┴──── confirmation ───────────►  truth
+        (act on these to catch decay BEFORE the slow signal confirms it)</div>
+
+  <div class="prose">
+    <p>The discipline: do not wait for the slow ground-truth signal to act. Input and prediction drift, plus fast proxies (override rates, thumbs-down, escalations), are your early-warning system. They are noisier and indirect, but they fire in time to investigate before users feel it. When the delayed labels finally arrive, they confirm or refute, and they feed the next retraining.</p>
+  </div>
+
+  <h2>3 &middot; The classic silent-decay failure</h2>
+  <div class="prose">
+    <p>This is the war story every ML interviewer wants you to recognize. A model ships, performs great, and the team moves on. There is no monitoring beyond "is the service up?" Months later, concept drift has crept in, fraud patterns evolved, or seasonality shifted, and the model is now meaningfully worse. Nothing errored. Latency is fine, the API returns 200s, dashboards are green. The decay only surfaces when a business metric finally sags or a customer complains, by which point you have shipped bad predictions for a long time. The fix is cultural and structural: treat the model as a component with a half-life, instrument input drift, prediction drift, and delayed-label accuracy from day one, and wire alerts. "We deployed it and stopped looking" is the root cause of more ML incidents than any modeling mistake.</p>
+  </div>
+
+  <div class="callout warning">
+    <span class="label">Watch out</span>
+    <p>"It worked when we launched" is not evidence it works now. A green uptime dashboard says nothing about whether the model's predictions are still <em>correct</em>. Performance monitoring (against drift and delayed labels) is a separate system from service monitoring (against errors and latency). You need both.</p>
+  </div>
+
+  <h2>4 &middot; The feedback loop, and loops that poison themselves</h2>
+  <div class="prose">
+    <p>In most live ML systems the model's predictions <em>shape</em> the data it later trains on, that is the feedback loop from the framework. A recommender decides what you see, your clicks become its next training labels, so it is partly learning from its own past choices. Used deliberately, this loop is how a system stays fresh. Left unexamined, it poisons itself:</p>
+    <ul>
+      <li><strong>Feedback loop / runaway popularity.</strong> The model recommends popular items, those get more impressions, so they get more clicks, so the model concludes they are even better and recommends them harder. Niche items never get shown, so they never get positive labels, and the system collapses toward a narrow, self-reinforcing set. The model is now training on a distribution it created, not the real world.</li>
+      <li><strong>Survivorship in the labels.</strong> A fraud model only gets clean "this was fraud" labels on transactions it <em>let through</em>; the ones it blocked never resolve, so retraining is blind to the fraud it is already catching and can drift toward letting it back in.</li>
+    </ul>
+    <p>The mitigations are: inject exploration (show some items the model would not have picked, so you collect unbiased labels), log enough to detect the loop (track diversity and coverage, not just clicks), and be deliberate about which production data is safe to retrain on. The senior signal is naming that "predictions become training data" is a feature you must manage, not assume.</p>
+  </div>
+
+  <h2>5 &middot; Retraining: scheduled vs drift-triggered</h2>
+  <div class="prose">
+    <p>When do you retrain? Two policies, and mature teams combine them:</p>
+  </div>
+
+  <table>
+    <tr><th>Policy</th><th>Trigger</th><th>Good when</th><th>Risk</th></tr>
+    <tr><td><b>Scheduled</b></td><td>Fixed cadence (nightly, weekly, monthly).</td><td>Drift is gradual and predictable; simple to operate and reason about.</td><td>Retrains when nothing changed (wasted compute) or too slowly for a sudden shift.</td></tr>
+    <tr><td><b>Drift-triggered</b></td><td>A monitored signal crosses a threshold (input drift, prediction drift, or a metric drop).</td><td>Drift is bursty or event-driven; you want to react to real change, not the calendar.</td><td>Noisy triggers cause thrashing; a bad batch can trigger a bad retrain.</td></tr>
+  </table>
+
+  <div class="prose">
+    <p>Whichever fires, retraining is <em>not</em> automatically deploying. A freshly retrained model must clear the same gates as any new model: it has to beat the current production model on the offline eval set (Day 54), then go through shadow and canary or an A/B test (below) before it serves everyone. Automated retraining with no evaluation gate is how a poisoned data batch silently replaces a good model with a worse one. Always retrain into a candidate, then prove the candidate.</p>
+  </div>
+
+  <h2>6 &middot; A/B testing a model change properly</h2>
+  <div class="prose">
+    <p>The rigorous way to prove a new model actually helps live is a controlled experiment. The non-negotiables:</p>
+    <ul>
+      <li><strong>Per-user (consistent) assignment.</strong> Assign each user to control or treatment by a stable hash of their id, so the same user always gets the same variant. Assigning per <em>request</em> would flip a user between models mid-session, contaminating the comparison and confusing the user.</li>
+      <li><strong>Guardrail metrics, not just the target.</strong> Track the metric you hope to improve <em>and</em> a set of guardrails you must not harm: latency, error rate, revenue, retention, diversity. A model that lifts click-through but quietly tanks a guardrail is a loss, this is the Day 54 "metrics disagree" lesson, enforced.</li>
+      <li><strong>Run to statistical significance.</strong> Decide the sample size and duration up front, run at least one or two full business cycles (weekday/weekend effects are real), and do not peek-and-stop the moment it looks good, that inflates false positives. Let it reach significance, then decide.</li>
+      <li><strong>Shadow first for risky changes.</strong> If a regression would be costly (fraud, payments, safety), shadow the new model before exposing any user (Day 56), then A/B.</li>
+    </ul>
+    <p>An A/B test is the disciplined version of the canary: it does not just check that the new model runs, it measures whether it moves the business metric without breaking a guardrail, with enough data to trust the result.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: the demand model that drifted</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>A grocery-delivery company runs a model predicting daily demand per store, used to pre-stock. It performed well at launch. Six weeks later, store managers complain of shortages on certain days. The service is healthy, no errors.</p>
+    <p>Walk the diagnosis. First check <strong>input drift</strong>: are the model's inputs distributed like training? You find a new promotion and a heatwave shifted order patterns, P(x) moved, that is data drift, detectable without labels. Then check <strong>prediction drift</strong>: the model's demand forecasts barely changed even though real demand spiked, the output distribution did not track reality. Now the delayed labels (actual sales) arrive and confirm <strong>concept drift</strong>: the input-to-demand relationship changed (the heatwave made cold drinks behave differently than the model ever learned), so P(y given x) shifted and the model's learned logic is stale.</p>
+    <p>Response: the drift detector should have fired on input and prediction drift in <em>week one</em> of the heatwave, that is the early warning you act on, not the six-weeks-later complaint. You trigger a retrain into a candidate model on recent data, gate it on the offline eval, shadow it against live forecasts, then A/B it against the incumbent with stock-out rate and waste as guardrails before rolling out. The whole story is the framework's stages 7 and 8 in action.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Say each answer out loud in full sentences, as if to an interviewer. Then open the solution and compare. The gap is your lesson.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>Your credit-default model's true accuracy can only be known months after each decision. An interviewer asks: "How do you know, today, whether the model is still healthy?" Answer without using the word "accuracy."</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>You layer faster, label-free signals as an early-warning system. (1) <strong>Input / data drift</strong>: compare today's applicant feature distributions to the training distribution; a shift means the population changed even before any default resolves. (2) <strong>Prediction drift</strong>: watch the distribution of the model's risk scores; if the approved-rate or score distribution suddenly swings, something upstream moved. (3) <strong>Fast proxies</strong>: early indicators that correlate with default (first-payment-missed rate, manual-override rate by underwriters, complaint volume). These fire in days, not months, so you can investigate before the slow ground-truth labels confirm decay. When the delayed default labels do arrive, they become the confirmation and the next retraining set. The senior point: with label lag you cannot rely on accuracy alone, you monitor the inputs and outputs continuously and treat true labels as delayed confirmation.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>A recommender shows mostly popular items; over a few months it shows almost nothing else, and overall engagement slowly falls even though click-through on shown items stays high. What loop is this, why do the metrics look fine, and how do you fix it?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>This is a self-poisoning <strong>feedback loop</strong> (runaway popularity). The model shows popular items, those accumulate impressions and therefore clicks, the next training round reads those clicks as "these are even better," and niche items, never shown, never earn positive labels, so they vanish. Click-through on shown items stays high precisely because the model only shows safe bets, but the catalog the user effectively sees has collapsed, so discovery and long-term engagement decline. The metrics look fine because you are measuring the wrong thing, CTR on a self-selected set, not coverage or long-term retention. Fixes: (1) inject <strong>exploration</strong> (show a fraction of items the model would not pick) to collect unbiased labels; (2) monitor <strong>diversity and catalog coverage</strong> as first-class metrics, not just CTR; (3) be deliberate about retraining data so the model is not just learning from a distribution it created. Naming "predictions become the next training data, and that loop can collapse" is the signal the interviewer wants.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>A teammate sets up fully automated retraining: every night, retrain on the last 30 days and deploy the new model. Name two failure modes this invites and the one change that fixes both.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Failure mode one: <strong>a poisoned or anomalous data batch</strong> (an outage that logged garbage, a bug that mislabeled events, a feedback-loop-skewed distribution) gets trained on and silently deployed, replacing a good model with a worse one, with nobody in the loop. Failure mode two: <strong>silent regression</strong>, the nightly model might be worse than yesterday's even on clean data (variance, an unlucky split), and because deploy is automatic there is no check that the new model actually beats the incumbent. The one change that fixes both: insert an <strong>evaluation gate</strong> between retraining and deployment, retrain into a <em>candidate</em>, require it to beat the current production model on a held-out offline eval set, then shadow/canary or A/B before it serves everyone. Retraining should produce a candidate; only evaluation should promote it. (Bonus: alert if the new model fails the gate, because a failing gate is itself a drift signal.)</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's Module 9 slice. Drill the one-line keys, then expand each into a 90-second answer with Claude using protocol prompt #2.</p>
+  <ul class="q-list">
+    <li>How do you monitor an ML model in production?
+      <div class="a">Key: track data drift, prediction drift, and performance against delayed labels, plus the business metric and service health (latency/errors); wire alerts and retrain triggers; service uptime is not performance.</div></li>
+    <li>What is the difference between data drift, concept drift, and prediction drift?
+      <div class="a">Key: data drift = inputs shift P(x), label-free detectable; concept drift = the input-output relationship shifts P(y given x), usually invisible until labels arrive (most dangerous); prediction drift = output distribution shifts, a cheap early warning.</div></li>
+    <li>How do you monitor accuracy when labels arrive weeks late?
+      <div class="a">Key: layer fast label-free signals (input/prediction drift, proxies like override/escalation/thumbs) as early warning to act on, and treat delayed ground-truth labels as confirmation and the next training set.</div></li>
+    <li>Describe the classic "model decayed silently" failure and how to prevent it.
+      <div class="a">Key: ship and stop watching; concept drift erodes it with no errors and a green dashboard until a business metric sags; prevent by instrumenting drift and delayed-label performance from day one and treating the model as having a half-life.</div></li>
+    <li>What is a feedback loop that poisons itself, and how do you mitigate it?
+      <div class="a">Key: predictions shape the data the model retrains on (runaway popularity, survivorship in labels); mitigate with exploration to collect unbiased labels, monitoring diversity/coverage, and deliberate retraining-data choices.</div></li>
+    <li>Scheduled vs drift-triggered retraining, when each?
+      <div class="a">Key: scheduled for gradual predictable drift (simple, can waste compute or lag a shock); drift-triggered for bursty change (reactive, but noisy triggers thrash); either way, gate the retrained candidate on eval before deploying.</div></li>
+    <li>How do you A/B test a model change?
+      <div class="a">Key: consistent per-user assignment, a target metric plus guardrail metrics you must not harm, run to statistical significance over full business cycles without peeking, and shadow first for risky changes.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (15&ndash;20 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Detect drift with your own hands. In a notebook, sample a "training" feature from one distribution (say <code>numpy</code> normal mean 0) and a "production" feature from a shifted one (mean 1.5). Plot both histograms, then quantify the gap two ways: a population stability index (PSI) over binned counts, and a two-sample Kolmogorov&ndash;Smirnov test (<code>scipy.stats.ks_2samp</code>). Watch the PSI and the KS statistic climb as you widen the shift, this is exactly what a drift monitor computes per feature on a schedule. Then simulate <em>prediction drift</em>: push both samples through a fixed threshold and compare the positive rate. For the production-grade version of this, skim the Evidently AI docs at <a href="https://docs.evidentlyai.com/">docs.evidentlyai.com</a> to see how drift reports are generated automatically.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>Your instinct against "ship and stop looking" is exactly what this lesson rewards, you built an <strong>LLM-as-judge evaluation framework</strong> precisely so quality is <em>measured on a rolling basis</em> rather than assumed after launch, which is the LLM analogue of monitoring an ML model against delayed labels. The same drift framing transfers cleanly: in a RAG system, "data drift" is the document corpus changing under you (new docs, new terminology) so yesterday's retrieval quality no longer holds, and "concept drift" is users asking a different shape of question than the system was tuned for. Your habit of running repeated retrieval experiments and watching a quality metric is monitoring-plus-retraining in spirit, you do not trust a one-time number, you keep measuring. When an interviewer asks how you keep a model healthy in production, you can ground it: "I treat quality as something to measure continuously, that is why I built the evaluation harness, not as a launch checkbox."</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>A deployed model decays as the world drifts away from its training snapshot, and the failure is silent: no errors, green dashboards, just worse predictions. Name the drift, data drift (inputs, label-free detectable), concept drift (the relationship, usually invisible until labels arrive, the dangerous one), prediction drift (outputs, a cheap early warning). Because true labels arrive late, you layer fast label-free signals as early warning and treat ground truth as delayed confirmation. Manage the feedback loop deliberately, predictions become training data and can poison themselves, so inject exploration and watch coverage. Retrain on a schedule or on a drift trigger, but always retrain into a candidate and gate it on evaluation before deploying, and prove a model change with a proper A/B test: consistent per-user assignment, guardrail metrics, run to significance.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d57">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: the full lab, walk the framework end to end and design a real ranking system.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d56-model-serving.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 56 &middot; Model serving: batch vs online</div></a>
+    <a data-nav="next" class="next" href="d58-ml-sd-lab.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 58 &middot; Lab &mdash; design a ranking system</div></a>
+  </div>
+
+  <div class="foot">Module 9 &middot; ML System Design &middot; Day 57 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

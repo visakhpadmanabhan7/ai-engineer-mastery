@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 55 · Feature stores &amp; training pipelines</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 9 &middot; ML System Design</span>
+    <span class="pill">Day 55</span>
+    <span class="pill">55 min</span>
+    <span class="diff" title="Difficulty: advanced"><i class="on"></i><i class="on"></i><i class="on"></i></span>
+  </div>
+
+  <h1>Feature stores &amp; training pipelines</h1>
+  <p class="lede">Models get the glory, but features decide whether the system works. Today is about the unglamorous infrastructure that keeps the features your model trained on identical to the features it serves on, because the gap between those two is the single most common silent ML bug in production.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Explain why features, not models, are usually the bottleneck in ML systems.</li>
+      <li>State the two jobs a feature store does: consistency and point-in-time correctness.</li>
+      <li>Define training-serving skew, give three concrete causes, and prevent each.</li>
+      <li>Choose between batch, streaming, and on-demand feature computation.</li>
+      <li>Explain point-in-time joins and why a naive join leaks the future into training.</li>
+    </ul>
+  </div>
+
+  <h2>1 &middot; Features are the heart of the system</h2>
+  <div class="prose">
+    <p>A model is a function from features to a prediction. Swap a mediocre model for a great one and you might gain a few points; feed either one better features and you can move the needle far more. In practice most of the engineering effort, and most of the bugs, live in the feature layer, not the model layer. So in a system design interview, when you reach stage 3 of the framework, do not wave it away with "and then I compute some features." That is where a senior engineer slows down.</p>
+    <p>The hard part is not <em>computing</em> a feature once. It is computing the <em>same</em> feature, the same way, in two very different worlds: an offline world where you process millions of rows in a batch job to build a training set, and an online world where you must produce that feature for one user in a few milliseconds at request time. Keeping those two worlds in agreement is the entire problem.</p>
+  </div>
+
+  <h2>2 &middot; The two worlds, and the store between them</h2>
+  <div class="prose">
+    <p>A feature store is the system that sits between feature producers and both consumers (training and serving), so that a feature is defined once and read consistently in both places.</p>
+  </div>
+
+  <div class="diagram">  RAW SOURCES        event logs · transactional DB · streams · 3rd-party APIs
+        │
+        ▼
+  ┌─────────────────── FEATURE PIPELINES ───────────────────┐
+  │  batch job (nightly Spark)  ·  streaming job (Flink)     │
+  │  ── one transform definition, reused on both sides ──    │
+  └───────────────┬───────────────────────────┬─────────────┘
+                  │                           │
+        OFFLINE PATH                   ONLINE PATH
+        ▼                                     ▼
+  ┌──────────────────┐                 ┌──────────────────┐
+  │  OFFLINE STORE   │                 │   ONLINE STORE   │
+  │  (warehouse /    │                 │  (Redis / KV,    │
+  │   parquet, big,  │                 │   low-latency,   │
+  │   historical)    │                 │   latest value)  │
+  └────────┬─────────┘                 └────────┬─────────┘
+           │                                   │
+           ▼  point-in-time join                ▼  key lookup, &lt;10 ms
+   ┌───────────────┐                     ┌───────────────┐
+   │  TRAINING SET │  (x, y) pairs       │  SERVING       │
+   │  build → train│                     │  fetch features│
+   └───────────────┘                     │  → model → pred│
+                                         └───────────────┘
+           ▲                                   │
+           └───── SAME feature definition ──────┘
+                  (this equality is the whole point)</div>
+
+  <div class="prose">
+    <p>Two stores, one definition. The <strong>offline store</strong> is big, historical, and read in bulk to build training sets. The <strong>online store</strong> is a low-latency key-value store (Redis is the classic choice) holding the <em>latest</em> feature value per entity, read by key in single-digit milliseconds at request time. The feature store's promise is that the value you trained on and the value you serve on were produced by the same transform, so the model sees in production exactly the kind of input it learned from.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Concept</span>
+    <p>A feature store solves two problems. First, <strong>consistency</strong>: the offline (training) and online (serving) features come from one definition, which prevents training-serving skew. Second, <strong>point-in-time correctness</strong>: when building a training row for an event at time <em>t</em>, it joins only feature values that were known at <em>t</em>, never later, so you do not leak the future into the past.</p>
+  </div>
+
+  <h2>3 &middot; Training-serving skew: the #1 silent bug</h2>
+  <div class="prose">
+    <p>Training-serving skew is when the features (or the transforms that produce them) differ between training and serving, so the model receives subtly different inputs in production than it learned from. It is dangerous precisely because nothing crashes. The pipeline runs, the API returns 200s, and the model just quietly performs worse than your offline numbers promised. Three common causes:</p>
+    <ul>
+      <li><strong>Two implementations of one transform.</strong> The classic. A data scientist writes the training features in pandas; an engineer reimplements them in Java for the serving path. One uses mean to fill missing values, the other uses zero. One normalizes by the training-set mean, the other by a hardcoded constant. The model sees different distributions and degrades.</li>
+      <li><strong>Different data freshness.</strong> Training uses a feature aggregated over a full clean day; serving reads a value that is several hours stale because the online store has not refreshed. "Average spend last 7 days" means something different if one side is current and the other lags.</li>
+      <li><strong>Time leakage at training time.</strong> You accidentally compute a feature using data from <em>after</em> the prediction timestamp (e.g. "total order value" that includes orders placed after the moment you were predicting). Offline it looks brilliant; in production that future information does not exist, so the model collapses.</li>
+    </ul>
+  </div>
+
+  <div class="callout warning">
+    <span class="label">Watch out</span>
+    <p>Skew does not raise an exception. Your offline AUC says 0.91, production behaves like 0.78, and the logs are clean. If a model "tested great but underperforms live," suspect training-serving skew before you suspect the model. The fix is structural, not a tuning knob.</p>
+  </div>
+
+  <h2>4 &middot; Preventing skew: share the transform, log what you served</h2>
+  <div class="prose">
+    <p>There are two structural defenses, and a strong answer names both:</p>
+    <ul>
+      <li><strong>Share the transform.</strong> Define each feature exactly once, in one piece of code, and call that same code in both the batch pipeline and the serving path. A feature store enforces this; without one you can still do it by extracting transforms into a shared library that both paths import. The rule: never let two implementations of one feature exist.</li>
+      <li><strong>Log the features you actually served.</strong> At inference time, write the exact feature vector you fed the model (alongside the prediction and a request id). This does two things: it lets you <em>train on real served features</em> next time (closing the loop so train and serve are identical by construction), and it lets you compare served-versus-recomputed values to <em>detect</em> skew when it sneaks in. Logging served features is one of the highest-value, lowest-effort moves in production ML.</li>
+    </ul>
+  </div>
+
+  <h2>5 &middot; Batch vs streaming vs on-demand features</h2>
+  <div class="prose">
+    <p>Not every feature is computed the same way. Match the computation style to how fast the feature must reflect reality:</p>
+  </div>
+
+  <table>
+    <tr><th>Style</th><th>Freshness</th><th>Example</th><th>How</th></tr>
+    <tr><td><b>Batch</b></td><td>Hours / daily</td><td>"User's avg order value over 90 days"</td><td>Scheduled job (Spark) writes to offline + online store overnight.</td></tr>
+    <tr><td><b>Streaming</b></td><td>Seconds</td><td>"Clicks in the last 5 minutes"</td><td>Stream processor (Flink/Kafka) updates the online store in near real time.</td></tr>
+    <tr><td><b>On-demand</b></td><td>Request time</td><td>"Distance between user and this restaurant right now"</td><td>Computed live from request inputs; cannot be precomputed (depends on the query).</td></tr>
+  </table>
+
+  <div class="prose">
+    <p>Most real systems mix all three: slow-moving aggregates from a nightly batch job, fast-moving counts from a streaming job, and a few request-specific features computed on the fly. The interview signal is matching freshness to need, do not pay for a streaming pipeline to keep a 90-day average "fresh," and do not serve a 12-hour-stale value for "items viewed this session."</p>
+  </div>
+
+  <h2>6 &middot; Point-in-time joins and data versioning</h2>
+  <div class="prose">
+    <p>To build a training row for a label that occurred at time <em>t</em>, you must attach the feature values <em>as they were at t</em>. A naive join ("join the user's current features to every historical label") attaches today's values to a year-old event, which leaks information the model could never have had. That is a <strong>point-in-time</strong> (or "as-of") join: for each label timestamp, take the latest feature value with an effective time at or before that timestamp. This is the single most error-prone step in building training data, and it is exactly what a feature store automates for you.</p>
+    <p><strong>Data versioning</strong> closes the loop on reproducibility. A model artifact is only meaningful alongside the exact training data and feature definitions that produced it. Version your datasets and feature transforms (tools like DVC or LakeFS, or simply immutable, timestamped snapshots), so that when a model misbehaves six weeks later you can reconstruct precisely what it was trained on. "We cannot reproduce the training set" is a sentence you never want to say in an incident review.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: the skew that ate the fraud model</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>A fraud team trains a model. A key feature is <code>avg_txn_amount_30d</code>, the user's average transaction amount over the last 30 days. Offline, computed in pandas over the warehouse, AUC is 0.93. In production, the serving service (written in Go) recomputes the same feature by querying recent transactions, but to stay fast it caps the lookback at 1000 most-recent rows and, for new users with no history, returns <code>0.0</code> instead of the training pipeline's <em>global mean</em>.</p>
+    <p>Result: for high-volume merchants the cap silently changes the average; for new users the model sees <code>0.0</code> where it learned to see the mean. Two different transforms, one feature name. Live AUC behaves like 0.84, fraud slips through, and the logs are spotless. The fix is not to retune, it is to delete the Go reimplementation and have both paths call one shared feature definition, then log the served feature vector so the next training set is built from exactly what production saw.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Say each answer out loud in full sentences, as if to an interviewer. Then open the solution and compare. The gap is your lesson.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>A teammate proposes: "Let's not bother with a feature store. The data scientists write features in their training notebook, and we'll just have backend re-implement the important ones in the API." Name the bug class this guarantees and the two structural fixes that avoid it.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>It guarantees <em>training-serving skew</em>: two independent implementations of each feature will drift in missing-value handling, normalization constants, lookback windows, and rounding, so the model receives different inputs in production than it trained on, and nothing will error, the model just silently underperforms. Two structural fixes: (1) <strong>share the transform</strong>, define each feature once in shared code that both the batch pipeline and the serving path import, so there is literally one implementation; and (2) <strong>log the served feature vector</strong> at inference time, so you can train on real served features (closing the loop) and detect skew by comparing served versus recomputed values. A feature store packages both, but a shared transform library plus served-feature logging gets you most of the way without one.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>You are building a training set to predict whether a user will upgrade. For each historical "did upgrade?" label you join the user's <code>total_lifetime_spend</code> from your current production table. Offline accuracy is suspiciously high. What did you do wrong, and how do you fix it?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>You leaked the future. <code>total_lifetime_spend</code> read from the <em>current</em> table includes spend that happened <em>after</em> the upgrade decision you are predicting, so the feature is partly a consequence of the label, not a cause, classic time leakage, and it inflates offline accuracy while being impossible to reproduce at serving time. The fix is a <strong>point-in-time (as-of) join</strong>: for each label at time <em>t</em>, attach the feature value as it was at or before <em>t</em> (the user's lifetime spend up to that moment), never the value as of today. This is exactly the correctness guarantee a feature store provides, and it usually drops your "suspiciously high" offline number down to something honest that actually holds in production.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>For a food-delivery ranking model, you have three candidate features: (a) the restaurant's average rating over its lifetime, (b) how many times the restaurant has been ordered in the last 10 minutes, (c) the walking distance between this user's current location and this restaurant. Assign each to batch, streaming, or on-demand, and justify.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>(a) <strong>Batch</strong>, lifetime average rating moves slowly, recomputing it nightly is plenty fresh and cheap; a streaming pipeline here would be wasted money. (b) <strong>Streaming</strong>, "orders in the last 10 minutes" is a fast-moving signal (it captures a sudden surge or a kitchen going down) and must update in near real time, so a stream processor maintains it in the online store. (c) <strong>On-demand</strong>, distance depends on the user's <em>current</em> location, which only exists at request time, so it cannot be precomputed and must be calculated live from the request inputs. The point: match computation style to freshness need; most systems use all three at once.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's Module 9 slice. Drill the one-line keys, then expand each into a 90-second answer with Claude using protocol prompt #2.</p>
+  <ul class="q-list">
+    <li>What is a feature store and what problem does it solve?
+      <div class="a">Key: a system that defines features once and serves them consistently to both training (offline) and serving (online), preventing training-serving skew and guaranteeing point-in-time correctness.</div></li>
+    <li>What is training-serving skew and how do you prevent it?
+      <div class="a">Key: features/transforms differ between train and serve (two implementations, freshness gaps, leakage); prevent by sharing one transform definition across both paths and logging the served feature vector.</div></li>
+    <li>What is point-in-time correctness and why does a naive join break it?
+      <div class="a">Key: build each training row with feature values known at the label's timestamp; a naive join attaches today's values to old labels, leaking the future and inflating offline metrics.</div></li>
+    <li>Why are features often the bottleneck rather than the model?
+      <div class="a">Key: most effort and bugs live in computing the same feature consistently across the offline and online worlds; better features usually beat a better model, and the feature layer is where skew and leakage hide.</div></li>
+    <li>When do you use batch, streaming, or on-demand feature computation?
+      <div class="a">Key: match computation to freshness need, batch for slow aggregates (90-day average), streaming for fast counts (clicks last 5 min), on-demand for request-specific values (live distance).</div></li>
+    <li>Why log the features you served at inference time?
+      <div class="a">Key: lets you train on exactly what production saw (closing the loop, eliminating skew by construction) and detect skew by comparing served vs recomputed values; cheap, high value.</div></li>
+    <li>How do you make a model's training reproducible six weeks later?
+      <div class="a">Key: version the dataset and feature definitions (DVC/LakeFS or immutable timestamped snapshots) alongside the model artifact, so you can reconstruct the exact training set during an incident.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (15&ndash;20 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Reproduce skew on your own machine to feel it. In a notebook, make a tiny dataset of users with a few transaction amounts. Write a "training" feature function <code>avg_amount(df)</code> that fills missing users with the global mean. Then write a separate "serving" feature function that fills missing users with <code>0.0</code> and caps the lookback at the 2 most recent rows. Compute both on the same users and print the differences, this is skew, made concrete in ten lines. Now refactor: extract one shared <code>compute_avg_amount(rows)</code> and call it from both, and watch the differences vanish. For the production version of this pattern, skim the Feast feature-store docs at <a href="https://docs.feast.dev/">docs.feast.dev</a> to see how offline and online stores are wired in real life.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>You already run the "define the transform once, on both sides" discipline, just for an LLM stack. Your <strong>FastAPI ingestion service</strong> writes documents into <strong>pgvector</strong>, and the embedding step is effectively a feature pipeline: the text must be chunked and embedded with the <em>same</em> transform at ingestion (the "offline" path that fills the index) and at query time (the "online" path that embeds the user's question). If those two used different chunking or a different embedding model, your retrieval would silently degrade, the RAG analogue of training-serving skew. So when an interviewer asks about feature stores, you can ground it: "consistency between the offline-built index and the online query path is the same problem I solve in retrieval, where the ingestion and query embeddings have to come from one definition or recall quietly drops."</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>Features, not models, are usually the bottleneck, and the hard part is producing the same feature consistently in two worlds: bulk offline for training and low-latency online for serving. A feature store does two jobs, consistency (one definition feeds both sides) and point-in-time correctness (join only what was known at the label's timestamp). Training-serving skew is the #1 silent bug, it never crashes, it just makes production worse than your offline numbers, and you prevent it by sharing one transform and logging the features you served. Match feature computation to freshness need (batch / streaming / on-demand), and version your data so a model's training is always reproducible.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d55">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: when to precompute predictions in a batch versus serve them live per request, and how to hit a latency budget.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d54-ml-sd-framework.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 54 &middot; The ML system design framework</div></a>
+    <a data-nav="next" class="next" href="d56-model-serving.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 56 &middot; Model serving: batch vs online</div></a>
+  </div>
+
+  <div class="foot">Module 9 &middot; ML System Design &middot; Day 55 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

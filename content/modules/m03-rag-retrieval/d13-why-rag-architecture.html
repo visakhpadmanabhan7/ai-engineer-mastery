@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 13 · Why RAG &amp; the full architecture</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 3 &middot; RAG &amp; Retrieval</span>
+    <span class="pill">Day 13</span>
+    <span class="pill">50 min</span>
+    <span class="diff" title="Difficulty: foundational"><i class="on"></i><i></i><i></i></span>
+  </div>
+
+  <h1>Why RAG &amp; the full architecture</h1>
+  <p class="lede">RAG is the single most common pattern you will build as an AI engineer, and the one interviewers probe hardest. Today you get the why, the full six-stage pipeline, and a map of where every later lesson in this module plugs in.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Say in two sentences why RAG beats fine-tuning for knowledge, and when it does not.</li>
+      <li>Draw the six-stage pipeline (ingest, chunk, embed, index, retrieve, generate) and split it into offline and online halves.</li>
+      <li>Name which stage each of the next eight lessons sharpens.</li>
+      <li>Distinguish vanilla, agentic, and hierarchical RAG at a glance.</li>
+      <li>Explain why roughly 70 to 75 percent of bad RAG answers are retrieval failures, not generation failures.</li>
+    </ul>
+  </div>
+
+  <h2>The problem RAG solves</h2>
+  <div class="prose">
+    <p>From Module 1 you know an LLM's knowledge is <strong>parametric</strong>: lossy, frozen at the training cutoff, and blended with everything else it ever read. That is fine for general language, useless for "what does <em>our</em> refund policy say as of this morning." Two facts make this unavoidable: the model cannot have seen your private documents, and even public facts go stale the instant training stops.</p>
+    <p>Retrieval-Augmented Generation (RAG) fixes this without touching the weights. At query time you <strong>fetch the relevant passages from an external store and place them in the context window</strong>, then ask the model to answer using them. The model's job shifts from "recall this fact" to "read these passages and synthesize an answer," which is exactly what LLMs are good at.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"RAG retrieves relevant context at query time and injects it into the prompt, so the model answers from supplied evidence instead of frozen parametric memory. You reach for it whenever knowledge is private, changing, or needs to be cited." Say that and the interviewer knows you have shipped one.</p>
+  </div>
+
+  <h2>1 &middot; Why RAG instead of fine-tuning</h2>
+  <div class="prose">
+    <p>The most common interview trap is conflating the two. They solve different problems. Fine-tuning changes <em>how</em> the model behaves (form, style, format, tone); RAG changes <em>what</em> it knows at answer time. For injecting knowledge, RAG wins on three axes:</p>
+    <ul>
+      <li><strong>Dynamic knowledge.</strong> Update a database row and the next answer reflects it. Fine-tuning bakes facts into weights, so any change means re-running a training job. New document on Monday should not require a GPU on Tuesday.</li>
+      <li><strong>Provenance and citations.</strong> Because you know exactly which passages you retrieved, you can show the source. A fine-tuned model cannot tell you which training example produced a claim, which is fatal in legal, medical, finance, and any audited setting.</li>
+      <li><strong>No retrain, lower cost and risk.</strong> No training pipeline, no catastrophic forgetting, no eval-the-whole-model after every doc change. You add, edit, and delete knowledge with ordinary CRUD.</li>
+    </ul>
+    <p>Fine-tuning still wins for <em>behavior</em>: a fixed output format, a house style, a narrow classification, or shaving latency and cost by teaching a small model one job. The senior answer is "RAG for knowledge, fine-tuning for form, and they compose." You will go deep on fine-tuning in Module 6.</p>
+  </div>
+
+  <table>
+    <tr><th>Question</th><th>Reach for</th></tr>
+    <tr><td>Facts change, or are private to us?</td><td><b>RAG</b> (knowledge in a store, not weights)</td></tr>
+    <tr><td>Need to cite the source of every claim?</td><td><b>RAG</b> (you keep the retrieved passage)</td></tr>
+    <tr><td>Want a fixed JSON shape or house tone always?</td><td><b>Fine-tuning</b> (behavior, not facts)</td></tr>
+    <tr><td>Cut cost by teaching a small model one task?</td><td><b>Fine-tuning</b> (Module 6)</td></tr>
+    <tr><td>Both fresh knowledge and a strict format?</td><td><b>Both</b> (fine-tune the form, retrieve the facts)</td></tr>
+  </table>
+
+  <h2>2 &middot; The six-stage pipeline</h2>
+  <div class="prose">
+    <p>Every RAG system, however fancy, is a refinement of these six stages. The crucial split: the first four run <strong>offline</strong> (once per document, ahead of time) and the last two run <strong>online</strong> (per user query, on the hot path). Confusing the two is a classic mistake; embedding your whole corpus on every request would be absurd.</p>
+  </div>
+
+  <div class="diagram">  ════════════ INGESTION  (OFFLINE · once per document) ════════════
+       raw sources                PDFs · web · Notion · DB rows · tickets
+            │
+       ① INGEST / PARSE          load + extract clean text (layout, tables)      ← Day 14 (parsing)
+            │
+       ② CHUNK                   split into retrievable units + overlap          ← Day 14
+            │
+       ③ EMBED                   each chunk → fixed-dim vector                    ← Day 15
+            │
+       ④ INDEX                   store vectors (+ text + metadata) in an ANN DB   ← Day 15 (pgvector)
+            │
+       ╰───────────────────────► [ VECTOR + KEYWORD STORE ]  ◄───────────────╮
+                                                                              │
+  ════════════ RETRIEVAL  (ONLINE · per user query) ════════════             │
+       user query                                                            │
+            │                                                                 │
+       ⑤ RETRIEVE   embed query · BM25 lexical · fuse · rerank · top-k  ──────╯
+            │           (Day 15 dense · Day 16 BM25 · Day 17 fusion · Day 18 rerank)
+            │
+       ⑥ GENERATE   stuff top-k chunks into the prompt → LLM → grounded, cited answer
+            │
+        answer + citations                                          (eval: Day 19-21)</div>
+
+  <div class="prose">
+    <p>Read the diagram as a contract. <strong>Ingestion</strong> builds the store; do it well once and the rest gets easy. <strong>Retrieval</strong> queries the store; do it badly and the best model in the world produces garbage because it never sees the right evidence. Generation is the last and usually <em>least</em> fragile step, a point we return to below.</p>
+  </div>
+
+  <h2>3 &middot; Where every later lesson plugs in</h2>
+  <div class="prose">
+    <p>This module is the pipeline, lesson by lesson. Keep this map; each later day is a deep dive into one stage:</p>
+    <ul>
+      <li><strong>Day 14 — Chunking &amp; parsing (stages ①②).</strong> The highest-leverage decision in the whole system. How you split documents largely sets the ceiling on quality.</li>
+      <li><strong>Day 15 — Embeddings &amp; vector search, pgvector (stages ③④).</strong> Turning chunks into vectors and finding nearest neighbors fast.</li>
+      <li><strong>Day 16 — BM25 &amp; lexical search (stage ⑤, lexical half).</strong> The classic keyword retriever that still beats dense models on exact matches.</li>
+      <li><strong>Day 17 — Hybrid search &amp; fusion (stage ⑤, fuse).</strong> Run BM25 and dense together and merge the rankings.</li>
+      <li><strong>Day 18 — Rerankers (stage ⑤, refine).</strong> A precision pass over the top candidates before they reach the model.</li>
+      <li><strong>Days 19 to 21 — Evaluation, query transforms, advanced RAG.</strong> Measuring retrieval and generation, rewriting queries, and patterns like GraphRAG and agentic RAG.</li>
+    </ul>
+    <p>Notice how much of the module lives inside stage ⑤. That is not an accident, and it leads to the most important rule in RAG.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Concept</span>
+    <p>RAG quality is dominated by <strong>retrieval</strong>, not generation. Across production systems, on the order of <strong>70 to 75 percent of wrong answers</strong> trace to retrieval: bad chunking, weak embeddings, no reranker, or the wrong top-k. The model can only be as good as the passages you hand it. "Garbage in, confident garbage out."</p>
+  </div>
+
+  <h2>4 &middot; Vanilla vs agentic vs hierarchical RAG</h2>
+  <div class="prose">
+    <p>"RAG" is a family, not one design. You will meet all three; know the difference and, more importantly, when each earns its complexity. Start vanilla, and add structure only when a measured failure demands it.</p>
+  </div>
+
+  <table>
+    <tr><th>Flavor</th><th>How it works</th><th>Use when</th></tr>
+    <tr><td><b>Vanilla</b><br><span class="muted">retrieve then generate</span></td><td>One fixed pass: embed query, retrieve top-k, generate. No loops, no decisions.</td><td>The default. Most questions are answerable from a single retrieval. Always start here.</td></tr>
+    <tr><td><b>Agentic</b><br><span class="muted">retrieval as a tool</span></td><td>The LLM <em>decides</em> whether and how to retrieve, crafts the query, can call retrieval multiple times, and reason across results (Module 4).</td><td>Multi-hop questions, ambiguous queries, or when the model should choose among several sources.</td></tr>
+    <tr><td><b>Hierarchical</b><br><span class="muted">multi-level structure</span></td><td>Index at multiple granularities (summaries over sections over chunks) or build a tree of summaries (RAPTOR-style) and route top-down.</td><td>Large corpora needing both global synthesis and local detail; "summarize across 200 docs."</td></tr>
+  </table>
+
+  <div class="prose">
+    <p>You will build vanilla first because it is debuggable and frequently good enough. Agentic and hierarchical RAG arrive in Day 21 and Module 4, once you can <em>measure</em> whether the extra moving parts actually helped. Complexity you cannot measure is complexity you cannot defend.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: trace one question through the pipeline</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>A support assistant over a product knowledge base. A user asks: <code>Does the Pro plan support SSO, and from which version?</code> Watch the two halves run.</p>
+  </div>
+  <div class="diagram">  OFFLINE (already done, last night's ingestion):
+    docs.pdf → parsed → chunked into ~400-token pieces with 50-token overlap
+    chunk #418 "...Single Sign-On (SSO) is available on Pro and Enterprise
+                plans starting in release 3.2..."  → embedded → stored (id, vec, text, {plan:pro})
+
+  ONLINE (this request):
+    ① embed the query → q-vector
+    ② dense search → chunk #418 (cos 0.83), #073 (0.79), #511 (0.74) ...
+       BM25 on "SSO" "Pro" "version" → also surfaces #418 strongly (exact tokens)
+    ③ fuse the two ranked lists (RRF) → #418 rises to rank 1
+    ④ rerank top 50 with a cross-encoder → #418 confirmed most relevant
+    ⑤ top-3 chunks → prompt → LLM
+    ⑥ answer: "Yes. SSO is supported on the Pro plan starting in release 3.2."
+              + citation → chunk #418</div>
+  <div class="prose">
+    <p>Two things to internalize. First, the answer is <strong>grounded</strong>: every claim came from a retrieved passage, so it is citable and checkable. Second, the model did almost nothing clever, the win was getting chunk #418 to the top. That is why the rest of this module obsesses over retrieval. If chunk #418 had been split across two chunks, or buried at rank 40, the model would have guessed, and "starting in release 3.2" is exactly the kind of specific detail it would hallucinate.</p>
+  </div>
+
+  <h2>Why this matters for you as an AI engineer</h2>
+  <div class="callout key">
+    <span class="label">Three consequences, derived not memorized</span>
+    <p><b>Knowledge belongs in a store, not weights</b> &larr; parametric memory is lossy and frozen, so you add, edit, and delete facts with CRUD and never retrain to update a policy.<br>
+    <b>Debug retrieval before generation</b> &larr; ~70 to 75 percent of bad answers are retrieval failures, so when an answer is wrong, first ask "did the right chunk get retrieved at all?"<br>
+    <b>Start vanilla, earn complexity</b> &larr; agentic and hierarchical RAG add latency, cost, and failure surface, so add them only when an evaluation shows vanilla falling short.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Say each answer out loud in full sentences, as if to an interviewer. Then open the solution and compare. The gap is your lesson.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>A product manager says: "Our docs change weekly. Let's just fine-tune the model on them every Friday so it always knows the latest." Give the two-sentence pushback and the better design.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Fine-tuning bakes facts into weights, so weekly retraining is slow, expensive, risks catastrophic forgetting, and still cannot cite which source a claim came from. RAG solves the same need by retrieving the current passage at query time: a doc change is a database upsert, not a training run, and every answer is grounded and citable. Senior add-on: "we can re-embed only the changed documents in seconds, and fine-tune separately, just for output format if we need it."</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>A RAG assistant gives a confidently wrong answer. You have a fixed budget to investigate one stage first. Which stage, and what is the single fastest check?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Investigate <strong>retrieval</strong> first, because roughly 70 to 75 percent of wrong RAG answers are retrieval failures, not generation failures. The fastest check is to log the chunks that were actually retrieved for that query and read them: if the passage that contains the correct answer is not in the retrieved set (or is buried below the top-k), the problem is upstream (chunking, embeddings, top-k, or no reranker), and no prompt tweak will fix it. Only if the correct passage <em>was</em> retrieved and the model still answered wrong do you move on to suspect generation or the prompt.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>Sort these four operations into offline vs online, and say why putting any one of them on the wrong side would hurt: (a) embedding the corpus, (b) embedding the user query, (c) building the ANN index, (d) reranking the top candidates.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p><strong>Offline:</strong> (a) embedding the corpus and (c) building the ANN index, both done once per document at ingestion. Doing them per request would re-encode and re-index the entire knowledge base on every query, which is wildly expensive and slow. <strong>Online:</strong> (b) embedding the user query and (d) reranking the top candidates, because the query is unknown until the user arrives and reranking operates on the candidates that query retrieved. The mental model: build the store offline, query the store online. The only embedding on the hot path is the single short query, everything heavy was precomputed.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's RAG &amp; Retrieval slice and common 2026 screens. Drill the one-line keys, then expand each into a 90-second answer with Claude using protocol prompt #2.</p>
+  <ul class="q-list">
+    <li>What is RAG and why use it instead of fine-tuning?
+      <div class="a">Key: retrieves context at query time; wins on dynamic knowledge, provenance/citations, no retrain. Fine-tune for form, not facts.</div></li>
+    <li>Walk through a vanilla RAG pipeline end to end.
+      <div class="a">Key: ingest &rarr; chunk &rarr; embed &rarr; index &rarr; retrieve &rarr; generate; first four offline, last two online.</div></li>
+    <li>What is the most common RAG failure mode?
+      <div class="a">Key: retrieval (~70 to 75 percent of bad answers): bad chunking, bad embeddings, no reranker, wrong top-k.</div></li>
+    <li>What is agentic RAG versus vanilla RAG?
+      <div class="a">Key: vanilla = fixed retrieve-then-generate; agentic = retrieval is a tool the agent decides to call, with crafted args, and can iterate.</div></li>
+    <li>Which RAG stages run offline and which run online, and why does it matter?
+      <div class="a">Key: ingest/chunk/embed/index offline (once per doc); retrieve/generate online (per query). Never re-embed the corpus per request.</div></li>
+    <li>When would you NOT use RAG?
+      <div class="a">Key: when the need is behavior/format/latency (use fine-tuning), or the knowledge already fits cheaply in context, or there is no external corpus to retrieve from.</div></li>
+    <li>How does RAG help with hallucination and auditability?
+      <div class="a">Key: grounds answers in retrieved passages you can cite; checkable provenance and an evaluable faithfulness signal, instead of opaque parametric recall.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (15&ndash;20 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Sketch the pipeline for a corpus you actually have (a folder of PDFs, your Notion export, a docs site). On paper or in a note, label each of the six stages with a concrete choice: which parser, what chunk size, which embedding model, which store, top-k, and whether you will rerank. Then read the LangChain <a href="https://python.langchain.com/docs/tutorials/rag/">RAG tutorial</a> and the <a href="https://github.com/pgvector/pgvector">pgvector</a> README and mark which library handles which stage. You now have a build plan, not just a diagram.</p>
+    <p class="muted" style="font-size:13.5px">Stretch: in the Claude web app, paste two short documents into the context and ask a question that requires combining both. That is RAG done by hand, you are the retriever. See <a href="../../tools.html">Tools &amp; Claude</a>.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>This is the exact architecture you ship on MaiQ: a <strong>FastAPI ingestion service</strong> that parses and chunks documents, embeds them, and writes into <strong>pgvector</strong> (the offline half), with <strong>hybrid retrieval</strong> combining BM25 and dense embeddings fused with RRF on the query path (the online half). When an interviewer asks you to "design a RAG system," do not recite the diagram, walk your own: "at MaiQ the ingestion service writes chunks into pgvector, and at query time we run BM25 and dense in parallel and fuse them, because retrieval is where quality is won or lost." Your <strong>11+ chunking experiments</strong> and the <strong>37 percent cost cut with only a 2 percent quality drop</strong> are the proof that you understand stage ②, save the numbers for the evaluation lessons.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>RAG injects retrieved context at query time so the model answers from evidence, not frozen memory, and it beats fine-tuning for knowledge on dynamic facts, citations, and cost. The pipeline is six stages: ingest, chunk, embed, index (offline) then retrieve, generate (online). Quality is dominated by retrieval, so roughly 70 to 75 percent of bad answers are retrieval failures and you debug there first. Start with vanilla RAG and add agentic or hierarchical structure only when an evaluation proves you need it. This map is the spine of the entire module.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d13">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: chunking, the highest-leverage decision in RAG, and why it sets your quality ceiling.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="../m02-prompting-context/d12-prompting-lab.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 12 &middot; Prompting lab</div></a>
+    <a data-nav="next" class="next" href="d14-chunking-strategies.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 14 &middot; Chunking strategies</div></a>
+  </div>
+
+  <div class="foot">Module 3 &middot; RAG &amp; Retrieval &middot; Day 13 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

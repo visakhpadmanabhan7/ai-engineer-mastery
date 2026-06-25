@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 27 · Planning &amp; decomposition</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 4 &middot; Agents &amp; Tool Use</span>
+    <span class="pill">Day 27</span>
+    <span class="pill">55 min</span>
+    <span class="diff" title="Difficulty: intermediate"><i class="on"></i><i class="on"></i><i></i></span>
+  </div>
+
+  <h1>Planning &amp; decomposition</h1>
+  <p class="lede">An agent is only as good as the plan it follows. Today you learn how to turn a fuzzy goal into executable sub-tasks, when an explicit planner beats a reactive loop, and how reflection makes an agent better only when a cheap, reliable error signal exists. You also learn the failure that quietly kills agents in production: planning where errors compound.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Decompose a goal into a dependency graph (DAG) of sub-tasks and explain what the edges mean.</li>
+      <li>Contrast planner-executor with reactive ReAct and say which one a given task wants.</li>
+      <li>State the one precondition under which a reflection or Reflexion loop actually helps.</li>
+      <li>Distinguish self-correction (fix a known error) from reflection (critique without a signal).</li>
+      <li>Recognize a loop-detection failure (the model repeats the same tool call) and fix it.</li>
+      <li>Decide when planning helps and when it hurts, by reasoning about error compounding.</li>
+    </ul>
+  </div>
+
+  <h2>1 &middot; Decomposition: a goal becomes a graph</h2>
+  <div class="prose">
+    <p>A task like "draft a competitor analysis for our pricing page" is not one action. It is a small set of sub-tasks with dependencies: gather competitor prices, gather our prices, compute the deltas, then write the summary. The write step cannot start until the three gather/compute steps are done, but the gather steps are independent of each other. That structure is a <strong>directed acyclic graph</strong> (DAG): nodes are sub-tasks, edges are "must finish before," and the absence of cycles is what lets you actually run it to completion.</p>
+    <p>Why bother making the graph explicit instead of letting the model "figure it out" turn by turn? Two reasons. First, <strong>parallelism</strong>: independent nodes can run at once, which a strictly sequential loop never exploits. Second, <strong>legibility</strong>: a plan you can print is a plan you can inspect, cache, partially re-run, and debug. The cost is rigidity, which is exactly the trade-off the rest of this lesson is about.</p>
+  </div>
+
+  <div class="diagram">  GOAL: "Competitor analysis for our pricing page"
+
+     ┌─ gather competitor prices ─┐
+     │                            │
+     ├─ gather our prices ────────┼──► compute deltas ──► write summary ──► ■
+     │                            │
+     └─ (independent, run in ─────┘
+         parallel)                    sequential: each needs the prior
+
+  nodes = sub-tasks   ·   edges = "must finish before"   ·   no cycles = it terminates</div>
+
+  <div class="callout concept">
+    <span class="label">Concept</span>
+    <p>Decomposition is turning a goal into a DAG of sub-tasks: nodes are units of work, edges are ordering constraints, and parallelizable nodes share no path. The acyclicity is not cosmetic. It is the guarantee that the plan has a finite execution.</p>
+  </div>
+
+  <h2>2 &middot; Planner-executor vs reactive ReAct</h2>
+  <div class="prose">
+    <p>You met the ReAct loop on Day 24: the model interleaves Thought, Action, and Observation, deciding the very next step each turn from what it just saw. It plans <em>implicitly</em> and incrementally. That is ideal when the path is short and unpredictable, because the model adapts to each observation and you never pay to plan steps you will not take.</p>
+    <p>A <strong>planner-executor</strong> splits the two jobs. A planner LLM emits the whole plan up front (often the DAG). An executor runs each node, frequently with no LLM call at all if the node is a deterministic tool. A re-planner (optional) inspects results and revises the remaining plan when reality diverges. This pays off when there are many steps, several of them parallel, and the structure is roughly knowable before you start. You spend one expensive planning call to unlock parallel execution and a stable, inspectable trajectory.</p>
+  </div>
+
+  <table>
+    <tr><th>Dimension</th><th>ReAct (reactive)</th><th>Planner-Executor</th></tr>
+    <tr><td>When the plan is decided</td><td>One step at a time, mid-loop</td><td>Up front, then revised</td></tr>
+    <tr><td>Best for</td><td>Few steps, unpredictable path</td><td>&gt;6 steps, many parallel, knowable</td></tr>
+    <tr><td>Parallelism</td><td>None (strictly serial)</td><td>Independent nodes run together</td></tr>
+    <tr><td>Adapts to surprises</td><td>Immediately, every turn</td><td>Only at re-plan points</td></tr>
+    <tr><td>Debuggability</td><td>Read the trace</td><td>Read the plan, then the trace</td></tr>
+  </table>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"ReAct plans implicitly, one step at a time, and wins when the path is short and unpredictable. Plan-Execute plans explicitly, emits a DAG up front, and wins when there are more than a handful of mostly-parallel steps you can foresee. The planner trades adaptivity for parallelism and inspectability." That answer maps cleanly onto the Notion bank's Plan-Execute question.</p>
+  </div>
+
+  <h2>3 &middot; Tree-of-thought, at a glance</h2>
+  <div class="prose">
+    <p>ReAct and a single plan both commit to one line of reasoning. <strong>Tree-of-thought</strong> generalizes this: at each step the model proposes several candidate next thoughts, scores them (self-evaluation or a heuristic), keeps the promising branches, and explores, more like search than a single chain. It can solve puzzles a linear chain fails on, because it can back out of a dead end.</p>
+    <p>The catch is cost. Exploring a tree multiplies LLM calls by the branching factor at every level, so it is reserved for hard reasoning problems where a wrong single chain reliably fails (constraint puzzles, some planning and math). For most production agent work it is overkill. Know it exists, know the shape, and reach for it only when a linear approach demonstrably cannot find the answer.</p>
+  </div>
+
+  <h2>4 &middot; Reflection and Reflexion: only with a cheap, reliable signal</h2>
+  <div class="prose">
+    <p>Reflection means the agent critiques its own output and tries again. <strong>Reflexion</strong> is the named pattern: act, observe an outcome, write a short verbal self-critique, store it in memory, and let that critique condition the next attempt. It sounds universally good. It is not.</p>
+    <p>The whole value of a reflection loop depends on the quality of the <strong>error signal</strong> the critique is built on. When the signal is cheap and reliable, reflection is a near-free accuracy boost: the agent gets told concretely what was wrong and fixes it. When the signal is just the model grading itself with no external ground truth, reflection often launders a wrong answer into a confidently wrong answer, and you have paid double the tokens for it.</p>
+  </div>
+
+  <div class="callout example">
+    <span class="label">Where the signal is cheap and reliable (reflect)</span>
+    <p>The agent's output is verifiable by something other than the model:</p>
+    <ul>
+      <li><strong>Code runs</strong>: execute it, feed the stack trace back, retry. The interpreter is ground truth.</li>
+      <li><strong>JSON parses</strong>: validate against a schema; a parse or validation error is a precise, free critique.</li>
+      <li><strong>SQL returns</strong>: run the query; an error or an empty/obviously-wrong result is a concrete signal.</li>
+      <li><strong>A test suite</strong>: pass/fail per case is the cleanest signal there is.</li>
+    </ul>
+    <p>In every case the feedback is external, deterministic, and nearly free. That is the precondition.</p>
+  </div>
+
+  <div class="callout warning">
+    <span class="label">Where reflection backfires</span>
+    <p>"Is this essay good?" "Is this strategy sound?" "Did I answer the user's intent?" with no rubric, no execution, and no external check. The model critiques itself from the same parametric beliefs that produced the answer, so it tends to either rubber-stamp or hallucinate a problem. Without a cheap reliable error signal, a reflection loop mostly adds latency and cost. Add a real check (a judge with a rubric, a schema, an executor) first, or skip the loop.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"Reflexion only pays off when there is a cheap, reliable error signal to reflect on, code that runs, JSON that parses, SQL that returns, a test that passes. Then it is self-correction and it works. Without an external signal, the model just grades itself and you get a confidently wrong answer for twice the tokens." Saying the precondition out loud is the senior move.</p>
+  </div>
+
+  <h2>5 &middot; Self-correction vs reflection</h2>
+  <div class="prose">
+    <p>The two terms get blurred, so separate them. <strong>Self-correction</strong> is the agent reacting to a <em>concrete, observed</em> error, a stack trace, a 422 validation response, a failing assertion, and producing a fix. It is tight, grounded, and high-value precisely because the error is real. <strong>Reflection</strong> is broader: the agent critiquing an output that may have nothing visibly wrong with it. Self-correction is reflection with a guaranteed signal; that is why it is the reliable half of the family.</p>
+    <p>Practically: build self-correction whenever your tools can fail loudly (validators, executors, type checks). Feed the error text straight back into the next turn so the model corrects against the real message rather than a guess about what might be wrong. You will implement exactly this in Module 4's lab.</p>
+  </div>
+
+  <h2>6 &middot; Loop detection: the model repeats the same tool call</h2>
+  <div class="prose">
+    <p>A very common agent failure: the model calls the same tool with the same (or nearly the same) arguments, gets the same unhelpful result, and calls it again, forever, until your max-steps cap fires. Understanding <em>why</em> tells you how to fix it.</p>
+    <p><strong>Why it happens.</strong> The tool returned something the model cannot use (an empty result, an error it does not know how to act on, a result that does not advance the goal), but nothing in the context tells the model "you already tried this and it did not work." Each turn looks fresh to a stateless predictor, so it makes the same locally-plausible choice again. It is a missing-memory problem, not a stupidity problem.</p>
+  </div>
+
+  <div class="diagram">  turn 1:  search("Q3 revenue")  → []           (empty)
+  turn 2:  search("Q3 revenue")  → []           (same call, same empty result)
+  turn 3:  search("Q3 revenue")  → []           ... loop until max_steps ■
+
+  FIX: (1) detect the repeat   (2) surface it to the model   (3) cap as a backstop</div>
+
+  <div class="prose">
+    <p><strong>How to fix it.</strong> Three complementary moves:</p>
+    <ul>
+      <li><strong>Detect the repeat.</strong> Hash each (tool name, arguments) call. If the same hash appears N times in a row (often 2 to 3), you have a loop.</li>
+      <li><strong>Surface it to the model.</strong> Inject an observation like "You already called <code>search('Q3 revenue')</code> twice and it returned nothing. Try a different query or a different tool." Now the context carries the memory the model lacked, and it can break out.</li>
+      <li><strong>Cap as a backstop.</strong> A hard <code>max_steps</code> (and a per-tool call limit) guarantees termination even if detection misses an edge case. The cap is a safety net, not the primary fix.</li>
+    </ul>
+    <p>Note how this connects to the previous lesson: loop detection is a short-term-memory feature. The repeated calls are invisible to the model precisely because nothing summarized "we are stuck."</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: when planning helps, and when it hurts</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p><b>Task A (planning helps).</b> "Build a slide deck section comparing our four products on price, latency, and support tier." The structure is fully knowable: for each of 4 products, look up 3 attributes (12 independent lookups), then assemble one summary. A planner emits a 12-node parallel layer plus one assembly node. Twelve lookups run together, the deck section is assembled once. Few decision points, many parallel steps, knowable shape: a textbook planner win.</p>
+    <p><b>Task B (planning hurts).</b> "Debug why this user's checkout failed." You cannot plan step 5 until you see the result of step 1, because step 1's log might send you to the payment provider, the inventory service, or the user's own bad input. A rigid up-front plan would be wrong by step 2, and a re-planner firing every step is just ReAct with extra overhead. Here a reactive loop is correct: decide each next step from the last observation.</p>
+  </div>
+
+  <h2>Why planning can hurt: errors compound</h2>
+  <div class="callout key">
+    <span class="label">The compounding-error argument, derived not memorized</span>
+    <p>A plan with k steps that each succeed with probability p succeeds end to end with probability roughly p<sup>k</sup>. At p = 0.95 and k = 10 that is about 60%; at k = 20 it is about 36%. Long autonomous plans are multiplicatively fragile, because one early wrong sub-task poisons everything downstream and the agent keeps marching. So planning helps when steps are reliable and largely independent (a failure is local), and hurts when steps are interdependent and error-prone (a failure cascades). The senior instinct: keep plans short, make each step verifiable, and re-plan or fall back to a reactive loop the moment reality diverges from the plan.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Say each answer out loud in full sentences, as if to an interviewer. Then open the solution and compare. The gap is your lesson.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>A teammate wraps every agent output in a Reflexion loop ("critique your answer, then improve it") and reports that quality went <em>down</em> on a customer-support summarizer. The same loop clearly helped on a code-generation agent. Explain the difference and what you would change for the summarizer.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Reflection only helps when there is a cheap, reliable external error signal to critique against. The code agent has one: the code runs (or does not), so the critique is grounded in a real stack trace or failing test and the retry is a true self-correction. The summarizer has none: "is this summary good?" is the model grading itself from the same beliefs that wrote it, so the loop mostly rubber-stamps or invents a problem and burns double the tokens. The fix is to give the summarizer a real signal before reflecting: an LLM-as-judge with an explicit rubric (faithfulness to source, coverage of key points), a check that the summary only contains claims present in the source, or simply drop the loop. Add the check, then reflect on the check's verdict, not on the model's vibe.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>Your agent intermittently spins: it calls <code>get_order(id=null)</code> three times in a row, then hits the step cap and fails. Walk through why this happens and design a fix that does more than just raise the cap.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>It is a loop, caused by missing memory plus a bad argument. The tool returns an error for <code>id=null</code>, but nothing in the context tells the model "you already tried this and it failed," so each turn it makes the same locally-plausible call again. Raising the cap just delays the failure. The real fix is three layered moves: (1) <em>detect</em> the repeat by hashing (tool name, args) and flagging when the same hash recurs 2 to 3 times; (2) <em>surface</em> it by injecting an observation such as "<code>get_order</code> with id=null has failed twice; the id is missing, ask the user or look it up first," so the context now carries the memory the model lacked and it can correct the bad argument; (3) keep the <code>max_steps</code> cap as a backstop so termination is still guaranteed if detection misses. Note the root cause is the null id, a self-correctable error if the failure message is fed back, which is a cleaner fix than fighting the loop.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>A PM wants to "make the agent smarter" by having it generate a full 15-step plan for every request before acting. Most requests are 2 to 3 steps and unpredictable. Argue for or against, using the compounding-error idea, and propose a default.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Argue against as the default. For 2 to 3 step, unpredictable requests, an up-front 15-step plan is wrong by step 2 because later steps depend on results you have not seen yet, and you pay an expensive planning call to produce a plan you will mostly discard. The compounding-error point makes it worse: a long plan succeeds end to end only at roughly p<sup>k</sup>, so a 15-step plan of even 95%-reliable steps lands near 46%, and an early mistake cascades through every downstream step while the agent keeps marching. The right default is a reactive ReAct loop for these short, unpredictable tasks, and reserve explicit planning for the minority of requests with many mostly-parallel, knowable steps. If you want a single policy, use ReAct by default and escalate to a planner only when the task is detected to have greater than ~6 foreseeable, largely independent steps.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's Agents slice and common 2026 screens. Drill the one-line keys, then expand each into a 90-second answer with Claude.</p>
+  <ul class="q-list">
+    <li>Plan-Execute vs ReAct &mdash; when does Plan-Execute win?
+      <div class="a">Key: &gt;6 mostly-parallel steps knowable upfront; planner emits a DAG, executor runs, re-planner inspects and revises.</div></li>
+    <li>What is the ReAct loop and why is it still the single-agent default?
+      <div class="a">Key: interleaves Thought &rarr; Action &rarr; Observation; simple, debuggable from the trace, good for a handful of tool calls and unpredictable paths.</div></li>
+    <li>When does reflection (Reflexion) actually help an agent?
+      <div class="a">Key: only with a cheap, reliable error signal, code runs, JSON parses, SQL returns, a test passes; otherwise the model just grades itself.</div></li>
+    <li>An agent keeps repeating the same tool call. Why, and how do you fix it?
+      <div class="a">Key: missing memory, the result was unusable and nothing said "already tried"; detect repeats by hashing (tool,args), surface it back, cap max_steps as a backstop.</div></li>
+    <li>When does explicit planning hurt rather than help?
+      <div class="a">Key: interdependent, error-prone, unpredictable steps; errors compound (~p^k), a rigid plan is wrong early; prefer a reactive loop and re-plan on divergence.</div></li>
+    <li>Self-correction vs reflection &mdash; what is the difference?
+      <div class="a">Key: self-correction reacts to a concrete observed error (stack trace, 422, failing test); reflection critiques without a guaranteed signal. Self-correction is the reliable half.</div></li>
+    <li>What is tree-of-thought and when is it worth the cost?
+      <div class="a">Key: branch and score multiple candidate thoughts, search rather than a single chain; reserved for hard reasoning where a linear chain reliably fails, expensive otherwise.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (15&ndash;25 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Write a tiny self-correcting loop with the Claude API and a JSON schema. Ask the model to produce a JSON object matching a Pydantic model with a couple of required fields and an enum. Validate the output; on a <code>ValidationError</code>, feed the exact error string back into the next turn as a message ("Your output failed validation: &lt;error&gt;. Fix it and return only valid JSON.") and retry, capping at 3 attempts. Log each attempt. You have now built self-correction against a cheap, reliable signal (the validator), the exact precondition from section 4. Then deliberately break it: remove the validation step and instead ask the model to "reflect on whether the JSON is good" with no schema, and watch the loop add cost without adding correctness. See the <a href="https://docs.claude.com/en/docs/build-with-claude/tool-use/overview">tool use docs</a> and <a href="https://langchain-ai.github.io/langgraph/">LangGraph docs</a> for stateful loop patterns.</p>
+    <p class="muted" style="font-size:13.5px">Stretch: add loop detection. Hash each retry's output; if two consecutive attempts are byte-identical, stop early and report "model is stuck" instead of burning the remaining retries.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>The reflection-needs-a-signal principle is exactly the discipline behind your evaluation work at MaiQ. Your LLM-as-judge framework exists because "the output looks fine" is not a signal you can act on; you built a measurable check so that improvements were grounded in something real rather than the model's self-assessment. When an interviewer asks about agent planning or self-correction, you can say: "I do not let an agent reflect on a vibe. I give it a cheap, reliable signal first, a validator, an executor, or a judge with a rubric, the same way I made retrieval changes measurable before trusting them." That ties this lesson straight to your 11+ experiments and the habit of measuring before believing, without rehearsing the metrics.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>Decomposition turns a goal into a DAG: nodes are sub-tasks, edges are ordering constraints. ReAct plans implicitly and wins on short, unpredictable paths; a planner-executor plans explicitly and wins on many knowable, parallel steps. Reflection helps only when a cheap, reliable error signal exists (code runs, JSON parses, SQL returns), otherwise it launders confident wrongness. Loop detection is a memory fix: detect repeated (tool, args), surface it, and cap as a backstop. And planning hurts whenever errors compound, so keep plans short, verifiable, and ready to fall back to a reactive loop.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d27">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: agents are non-deterministic, so you build the five-layer defense that lets you ship them anyway.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d26-agent-memory.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 26 &middot; Agent memory</div></a>
+    <a data-nav="next" class="next" href="d28-agent-reliability.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 28 &middot; Reliability &amp; guardrails</div></a>
+  </div>
+
+  <div class="foot">Module 4 &middot; Agents &amp; Tool Use &middot; Day 27 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

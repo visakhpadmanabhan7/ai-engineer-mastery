@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 42 · Inference economics</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 7 &middot; LLMOps &amp; Serving</span>
+    <span class="pill">Day 42</span>
+    <span class="pill">50 min</span>
+    <span class="diff" title="Difficulty: intermediate"><i class="on"></i><i class="on"></i><i></i></span>
+  </div>
+
+  <h1>Inference economics</h1>
+  <p class="lede">Every LLM feature has a unit cost and a latency profile that you can estimate on a napkin before you write a line of code. Senior engineers price a feature in their head; today you learn the model that lets you do it.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Explain why input (prefill) tokens are cheap and parallel while output (decode) tokens are expensive and serial.</li>
+      <li>Separate the two latency numbers that matter: time-to-first-token and tokens-per-second.</li>
+      <li>Read a per-million-token price sheet and reason about the input/output asymmetry.</li>
+      <li>Show how context length and output length each push cost, in different ways.</li>
+      <li>Build a back-of-envelope cost estimate for a feature before building it.</li>
+    </ul>
+  </div>
+
+  <h2>1 &middot; Two phases, two cost structures</h2>
+  <div class="prose">
+    <p>From Day 1 you know generation is a serial loop. The economic consequence is that an inference request splits into two phases with completely different behavior:</p>
+    <ul>
+      <li><strong>Prefill</strong> processes the entire prompt in one parallel forward pass. Every input token is consumed at once, so prefill is compute-bound and fast per token. This is why you can stuff a long document into context without the latency exploding linearly.</li>
+      <li><strong>Decode</strong> generates output one token at a time, each token requiring its own forward pass that cannot start until the previous token exists. Decode is memory-bandwidth-bound and serial, so it dominates both latency and, on most price sheets, cost.</li>
+    </ul>
+    <p>That asymmetry is the single most important fact in inference economics. Input is wide and cheap; output is tall and expensive.</p>
+  </div>
+
+  <div class="diagram">  PREFILL  (input tokens)              DECODE  (output tokens)
+  ─────────────────────────            ─────────────────────────
+  prompt = 4000 tokens                 generate 1 token … append
+       │                                    │ generate next … append
+  one parallel forward pass                 │ generate next … append
+       │  (all 4000 at once)                ▼ … until stop / max_tokens
+       ▼                               N output tokens = N serial passes
+  ≈ fast, compute-bound                ≈ slow, bandwidth-bound, serial
+
+  cost lever: how LONG is the prompt   cost lever: how MANY tokens you emit
+  latency lever: time-to-first-token   latency lever: tokens-per-second</div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"Inference has two phases. Prefill consumes the prompt in one parallel pass, so input tokens are cheap and add mostly to time-to-first-token. Decode emits output serially, one forward pass per token, so output tokens are expensive and set your tokens-per-second. That is why output is typically priced two to three times higher than input, and why trimming output length is usually the bigger cost win."</p>
+  </div>
+
+  <h2>2 &middot; The two latency numbers that matter</h2>
+  <div class="prose">
+    <p>"Latency" is not one number. For any streaming LLM feature you track two, and they trade off against different things:</p>
+    <ul>
+      <li><strong>Time-to-first-token (TTFT)</strong>: how long from sending the request to the first token appearing. Dominated by prefill, so it grows with prompt length (and with queueing). This is what a user feels as "is it stuck?"</li>
+      <li><strong>Tokens-per-second (TPS)</strong>, sometimes called inter-token latency: how fast tokens stream once started. Set by the decode loop and the model size. This is what a user feels as "is it typing fast enough to read along?"</li>
+    </ul>
+    <p>Total wall-clock for a response is roughly <code>TTFT + (output_tokens / TPS)</code>. A long prompt hurts TTFT; a long answer hurts the second term. A common product mistake is optimizing model speed (TPS) when the real pain is a 6000-token prompt blowing up TTFT, which prompt caching (Day 44) fixes far more cheaply.</p>
+  </div>
+
+  <h2>3 &middot; Reading a price sheet</h2>
+  <div class="prose">
+    <p>Frontier-class model pricing is quoted per million tokens, split into input and output. A representative shape for a frontier-class model is on the order of <strong>~$5 per 1M input tokens</strong> and <strong>~$15 per 1M output tokens</strong>. Treat those as a rough mental anchor, not a live quote: always check the provider's current page, and note that smaller or distilled models can be 10x to 50x cheaper, which is exactly what makes model routing (Day 47) such a strong lever.</p>
+    <p>Three structural facts to internalize from any price sheet:</p>
+    <ul>
+      <li><strong>Output costs more than input</strong>, usually 2x to 4x per token. So one verbose answer can outweigh a long prompt.</li>
+      <li><strong>You pay for the whole prompt on every call.</strong> A 5000-token system prompt resent on 1M requests is 5B input tokens whether or not the content changed. This is the case prompt caching attacks.</li>
+      <li><strong>Cheaper tiers exist for a reason.</strong> Most production traffic does not need the top model. Routing easy turns to a small model is the highest-leverage cost move that does not touch quality on the hard turns.</li>
+    </ul>
+  </div>
+
+  <h2>4 &middot; What actually drives the bill</h2>
+  <div class="prose">
+    <p>Cost per request is, to first order:</p>
+  </div>
+  <div class="diagram">  cost  ≈  (input_tokens  × price_in   per token)
+        +  (output_tokens × price_out  per token)
+
+  input_tokens   = system prompt + few-shot + retrieved chunks + history + user msg
+  output_tokens  = length of the answer (and any tool-call JSON, and reasoning)</div>
+  <div class="prose">
+    <p>Notice where the input tokens come from: a RAG feature's input is dominated by <em>retrieved chunks</em>, so top-k and chunk size are cost knobs, not just quality knobs (Module 3). A multi-turn agent's input grows every turn because history accumulates, so context pruning is a cost control. And anything that makes the model "think" longer, verbose CoT, oversized JSON schemas, raises output tokens.</p>
+    <p>The four honest levers, in rough order of bang-for-effort: (1) send fewer input tokens (caching, shorter context, smaller top-k), (2) emit fewer output tokens (ask for concise answers, cap <code>max_tokens</code>), (3) route to a cheaper model when the turn is easy, (4) avoid redundant calls (semantic cache, parallelize instead of chaining). You will build all four in the Day 47 lab.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: price a support assistant</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>You are sizing a RAG support assistant before building it. One request looks like:</p>
+    <ul>
+      <li>System prompt + format instructions: <strong>800</strong> input tokens</li>
+      <li>5 retrieved chunks at ~400 tokens each: <strong>2000</strong> input tokens</li>
+      <li>User question: <strong>200</strong> input tokens</li>
+      <li>Answer with citations: <strong>500</strong> output tokens</li>
+    </ul>
+    <p>So <strong>3000 input</strong> and <strong>500 output</strong> tokens per request. At ~$5 / 1M in and ~$15 / 1M out:</p>
+  </div>
+  <div class="diagram">  input cost   = 3000  / 1e6 × $5   = $0.015
+  output cost  =  500  / 1e6 × $15  = $0.0075
+  ─────────────────────────────────────────────
+  per request  ≈ $0.0225        (~2.25 cents)
+
+  at 10,000 requests/day → ~$225/day → ~$6,750/month
+
+  now apply prompt caching to the 800-token system prefix (~10% billed)
+  + drop top-k 5→3 (chunks 2000→1200):
+  input ≈ 80 (cached prefix) + 1200 + 200 = 1480 tokens
+  input cost ≈ $0.0074  →  per request ≈ $0.015  →  ~$4,500/month
+  ~33% lower, same answer quality if recall holds.  ← your real-world move</div>
+  <div class="prose">
+    <p>Two senior habits show up here. First, you priced the feature in two minutes before committing engineering time. Second, the cheapest win was on the input side (caching the static prefix and trimming top-k), not on the model, which is the usual shape: input is where the easy money is, even though output is pricier per token.</p>
+  </div>
+
+  <h2>Why this matters for you as an AI engineer</h2>
+  <div class="callout key">
+    <span class="label">The cost lens changes design</span>
+    <p>Once you can estimate cost on a napkin, architecture decisions stop being guesses. "Should we add a reranker?" becomes "what does it cost per request and what recall does it buy?" "Should we summarize history?" becomes "history is N tokens of input on every turn, so yes past turn ~8." Cost and latency are not an afterthought you tune at the end; they are inputs to the design, on the same footing as accuracy.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Say each answer out loud in full sentences, as if to an interviewer. Then open the solution and compare. The gap is your lesson.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>A teammate proposes cutting cost by switching to a model with 30% faster tokens-per-second. Your bottleneck is a 7000-token prompt and short 200-token answers. Why is their proposal aimed at the wrong number, and what would you do instead?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Faster TPS speeds up the decode loop, but with only 200 output tokens the decode term is already small. The pain is the 7000-token prompt, which inflates both input cost and TTFT (prefill). The right moves target input: prompt-cache the static portion of those 7000 tokens so most of it is billed at a fraction and prefilled from cache, and trim what is sent (lower top-k, drop dead boilerplate). That attacks the actual dominant term. TPS optimization helps long answers, not long prompts.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>Estimate the monthly cost of a feature that sends 1500 input tokens and produces 800 output tokens per call, at 50,000 calls/day, using ~$5/1M in and ~$15/1M out. Then say which single change you would test first to cut it.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Per call: input = 1500/1e6 × $5 = $0.0075; output = 800/1e6 × $15 = $0.012; total ≈ $0.0195. At 50,000/day that is ~$975/day, ~$29,000/month. The output term ($0.012) is larger than the input term here, so the first thing to test is reducing output: cap <code>max_tokens</code>, ask for concise answers, and strip oversized JSON. After that, route the easy turns to a cheaper model. (If much of the 1500 input is a fixed system prompt, caching it is a free second win.)</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>Two features cost the same per month. Feature A is 8000 input / 100 output per call; Feature B is 300 input / 4000 output per call. Without changing the model, where does each feature's cheapest optimization live, and why are they different?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Feature A is input-dominated (8000 tokens in, tiny answer), so its cheap win is on the input side: prompt caching the stable prefix and trimming retrieved or boilerplate context. Feature B is output-dominated (4000 tokens out), so caching the tiny prompt barely helps; its win is shortening the output (concise formatting, lower <code>max_tokens</code>, or splitting into a cheaper first pass). Same bill, opposite levers, because the input/output asymmetry means you always attack whichever phase dominates that particular feature.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's LLMOps slice and common 2026 screens. Drill the one-line keys, then expand each into a 90-second answer with Claude using protocol prompt #2.</p>
+  <ul class="q-list">
+    <li>Why are input tokens cheaper than output tokens?
+      <div class="a">Key: input is prefilled in one parallel pass (compute-bound, fast/token); output is decoded serially, one forward pass per token (bandwidth-bound), so it is priced 2-4x higher.</div></li>
+    <li>What is time-to-first-token vs tokens-per-second, and what drives each?
+      <div class="a">Key: TTFT = prefill latency, grows with prompt length + queueing; TPS = decode speed, set by model size; total ≈ TTFT + output/TPS.</div></li>
+    <li>Roughly price a frontier-class model per million tokens.
+      <div class="a">Key: order of ~$5/1M input and ~$15/1M output; smaller models 10-50x cheaper; always check the live sheet.</div></li>
+    <li>How do context length and output length affect cost differently?
+      <div class="a">Key: context drives input tokens (cheaper/token but paid every call); output length drives the pricier output term; attack whichever dominates.</div></li>
+    <li>How would you cut an LLM feature's cost ~30% without changing the answer?
+      <div class="a">Key: prompt-cache the static prefix, trim top-k/context, cap output length, route easy turns to a smaller model.</div></li>
+    <li>How do you build a back-of-envelope cost estimate before building a feature?
+      <div class="a">Key: count input tokens (system + few-shot + chunks + history) and output tokens, multiply by per-token in/out prices, scale by daily volume.</div></li>
+    <li>Why can a long prompt hurt latency even when the answer is short?
+      <div class="a">Key: prefill of the prompt sets TTFT, so a 7000-token prompt delays the first token regardless of how few output tokens follow.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (15&ndash;20 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Pick a real feature idea (or your own RAG assistant). Write a tiny estimator in Python: a function <code>estimate(input_tokens, output_tokens, calls_per_day, price_in=5, price_out=15)</code> that returns per-call cost and projected monthly cost. Then call it three ways: the naive version, the version with prompt caching on a fixed system prefix (model the cached portion at ~10% of its input price), and the version with top-k dropped from 5 to 3. Compare the three monthly numbers. To anchor your token counts, paste a representative prompt into Anthropic's <a href="https://docs.claude.com/en/docs/build-with-claude/token-counting">token counting</a> endpoint or use the messages count-tokens API so your input estimate is real, not guessed.</p>
+    <p class="muted" style="font-size:13.5px">No API access yet? Estimate token counts with the rule of thumb ~4 characters per token for English, then refine later. See <a href="../../tools.html">Tools &amp; Claude</a> for setup.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>Your 37% inference-cost reduction on MaiQ is exactly this lens applied with rigor. The 11+ retrieval and chunking experiments were not just about quality; each one moved input tokens (chunk size, top-k) and you measured cost against a 2% retrieval-quality drop with the LLM-as-judge framework. In an interview, frame it as "I treated cost as a first-class metric next to retrieval quality, estimated the levers up front, then ran controlled experiments to find the point where cost dropped 37% before quality slipped past 2%." That is the difference between guessing and engineering the bill.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>Inference splits into cheap parallel prefill (input) and expensive serial decode (output), and that asymmetry explains the whole price sheet. Track two latencies, not one: TTFT for prefill, TPS for decode. You can price any feature on a napkin by counting input and output tokens and multiplying by per-token rates, then scaling by volume. The cheapest wins are usually on the input side (caching, trimming context), even though output is pricier per token. Cost is a design input, not a cleanup task.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d42">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: self-hosting vs API, and the inference-optimization ladder that makes serving fast.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="../m06-finetuning/d41-finetuning-lab.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 41 &middot; Fine-tuning lab</div></a>
+    <a data-nav="next" class="next" href="d43-serving-scaling.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 43 &middot; Serving &amp; scaling</div></a>
+  </div>
+
+  <div class="foot">Module 7 &middot; LLMOps &amp; Serving &middot; Day 42 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

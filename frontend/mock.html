@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mock Interview — AI Engineer Mastery</title>
+<link rel="stylesheet" href="assets/base.css">
+<link rel="stylesheet" href="assets/app.css">
+</head>
+<body>
+<div class="wrap" id="app">
+  <div class="muted-center" id="loading"><span class="spinner"></span> Loading…</div>
+</div>
+
+<script src="assets/api.js"></script>
+<script>
+if (!requireAuth()) { /* redirected to login */ }
+renderNav("mock");
+
+let session_id = null;
+let streaming = false;
+let currentModuleId = null;
+
+async function load() {
+  let curriculum, status;
+  try {
+    [curriculum, status] = await Promise.all([getCurriculum(), tutorStatus()]);
+  } catch (e) {
+    document.getElementById("loading").innerHTML = "Could not load: " + escapeHtml(e.message);
+    return;
+  }
+
+  const options = ['<option value="">Any topic</option>']
+    .concat(
+      curriculum.map(
+        (m) =>
+          `<option value="${m.id}">Module ${m.number} — ${escapeHtml(m.title)}</option>`
+      )
+    )
+    .join("");
+
+  const app = document.getElementById("app");
+  app.innerHTML = `
+    <div class="hero" style="padding:30px 0 6px">
+      <div class="eyebrow">Practice room</div>
+      <h1 style="font-size:2rem">Mock Interview</h1>
+      <p class="lede">One question at a time, escalating, scored at the end.</p>
+    </div>
+
+    ${status.ai_enabled ? "" : `
+      <div class="ai-off">
+        The AI tutor is not configured right now. You can still start a session, and the
+        interviewer will reply with guidance on how to enable it.
+      </div>`}
+
+    <div id="setup" class="panel" style="max-width:680px">
+      <p class="muted" style="margin-top:0">
+        Pick a focus area, then begin. The interviewer asks one question at a time and
+        raises the difficulty as you go. When you are ready to be assessed, choose
+        <b>Score me</b> for a per-dimension scorecard.
+      </p>
+      <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:center">
+        <select id="focus" style="flex:1; min-width:240px; padding:11px 13px; border-radius:10px;
+          border:1px solid var(--border-2); background:var(--bg-soft); color:var(--text);
+          font-family:var(--sans); font-size:15px">${options}</select>
+        <button id="startBtn" class="btn primary">Start mock interview</button>
+      </div>
+    </div>
+
+    <div id="room" style="display:none">
+      <div class="chat-log" id="log"></div>
+      <div class="composer">
+        <textarea id="answer" placeholder="Type your answer, then press Enter to send (Shift+Enter for a new line)…"></textarea>
+        <div style="display:flex; flex-direction:column; gap:10px">
+          <button id="sendBtn" class="btn primary">Send</button>
+          <button id="scoreBtn" class="btn">Score me</button>
+        </div>
+      </div>
+    </div>`;
+
+  document.getElementById("startBtn").addEventListener("click", startInterview);
+}
+
+function appendMsg(role, who) {
+  const log = document.getElementById("log");
+  const div = document.createElement("div");
+  div.className = "msg " + role;
+  div.innerHTML = `<div class="who">${escapeHtml(who)}</div>`;
+  const body = document.createElement("span");
+  div.appendChild(body);
+  log.appendChild(div);
+  div.scrollIntoView({ behavior: "smooth", block: "end" });
+  return body;
+}
+
+function setBusy(busy) {
+  streaming = busy;
+  const send = document.getElementById("sendBtn");
+  const score = document.getElementById("scoreBtn");
+  const answer = document.getElementById("answer");
+  if (send) send.disabled = busy;
+  if (score) score.disabled = busy;
+  if (send) send.textContent = busy ? "…" : "Send";
+  if (!busy && answer) answer.focus();
+}
+
+// Stream one mock-interview turn into a fresh interviewer bubble.
+async function streamTurn(message) {
+  if (streaming) return;
+  setBusy(true);
+  const body = appendMsg("assistant", "Interviewer");
+  let buf = "";
+  try {
+    session_id = await tutorStream(
+      { kind: "mock", message, session_id, module_id: currentModuleId },
+      (chunk) => {
+        buf += chunk;
+        body.textContent = buf;
+        body.closest(".msg").scrollIntoView({ block: "end" });
+      }
+    );
+    if (!buf) body.textContent = "(no response)";
+  } catch (e) {
+    body.textContent = "Could not reach the interviewer: " + e.message;
+    toast(e.message);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function startInterview() {
+  const sel = document.getElementById("focus");
+  currentModuleId = sel.value ? Number(sel.value) : null;
+
+  document.getElementById("setup").style.display = "none";
+  document.getElementById("room").style.display = "block";
+
+  document.getElementById("sendBtn").addEventListener("click", sendAnswer);
+  document.getElementById("scoreBtn").addEventListener("click", scoreMe);
+  const answer = document.getElementById("answer");
+  answer.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      sendAnswer();
+    }
+  });
+
+  await streamTurn("Start the mock interview now. Ask me your first question.");
+}
+
+async function sendAnswer() {
+  if (streaming) return;
+  const answer = document.getElementById("answer");
+  const text = answer.value.trim();
+  if (!text) return;
+  appendMsg("user", "You").textContent = text;
+  answer.value = "";
+  await streamTurn(text);
+}
+
+async function scoreMe() {
+  if (streaming) return;
+  appendMsg("user", "You").textContent = "Score me";
+  await streamTurn("score me");
+}
+
+load();
+</script>
+</body>
+</html>

@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 19 · Query transformation</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 3 &middot; RAG &amp; Retrieval</span>
+    <span class="pill">Day 19</span>
+    <span class="pill">50 min</span>
+    <span class="diff" title="Difficulty: intermediate"><i class="on"></i><i class="on"></i><i></i></span>
+  </div>
+
+  <h1>Query transformation</h1>
+  <p class="lede">So far you improved retrieval by improving the index and the ranking. Today you improve the thing you actually search <em>with</em>: the query. A raw user question is often a bad search query, and rewriting it before retrieval, sometimes into several queries, is one of the cheapest ways to rescue multi-hop and ambiguous asks.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Explain why the user's literal question is frequently the wrong retrieval query.</li>
+      <li>Apply decomposition, step-back prompting, HyDE, and multi-query expansion, and say when each fits.</li>
+      <li>Name when query transformation <em>hurts</em> (precise, well-specified queries) and avoid it there.</li>
+      <li>See agentic RAG as the generalization: retrieval becomes a tool the model calls and iterates.</li>
+      <li>Describe CRAG and self-RAG as the self-correcting end of the spectrum.</li>
+    </ul>
+  </div>
+
+  <h2>1 &middot; The query is not the question</h2>
+  <div class="prose">
+    <p>Embedding-based retrieval matches the <em>query vector</em> against chunk vectors. But a user's question is written for a human, not for your index. It carries conversational framing ("hey, quick one, so for the new plan..."), pronouns that depend on chat history ("does <em>it</em> still apply to <em>them</em>?"), multiple sub-questions fused into one sentence, or a vocabulary that simply does not match how the answer is phrased in your docs. The fix is a small, cheap LLM call <em>before</em> retrieval that transforms the question into one or more queries optimized for the retriever.</p>
+    <p>Every technique below is a variation on that idea: change the query so the vectors land where the answer lives. They differ in <em>how</em> they change it, and therefore in which failure they fix.</p>
+  </div>
+
+  <div class="diagram">  user question
+        │
+        ▼
+  ┌──────────────────────────┐
+  │  query transformation     │   small LLM call(s), pre-retrieval
+  │  (rewrite / decompose /   │
+  │   step-back / HyDE)       │
+  └────────────┬─────────────┘
+        one or more transformed queries
+               │
+               ▼
+        retrieve (hybrid + rerank)  →  merge/dedupe  →  generate</div>
+
+  <h2>2 &middot; Decomposition: split a multi-hop question</h2>
+  <div class="prose">
+    <p>Some questions require facts that live in <em>different</em> chunks, and no single chunk answers the whole thing. "Which of our enterprise plans launched after the SSO feature, and what is their webhook retry limit?" is two hops: first find when SSO launched, then find plans launched after that, then look up their retry limits. A single embedding of the whole sentence is a muddled average that retrieves neither hop cleanly.</p>
+    <p><strong>Decomposition</strong> asks an LLM to break the question into atomic sub-questions, retrieves for each, and gives the generator the union of the results. It is the right tool whenever the answer is an <em>and</em> of facts from separate places.</p>
+  </div>
+
+  <pre><code><span class="tok-c"># Decompose, retrieve per sub-question, then answer over the union.</span>
+sub_qs = llm(<span class="tok-s">"Break this into independent sub-questions, one per line:\n"</span> + question)
+chunks = []
+<span class="tok-k">for</span> q <span class="tok-k">in</span> sub_qs.splitlines():
+    chunks += retrieve(q, k=<span class="tok-n">5</span>)            <span class="tok-c"># hybrid + rerank from earlier days</span>
+chunks = dedupe(chunks)
+answer = llm(<span class="tok-s">"Answer using only these chunks:\n"</span> + format(chunks) + question)</code></pre>
+
+  <h2>3 &middot; Step-back: ask the broader question first</h2>
+  <div class="prose">
+    <p>Sometimes the user's question is too <em>specific</em> to retrieve well. "Does the v3.2.1 webhook drop the <code>amount_cents</code> field on refund events specifically?" may not match any chunk verbatim, but a broader query, "how does the v3 webhook payload handle amount fields," will land on the changelog that contains the answer. <strong>Step-back prompting</strong> generates a more general version of the question, retrieves on that, and lets the generator zoom back in. It is the inverse of decomposition: instead of splitting into narrower pieces, you abstract upward to a query that actually has matching documents.</p>
+  </div>
+
+  <h2>4 &middot; HyDE: search with a hypothetical answer</h2>
+  <div class="prose">
+    <p>Here is the asymmetry HyDE exploits: a <em>question</em> and its <em>answer passage</em> often look very different in embedding space (a question is short and interrogative; a doc passage is declarative and detailed), so question-to-chunk similarity can be weak. <strong>HyDE (Hypothetical Document Embeddings)</strong> sidesteps this. Ask the LLM to <em>write a plausible answer</em> to the question, hallucinations and all, then embed <em>that</em> and retrieve with it. You are no longer matching a question against documents; you are matching a document-shaped thing against documents, which is what embeddings are better at.</p>
+  </div>
+
+  <div class="diagram">  classic:   embed("how do I rotate an API key?")  ──►  search
+                  short, interrogative, weak match to doc prose
+
+  HyDE:      llm → "To rotate an API key, open Settings → API,
+                    click Rotate, the old key stays valid for 24h…"
+             embed(that hypothetical answer)         ──►  search
+                  doc-shaped, lands near the real doc, even if
+                  the made-up specifics are wrong</div>
+
+  <div class="prose">
+    <p>The made-up "24h" might be wrong, that does not matter, because you never show the hypothetical to the user. It exists only to produce a better <em>search vector</em>. The real, retrieved chunk is what grounds the final answer. HyDE shines on jargon-light or vaguely-worded questions where the user's phrasing does not match the corpus; it can mislead when the LLM's hypothetical drifts into a topic the corpus does not cover.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"Query transformation rewrites the question before retrieval so the search vector lands where the answer lives. Decomposition splits multi-hop asks into atomic sub-queries, step-back abstracts an over-specific question into one with matching documents, and HyDE generates a hypothetical answer and embeds <em>that</em> to close the question-versus-passage gap. They help on ambiguous and multi-hop queries and can hurt precise, well-specified ones, so they are conditional, not default."</p>
+  </div>
+
+  <h2>5 &middot; Multi-query expansion</h2>
+  <div class="prose">
+    <p>A single phrasing can miss the chunk that phrases the same idea differently. <strong>Multi-query expansion</strong> asks the LLM to generate several paraphrases of the question, retrieves for all of them in parallel, and fuses the results (RRF from Day 17 is the natural merge). It widens recall by covering more of the ways the answer might be worded, at the cost of more retrieval calls and a real risk of pulling in off-topic chunks if the paraphrases drift. Use it when recall is the bottleneck and vocabulary mismatch is the suspected cause.</p>
+  </div>
+
+  <table>
+    <tr><th>Technique</th><th>Fixes</th><th>Cost / risk</th></tr>
+    <tr><td><b>Decomposition</b></td><td>Multi-hop questions needing facts from separate chunks.</td><td>N retrievals + a merge; over-splitting simple questions.</td></tr>
+    <tr><td><b>Step-back</b></td><td>Over-specific queries with no verbatim match.</td><td>One extra call; can retrieve too broadly, dilute precision.</td></tr>
+    <tr><td><b>HyDE</b></td><td>Question-vs-passage embedding gap; vague phrasing.</td><td>One generation; hypothetical can drift off-corpus.</td></tr>
+    <tr><td><b>Multi-query</b></td><td>Vocabulary mismatch, single-phrasing misses.</td><td>N retrievals + fusion; paraphrase drift adds noise.</td></tr>
+  </table>
+
+  <h2>6 &middot; When transformation hurts</h2>
+  <div class="prose">
+    <p>None of this is free, and worse, it is not always helpful. For a <strong>precise, well-specified query</strong>, "what is the rate limit for the <code>/v3/charges</code> endpoint", the literal question is already the perfect search string. HyDE can hallucinate a number that drags retrieval toward the wrong section; multi-query can paraphrase the exact endpoint name into something that no longer matches; decomposition splits a single-hop question into clumsy fragments. Every transformation also adds an LLM call before retrieval, raising latency and cost.</p>
+    <p>So the rule is: transform when the question is ambiguous, multi-hop, vaguely worded, or vocabulary-mismatched with the corpus, and pass the query through untouched when it is already specific and well-formed. The decision itself can be a cheap classifier (or a heuristic on query length and structure), and that "decide whether and how to transform" idea is the bridge to the next section.</p>
+  </div>
+
+  <h2>7 &middot; Agentic RAG: the generalization</h2>
+  <div class="prose">
+    <p>Notice what every technique above shares: a small reasoning step decides how to query. Push that idea to its conclusion and retrieval stops being a fixed pre-step and becomes a <strong>tool the model chooses to call</strong>, with arguments it crafts, possibly several times, until it has what it needs. That is <strong>agentic RAG</strong>. Vanilla RAG is a straight line, retrieve then generate. Agentic RAG is a loop: the model reads the question, decides whether to search and with what query, inspects what came back, and either answers or searches again with a refined query.</p>
+  </div>
+
+  <div class="diagram">  VANILLA RAG (fixed)            AGENTIC RAG (the model drives the loop)
+
+  query → retrieve → generate    query ─► [LLM] ─► need info?
+                                              │  yes → call retrieve(crafted query)
+                                              │         observe results
+                                              │         enough? ─ no ─┐
+                                              │                       │ refine query
+                                              │  no  ◄────────────────┘
+                                              ▼
+                                           answer (grounded)</div>
+
+  <div class="prose">
+    <p>Decomposition, step-back, HyDE, and multi-query all become <em>behaviors the agent can choose</em> rather than a pipeline you hard-wire: it can decompose a hard question, retry a failed search with a broader query, or decide retrieval was not needed at all. The cost is the cost of agents (latency, non-determinism, the need for tracing and evaluation), which is exactly what Module 4 is about. For now, hold the framing: query transformation is the static, dev-chosen version of a decision an agent can make dynamically.</p>
+  </div>
+
+  <h2>8 &middot; CRAG and self-RAG: grade and self-correct</h2>
+  <div class="prose">
+    <p>One more rung up: what if the system <em>checks its own retrieval</em> and corrects course? Two named patterns:</p>
+    <ul>
+      <li><strong>CRAG (Corrective RAG)</strong> adds a lightweight <em>grader</em> that scores each retrieved chunk's relevance. Confident hits go straight to generation; clearly irrelevant chunks are dropped; and if retrieval looks weak overall, it <em>falls back</em>, typically a web or broader search, rather than answering from junk. The point is to never feed the generator irrelevant context, because grounded generation on bad chunks produces confident, wrong, well-cited answers.</li>
+      <li><strong>Self-RAG</strong> trains the model to interleave special tokens that decide <em>whether</em> to retrieve, then <em>critique</em> whether each retrieved passage supports the answer and whether the answer is actually grounded in it. Retrieval and self-assessment become part of generation itself.</li>
+    </ul>
+    <p>You will rarely implement self-RAG from scratch, but its idea, <em>grade the chunks, drop the irrelevant, fall back when retrieval fails</em>, is a pattern you can add to any pipeline with one extra grading call, and it connects directly to Module 5's evaluation work: a grader is just an inline, per-request faithfulness check.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: route one question through the right transform</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>Question: <code>For customers who upgraded to Enterprise after we shipped SSO, is the webhook retry limit different from the Pro plan?</code></p>
+    <p>A cheap classifier flags this as multi-hop, so the system <strong>decomposes</strong> it.</p>
+  </div>
+  <div class="diagram">  decomposed →  (1) "When was SSO shipped?"
+                (2) "Which plans are Enterprise tier?"
+                (3) "Webhook retry limit on Enterprise plan"
+                (4) "Webhook retry limit on Pro plan"
+
+  retrieve each (hybrid + rerank) → dedupe → generate over the union
+       sub-q (3) phrasing missed → step-back fallback:
+       "how does webhook retry work across plans?" → lands the comparison table
+  answer: grounded in the retry-limit table chunk + the SSO ship-date chunk</div>
+  <div class="prose">
+    <p>No single embedding of the original sentence would have cleanly retrieved both the SSO ship date and the per-plan retry table, they live in different chunks. Decomposition fetched each fact; when sub-question 3's literal phrasing missed, a step-back to the broader "retry across plans" query recovered the comparison table. Contrast this with "what is the Pro plan's webhook retry limit", a single-hop, specific question where you would skip all of it and retrieve the raw query directly. The skill is matching the transform to the question, not applying transforms reflexively.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Say each answer out loud in full sentences, as if to an interviewer. Then open the solution and compare. The gap is your lesson.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>HyDE retrieves using a hypothetical answer the LLM made up, which might contain false facts. Why is that not a grounding/hallucination risk, and where could HyDE genuinely go wrong?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>The hypothetical document is never shown to the user and never enters the final answer, it is used only as a search vector, so its made-up specifics cannot leak into the response; the actual retrieved chunk is what grounds generation. HyDE's real failure is retrieval drift: if the hypothetical answer wanders into a topic or framing the corpus does not contain, its embedding pulls retrieval toward the wrong region and you fetch confidently-irrelevant chunks. It helps most on vague or jargon-light questions where the user's phrasing does not match the docs, and least when the question is already precise or the corpus is narrow.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>Your team enables multi-query expansion globally and average answer quality <em>drops</em> on a chunk of queries even though recall went up. What is happening, and how do you make the technique pay off?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Applying multi-query to <em>every</em> query hurts the precise, well-specified ones: paraphrasing an exact endpoint name or identifier produces variants that match the wrong chunks, so you inject off-topic context and the generator's quality falls even as raw recall rises. The fix is to make transformation conditional: gate it behind a cheap classifier or heuristic that detects ambiguous or vocabulary-mismatched questions, and pass specific, well-formed queries through untouched. Fusing the multi-query results with RRF and then reranking also limits the damage by demoting chunks that only one drifted paraphrase surfaced.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>Sketch how you would turn a fixed "decompose-then-retrieve" pipeline into an agentic-RAG version, and name what you give up by doing so.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Expose retrieval as a tool the model can call with a crafted query, and let the model run a loop: read the question, decide whether and how to query (it can decompose, broaden via step-back, or skip retrieval), inspect the returned chunks, and either answer or call retrieve again with a refined query, optionally adding a CRAG-style grader that drops irrelevant chunks and triggers a fallback search. What you give up is the predictability of the fixed pipeline: you inherit non-determinism, higher and more variable latency from multiple LLM-plus-retrieval round trips, and the need for tracing and trajectory evaluation to know the agent actually queried sensibly, which is exactly the Module 4 and Module 5 cost. The upside is handling messy, multi-hop, or unexpected questions a static pipeline cannot.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's RAG &amp; Retrieval slice and common 2026 screens. Drill the one-line keys, then expand each into a 90-second answer with Claude using protocol prompt #2.</p>
+  <ul class="q-list">
+    <li>What is query rewriting / HyDE / multi-query, and when do they help?
+      <div class="a">Key: transform the query before retrieval (decomposition, step-back, HyDE, multi-query); help ambiguous/multi-hop/vocab-mismatch, can hurt precise queries.</div></li>
+    <li>Explain HyDE and why it works despite using a hallucinated document.
+      <div class="a">Key: embed a hypothetical answer (doc-shaped) instead of the question to close the question-vs-passage gap; the made-up text is only a search vector, never shown.</div></li>
+    <li>When does step-back prompting beat the literal query?
+      <div class="a">Key: when the question is too specific to match any chunk; abstract to a broader query that has matching documents, then zoom back in at generation.</div></li>
+    <li>Why decompose a question, and what does it cost?
+      <div class="a">Key: multi-hop answers need facts from separate chunks a single embedding muddles; split into atomic sub-queries, retrieve each, merge; costs N retrievals and can over-split.</div></li>
+    <li>When does query transformation hurt?
+      <div class="a">Key: on precise, well-specified queries the literal question is already optimal; transforms add latency and can drift retrieval off-target, so gate them.</div></li>
+    <li>What is agentic RAG versus vanilla RAG?
+      <div class="a">Key: vanilla = fixed retrieve-then-generate; agentic = retrieval is a tool the agent decides to call with crafted args and can iterate on.</div></li>
+    <li>What is CRAG, and what problem does it solve?
+      <div class="a">Key: grade retrieved chunks, drop irrelevant ones, and fall back (e.g. web search) when retrieval is weak, so the generator never answers from junk.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (15&ndash;20 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Pick one multi-hop question over a few docs you have. With the Claude API (or Claude Code), prompt the model to (a) decompose it into sub-questions and (b) write a HyDE-style hypothetical answer. Compare what each would retrieve against your raw question, even informally by reading which chunks the keywords point at. Then read LangChain's <a href="https://python.langchain.com/docs/how_to/MultiQueryRetriever/">MultiQueryRetriever</a> and the <a href="https://python.langchain.com/docs/concepts/retrieval/">retrieval concepts</a> page to see decomposition, multi-query, and HyDE implemented as composable retrievers.</p>
+    <p class="muted" style="font-size:13.5px">Stretch: add a one-line "is this query specific or ambiguous?" classifier call and only transform the ambiguous ones, you have just built a tiny query router.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>MaiQ already retrieves with hybrid search over pgvector, so query transformation is the natural next lever, and the Skill Store you shipped, where users author and run their own agents in chat, is agentic RAG in the wild: an agent that decides when to call a tool, with what arguments, and iterates. That gives you a credible answer to "how do you go beyond vanilla RAG": you have seen retrieval as a fixed pipeline <em>and</em> as a tool an agent calls. Your JURIX 2024 thesis is another honest hook here, hybrid legal retrieval over the Japanese Civil Code combined knowledge graphs with Sentence-BERT, which is exactly the world where decomposing multi-hop legal questions and abstracting over-specific ones matters. Tie it together in interviews: static transforms are the dev-chosen version of a decision your agentic work lets the model make dynamically.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>The user's literal question is often a poor search query, so transform it first: decomposition for multi-hop, step-back for over-specific, HyDE to close the question-versus-passage gap, multi-query for vocabulary mismatch. Every transform costs an LLM call and can hurt precise queries, so gate them, do not apply reflexively. Agentic RAG is the generalization: retrieval becomes a tool the model chooses, crafts arguments for, and iterates on, and CRAG/self-RAG add a grading step that drops irrelevant chunks and falls back when retrieval fails. Match the technique to the question; that judgment is the senior signal.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d19">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: stop guessing and start measuring, golden sets, recall@k, and how to prove a retrieval change is better.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d18-rerankers.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 18 &middot; Rerankers &amp; two-stage retrieval</div></a>
+    <a data-nav="next" class="next" href="d20-evaluating-retrieval.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 20 &middot; Evaluating retrieval</div></a>
+  </div>
+
+  <div class="foot">Module 3 &middot; RAG &amp; Retrieval &middot; Day 19 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

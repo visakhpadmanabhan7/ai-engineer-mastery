@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 64 · Your project stories (STAR)</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 11 &middot; Interview Mastery</span>
+    <span class="pill">Day 64</span>
+    <span class="pill">55 min</span>
+    <span class="diff" title="Difficulty: intermediate"><i class="on"></i><i class="on"></i><i></i></span>
+  </div>
+
+  <h1>Your project stories (STAR)</h1>
+  <p class="lede">You have spent sixty-three days learning the material. The behavioral round does not test the material; it tests whether you can tell the story of <em>doing</em> the material so a stranger believes you did it. Today you build that story machine.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>State the four STAR parts and the proportion each should occupy in a 90-second answer.</li>
+      <li>Name the five stories every AI engineer should have rehearsed and ready.</li>
+      <li>Turn a vague "I worked on RAG" answer into an Action-heavy, quantified, learning-ended story.</li>
+      <li>Spot and fix the five anti-patterns that make a good engineer sound junior.</li>
+      <li>Draft your own versions from real work, not memorized scripts.</li>
+    </ul>
+  </div>
+
+  <h2>1 &middot; STAR, with the right proportions</h2>
+  <div class="prose">
+    <p>STAR is <strong>Situation, Task, Action, Result</strong>. Everyone knows the acronym; almost nobody gets the <em>proportions</em> right, and the proportions are the whole game. Most candidates spend ninety seconds setting the scene and ten seconds on what they actually did. That is exactly backwards. The interviewer is not grading your project; they are grading your judgment, and judgment lives in the Action.</p>
+    <p>Here is the budget that strong candidates hit, almost without thinking:</p>
+  </div>
+
+  <div class="diagram">  a 90-second answer, by time spent
+  ┌──────────────────────────────────────────────────────────────┐
+  │ SITUATION + TASK   ~25%   "Here is the context and my goal"   │  ≈ 20s
+  │   set the stage fast; just enough that Action makes sense     │
+  ├──────────────────────────────────────────────────────────────┤
+  │ ACTION             50-60%  "Here is what *I* decided and did" │  ≈ 50s
+  │   THE SIGNAL. decisions, trade-offs ruled out, how you        │
+  │   measured, what you owned. "I", not "we".                    │
+  ├──────────────────────────────────────────────────────────────┤
+  │ RESULT             15-25%  "Here is the measured outcome"     │  ≈ 20s
+  │   a number if you have one, + one sentence of learning        │
+  └──────────────────────────────────────────────────────────────┘</div>
+
+  <div class="prose">
+    <p>Two rules turn this from a diagram into a habit. First, <strong>the Action is where you say "I"</strong>. A team shipped the feature, fine, but the interviewer hired one person and needs to know what <em>that</em> person contributed. Second, <strong>every Action should name at least one road not taken</strong>. "I chose hybrid retrieval over pure dense because exact-match terms like product codes were getting missed" shows judgment in a way that "I built hybrid retrieval" never will. The trade-off you ruled out is more informative than the thing you built.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"STAR, but Action-heavy: I keep Situation and Task to about a quarter, spend more than half on the decisions I made and the alternative I ruled out, and close with a measured result and what I learned." Say that and the interviewer knows you have done this before, because the structure itself is a credential.</p>
+  </div>
+
+  <h2>2 &middot; The five must-have stories</h2>
+  <div class="prose">
+    <p>You do not improvise behavioral answers; you map the question to a story you already own. Five stories cover the overwhelming majority of behavioral prompts. Prepare these, and almost any question becomes "which of my five fits best."</p>
+  </div>
+
+  <table>
+    <tr><th>Story</th><th>What it proves</th><th>Triggered by questions like</th></tr>
+    <tr><td><b>Shipped to production</b></td><td>You finish things and they reach real users.</td><td>"Tell me about something you shipped." "Most impactful project?"</td></tr>
+    <tr><td><b>Failure with a learning</b></td><td>You are honest, and you turn mistakes into systems.</td><td>"A time something broke." "Your biggest failure?"</td></tr>
+    <tr><td><b>Conflict / disagreement</b></td><td>You can disagree without being difficult.</td><td>"Disagreed with a teammate / manager." "Pushed back on a decision."</td></tr>
+    <tr><td><b>Ambiguous decision</b></td><td>You make calls with incomplete information.</td><td>"No clear right answer." "Had to decide without data."</td></tr>
+    <tr><td><b>Project you led / owned</b></td><td>You can drive, not just execute tickets.</td><td>"Drove something end to end." "Took ownership of."</td></tr>
+  </table>
+
+  <div class="prose">
+    <p>Notice that a single rich project can supply more than one of these. Your retrieval-cost work is both a <em>shipped-to-production</em> story and, if you frame the early dead ends, an <em>ambiguous-decision</em> story. The Skill Store is a <em>project-you-led</em> story. A retrieval bug you chased is your <em>failure-with-a-learning</em> story. The skill is not having five separate projects; it is being able to <em>angle</em> the projects you have toward each prompt.</p>
+  </div>
+
+  <h2>3 &middot; Worked example: weak vs strong</h2>
+  <div class="prose">
+    <p>The same true facts can land as junior or senior depending only on structure. Watch the transformation. The prompt: <em>"Tell me about an AI system you shipped."</em></p>
+  </div>
+
+  <div class="callout warning">
+    <span class="label">Weak version</span>
+    <p>"So we built a RAG system at work for a product-management tool. We used LangChain and pgvector and did some chunking experiments to make it cheaper. We tried different chunk sizes and embeddings. It worked pretty well and we reduced costs. It was a good project and I learned a lot about RAG."</p>
+  </div>
+
+  <div class="prose">
+    <p>What is wrong: it is all "we," there is no decision, no alternative ruled out, the one number ("reduced costs") is vague, and "I learned a lot about RAG" is a non-learning. An interviewer hears a participant, not an owner. Now the same project, restructured to the proportions:</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Strong version (STAR, Action-heavy)</span>
+    <p><b>[Situation/Task ~20s]</b> "At MaindTec I am a core developer on MaiQ, an AI product-management tool. Our retrieval pipeline was accurate but expensive, and as usage grew, inference cost became the thing that would limit the feature. My task was to cut that cost without users feeling a quality drop.<br><br>
+    <b>[Action ~50s]</b> "Rather than guess, I built an LLM-as-judge evaluation harness first, so every change was measured against a fixed quality bar instead of vibes. Then I ran more than eleven retrieval and chunking experiments, sweeping chunk size, overlap, and embedding choices, and I scored each on both retrieval quality and cost. The judgment call was where to stop: I could have chased the absolute cheapest configuration, but a couple of them tanked recall on exact-match terms, so I ruled those out and held the quality floor as the hard constraint. I kept hybrid retrieval, BM25 fused with dense, specifically because pure dense was missing precise terms.<br><br>
+    <b>[Result ~20s]</b> "The configuration I shipped cut inference cost by thirty-seven percent for only a two-percent drop in retrieval quality, which was under our floor. The bigger win was the harness itself: it turned 'is this better' from an argument into a measurement, and we have used it for every retrieval change since."</p>
+  </div>
+
+  <div class="prose">
+    <p>Same project, same facts, no exaggeration. The difference is entirely structure: a fast setup, an Action full of decisions and one ruled-out path, an exact number, and a learning that is a <em>system</em> ("measurement over argument"), not a platitude. That is the move you are drilling today.</p>
+  </div>
+
+  <h2>4 &middot; Two more of your stories, drafted</h2>
+  <div class="prose">
+    <p>You will write your own final versions in Practice, but here are two more skeletons grounded in your real work, so you can see how the same machine produces a <em>project-led</em> story and a <em>debugging / failure</em> story.</p>
+  </div>
+
+  <h3>The project-you-led story: the Skill Store</h3>
+  <div class="callout example">
+    <span class="label">Skeleton &mdash; ownership / drove end to end</span>
+    <p><b>S/T:</b> "Agent-building inside MaiQ was something only engineers could do. The opportunity was to let end users build their own agents, but the open question was how to expose that power without making people learn a framework.<br>
+    <b>A:</b> "I shipped the Skill Store, where anyone can author, share, and run their own agents directly in chat through conversational skill authoring. The design decision I owned was the authoring surface: a chat-native flow rather than a code or config interface, because the users are product managers, not engineers. I had to scope what a skill could safely do and how it was invoked, and decide what to keep simple in v1 versus defer.<br>
+    <b>R:</b> "It extended agent-building from a handful of engineers to every user of the product, which is a different leverage class entirely. What I took from it: the hardest part of an agent platform is rarely the model, it is the surface you give non-engineers to safely express intent."</p>
+  </div>
+
+  <h3>The retrieval-debugging story: when answers went wrong</h3>
+  <div class="callout example">
+    <span class="label">Skeleton &mdash; failure / debugging with a learning</span>
+    <p><b>S/T:</b> "We had answers coming back confident but wrong on a class of queries. The instinct on the team was to blame the model and reach for a bigger one. My task was to find the actual cause before we spent money on the wrong fix.<br>
+    <b>A:</b> "I split the pipeline into retrieval versus generation and tested them separately, because a wrong answer can come from either. Using the eval set, I found the model was being handed the wrong passages, so it was a <em>retrieval</em> problem, not a generation one. The fix lived in chunking and in the fusion of BM25 with dense retrieval, not in swapping the LLM. The decision I am proud of is resisting the bigger-model reflex until the data said where the fault was.<br>
+    <b>R:</b> "The fix was cheaper and more durable than a model upgrade would have been, and the lasting lesson is that in RAG, roughly seventy percent of bad answers are retrieval failures wearing a generation costume, so you isolate before you upgrade."</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"In RAG, the first diagnostic question is always retrieval or generation, because the fix and the cost are completely different. I isolate the two before changing anything." That single sentence signals more seniority than naming five frameworks.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>The five anti-patterns to delete</h2>
+  <div class="callout warning">
+    <span class="label">If your draft does any of these, it reads junior</span>
+    <p><b>1. The "we" wall.</b> If "we" outnumbers "I" in the Action, the interviewer cannot tell what you did. Reclaim your contribution.<br>
+    <b>2. No metric.</b> "It worked well" is not a result. Reach for a real number (37%, 2%, eleven experiments) or, if you genuinely have none, a concrete before/after.<br>
+    <b>3. The hero narrative.</b> Flawless-genius stories read as either dishonest or as someone who does not learn. A small, honest stumble makes you <em>more</em> credible.<br>
+    <b>4. No trade-off.</b> If nothing was given up, no decision was made. Always name the road not taken.<br>
+    <b>5. No learning.</b> End on a transferable lesson that is a system or principle, not "I learned a lot." A learning the listener could reuse is the senior tell.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Write your answers out, then say them out loud and time them. Ninety seconds is the target. Then open the solution and compare structure, not wording.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>Take this junior answer and rewrite it to the STAR proportions, adding a ruled-out alternative and a learning: <em>"We migrated our vector search to pgvector and it was faster and we were happy with it."</em></p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>A strong rewrite keeps Situation tiny ("our vectors lived apart from our relational data, so every query did two round trips and joins were painful"), spends the Action on the decision ("I chose pgvector specifically so vectors sat next to the relational rows in Postgres, accepting that it tops out around ten million vectors, which was well within our scale, instead of reaching for a dedicated vector DB we would have to operate separately"), names the ruled-out path (the standalone managed vector store), and ends on a number plus a lesson ("fewer moving parts; the lesson was to match the store to the data's gravity, not to the most powerful option"). The grader is checking that you moved from "we were happy" to a decision with a constraint and an alternative.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>The question is "Tell me about a time you disagreed with a teammate." You do not have a dramatic conflict story. How do you construct a credible <em>conflict</em> story from ordinary engineering work without fabricating drama?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Conflict does not mean a fight; it means a defensible disagreement resolved well. A clean source is a technical decision: the "just use a bigger model" reflex versus your "isolate retrieval first" position from the debugging story. Frame it as: a teammate wanted to upgrade the model to fix wrong answers; you believed it was a retrieval fault and proposed measuring before spending. Action: you did not just assert it, you ran the split test on the eval set so the disagreement was settled by data, not by who was louder. Result: the data showed retrieval, the cheaper fix won, and the relationship was fine because the resolution was evidence, not ego. The senior signal is that you turned a disagreement into an experiment.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>Your "failure" story is the retrieval-debugging one. An interviewer pushes: "But you fixed it, so what actually <em>failed</em>?" How do you answer so it stays a genuine failure story and not a humblebrag?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Locate the real failure honestly: the system was shipping confidently wrong answers to users for a window before anyone caught it, and the reason it was not caught sooner is that the original eval set did not cover that query class. That is a true gap you owned, not a disguised win. The learning that makes it land: you did not just fix the chunking, you closed the loop by mining production traces into the golden set so that <em>class</em> of failure could not silently recur. A failure story is strong when the lasting fix is to the <em>process</em> that let the failure hide, not only to the immediate bug.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's Interview Mastery slice. Drill the one-line keys, then expand each into a 90-second STAR answer with Claude using protocol prompt #2.</p>
+  <ul class="q-list">
+    <li>Tell me about an AI system you shipped &mdash; what broke first?
+      <div class="a">Key: STAR, Action-heavy (50-60%); name a trade-off you ruled out, quantify the result, end with a learning.</div></li>
+    <li>What are the right STAR proportions, and which five stories should you have ready?
+      <div class="a">Key: Situation/Task ~25%, Action 50-60%, Result 15-25%; have shipped-to-prod, failure-with-learning, conflict, ambiguous-decision, project-led.</div></li>
+    <li>Describe a hard reliability trade-off you made (latency, cost, or quality).
+      <div class="a">Key: a real decision (rerank depth vs latency, model routing, chunk config vs recall), what you measured, what you gave up.</div></li>
+    <li>Tell me about a time a model underperformed in production.
+      <div class="a">Key: follow the data, isolate retrieval vs generation, eval-driven fix, a measured result, a process learning.</div></li>
+    <li>Tell me about a project you led end to end.
+      <div class="a">Key: the ownership story (Skill Store); the decision you owned, what you scoped out of v1, the leverage it created.</div></li>
+    <li>What is your biggest professional failure?
+      <div class="a">Key: a genuine gap you owned (not a humblebrag); the lasting fix is to the process that let it hide, not just the bug.</div></li>
+    <li>Tell me about a time you disagreed with a teammate or manager.
+      <div class="a">Key: a defensible technical disagreement resolved by evidence (run the experiment), relationship intact because data settled it.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (20&ndash;25 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Open a Claude chat and paste this: <em>"You are an interview coach. I will give you a STAR story draft. Grade it on (1) proportions: did Situation/Task stay under ~25% and Action exceed 50%? (2) did I say 'I' or hide behind 'we'? (3) is there a ruled-out alternative? (4) is the result a real number? (5) does it end on a transferable learning? Score each out of 2 and give me the single highest-leverage fix."</em> Then paste your own version of the <strong>shipped-to-production</strong> story (your retrieval-cost work) and iterate until you score 9 or 10. Do the same for one more of the five. Save the final two in a notes file; these are now drilled assets.</p>
+    <p class="muted" style="font-size:13.5px">Anthropic <a href="https://docs.claude.com/en/docs/build-with-claude/overview">API / Workbench docs</a> if you want to script this. The point is reps: a story you have said out loud ten times sounds effortless in the room.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec stories</span>
+    <p>You are unusually well-supplied here, which is your edge. The 11+ chunking experiments that cut inference cost 37% for a 2% retrieval drop is a textbook shipped-and-measured story, and the LLM-as-judge harness behind it is the "measurement over argument" learning that ends it. The Skill Store, where users author and run their own agents in chat, is your project-led / ownership story and a rare agent-platform credential. Your hybrid-retrieval debugging (isolating retrieval from generation, BM25 fused with dense) is your failure-and-fix story. Three of the five stories come straight from MaiQ. Write them once to the proportions above, rehearse them out loud, and you walk into any behavioral round already holding most of the answers.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>STAR is won or lost on proportions: a quarter of context, more than half on your decisions, a quarter on the measured outcome. The Action is where you say "I" and name the road not taken, because a ruled-out trade-off proves judgment better than the thing you built. Five stories cover almost every prompt, and one strong project can supply several of them. Delete the five anti-patterns (the "we" wall, no metric, hero narrative, no trade-off, no learning) and your real work does the rest. Now write yours.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d64">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: rapid-fire drills across every module, built for spaced repetition.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="../m10-genai-system-design/d63-genai-sd-lab.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 63 &middot; GenAI system-design lab</div></a>
+    <a data-nav="next" class="next" href="d65-question-bank-drills.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 65 &middot; Rapid-fire question-bank drills</div></a>
+  </div>
+
+  <div class="foot">Module 11 &middot; Interview Mastery &middot; Day 64 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

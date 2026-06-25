@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 2 · Tokenization &amp; embeddings</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 1 &middot; LLM Foundations</span>
+    <span class="pill">Day 2</span>
+    <span class="pill">50 min</span>
+    <span class="diff" title="Difficulty: foundational"><i class="on"></i><i></i><i></i></span>
+  </div>
+
+  <h1>Tokenization &amp; embeddings</h1>
+  <p class="lede">The model does not see your text. It sees integers, then vectors. Today you learn the two translation steps that bracket every LLM call, why they quietly govern cost and quality, and why the same geometry powers retrieval later.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Explain what a tokenizer is and why models operate on subword tokens, not words or characters.</li>
+      <li>Reason about token economics: why context and price are billed in tokens, and budget accordingly.</li>
+      <li>Predict which tasks break because of tokenization (spelling, digit math, rare words).</li>
+      <li>Define an embedding as a learned vector and separate token embeddings from sentence embeddings.</li>
+      <li>Use cosine similarity to compare meanings, and connect that geometry forward to retrieval.</li>
+    </ul>
+  </div>
+
+  <h2>The two translations around every call</h2>
+  <div class="prose">
+    <p>Yesterday you saw the Transformer eat a sequence and emit a distribution. We skipped the very first and very last steps. They matter more than they look. Every call does this round trip: your text is <strong>tokenized</strong> into integer IDs, each ID is turned into a <strong>vector</strong> the network can compute on, the model does its work, and on the way out the final vector is projected back onto the vocabulary to pick the next token. The model lives entirely in the world of integers and vectors. The string is just the boundary.</p>
+    <p>Two concepts cover the whole round trip. <strong>Tokenization</strong> is the lossless, deterministic text-to-integer map. <strong>Embedding</strong> is the learned, meaningful integer-to-vector map. Confuse them at your peril: a tokenizer is a fixed dictionary, an embedding is a trained lookup table where geometry encodes meaning.</p>
+  </div>
+
+  <h2>1 &middot; What a tokenizer actually is</h2>
+  <div class="prose">
+    <p>A tokenizer holds a fixed <strong>vocabulary</strong>, a list of perhaps 50,000 to 200,000 known pieces, and a rule for splitting any input string into a sequence of those pieces. The pieces are <em>subwords</em>, not words and not characters. Common words become a single token (<code> the</code>, <code> France</code>); rarer words fragment into several (<code>token</code> + <code>ization</code>); truly novel strings fall back to bytes. Note the leading space: most tokenizers fold the preceding space into the token, so <code> cat</code> and <code>cat</code> are different IDs.</p>
+    <p>The dominant family is <strong>Byte-Pair Encoding (BPE)</strong>, often in a <strong>byte-level</strong> variant. The training procedure is simple and worth knowing: start from individual bytes, then repeatedly find the most frequent adjacent pair in the corpus and merge it into a new token, thousands of times. Frequent sequences earn their own short token; rare ones stay split. Byte-level BPE starts from raw bytes rather than characters, which guarantees there is <em>always</em> a valid encoding, so the tokenizer never chokes on emoji, a Korean string, or a binary blob. There is no out-of-vocabulary failure; in the worst case a strange string is just spelled out byte by byte.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Concept</span>
+    <p>A tokenizer is a <strong>deterministic, lossless, reversible</strong> map between text and a sequence of integer IDs drawn from a fixed vocabulary. It carries no meaning by itself: ID 1212 is just a slot number. All the meaning lives in the embedding that the model attaches to that slot during training.</p>
+  </div>
+
+  <h2>2 &middot; Why tokens, not words or characters</h2>
+  <div class="prose">
+    <p>Why this awkward middle ground? Both ends are worse.</p>
+    <ul>
+      <li><strong>Words</strong> give a vocabulary that is effectively infinite (every typo, name, and compound is a new word) and brittle (any unseen word is a dead end). Languages like German and Finnish that glue words together make this hopeless.</li>
+      <li><strong>Characters</strong> give a tiny vocabulary but blow up sequence length, and the model has to relearn that <code>c-a-t</code> means cat every time. Since attention cost grows with sequence length (Day 4), character sequences are expensive and dilute meaning across many positions.</li>
+      <li><strong>Subwords</strong> are the compromise: a bounded vocabulary that still covers any input, with common words kept whole so meaning is dense and sequences stay short. You get coverage <em>and</em> efficiency.</li>
+    </ul>
+    <p>A useful rule of thumb for English: roughly <strong>1 token &asymp; 4 characters &asymp; 0.75 words</strong>, so about 100 tokens per 75 words. Code, non-English languages, and unusual formatting drift well off that ratio, so treat it as an estimate, never a guarantee.</p>
+  </div>
+
+  <h2>3 &middot; The round trip, end to end</h2>
+  <div class="prose">
+    <p>Here is the full path from a string to vectors and back, with the tokenizer doing the bracketing work:</p>
+  </div>
+
+  <div class="diagram">  text:        "Tokenization is unintuitive"
+                 │
+        [ tokenizer split ]        ← BPE merges, byte-level fallback
+                 │
+  tokens:    "Token"  "ization"  " is"  " un"  "int"  "uit" "ive"
+                 │
+        [ vocab lookup → integer IDs ]
+                 │
+  IDs:        15521    2065     318    555   396   4267  425
+                 │
+        [ embedding table lookup ]   ← row i of a learned matrix
+                 │
+  vectors:   [0.12, -0.04, …]  [ … ]  [ … ]  …    one d-dim vector per token
+                 │                                  (d ≈ 1024 to 8192 inside the model)
+        [ Transformer blocks → final vector → unembed → logits ]
+                 │
+        [ argmax / sample ]  →  next token ID  →  detokenize back to text</div>
+
+  <div class="prose">
+    <p>Notice the symmetry. The <strong>token embedding table</strong> at the input and the <strong>unembedding projection</strong> at the output are both indexed by the vocabulary. Input: ID to vector. Output: vector to a score per ID. Same vocabulary on both ends. The IDs in the middle are not meaningful numbers; their meaning is entirely supplied by the rows of the embedding table, which were learned during pretraining.</p>
+  </div>
+
+  <h2>4 &middot; Token economics: why every engineer cares</h2>
+  <div class="prose">
+    <p>Two things you pay for are denominated in tokens, not words or requests:</p>
+    <ul>
+      <li><strong>Price.</strong> API billing is per token, and input and output are usually priced differently (output is typically several times more expensive, because it is generated serially). "Make the prompt shorter" is literally "spend fewer tokens."</li>
+      <li><strong>The context window.</strong> A model's context limit (Day 4) is a token budget. A 200K-token window is not 200K words; it is closer to 150K English words, and far fewer if the content is code or JSON or another language. Stuff retrieved chunks, chat history, and tool outputs into that budget and it fills fast.</li>
+    </ul>
+    <p>So token-counting is not trivia, it is cost control and capacity planning. Before shipping a prompt template, count its tokens. Before designing a RAG context (Module 3), budget chunk count times chunk size in tokens against the window. The cost lever you will pull most often, prompt caching (Module 7), is measured in cached versus uncached tokens.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"Tokens are the unit of both billing and context. Price scales per token with output tokens costing more, and the context window is a token budget, not a word budget. So I count tokens when I design prompts and RAG context, and I reach for caching and shorter context before reaching for a bigger model." That is the senior framing.</p>
+  </div>
+
+  <h2>5 &middot; Why tokenization breaks "strawberry" and digit math</h2>
+  <div class="prose">
+    <p>A class of famous LLM failures is not a reasoning failure, it is a <em>tokenization</em> failure, and naming the real cause is strong interview signal.</p>
+    <ul>
+      <li><strong>"How many r's in strawberry?"</strong> The model never sees the letters. "strawberry" may arrive as two or three subword tokens (say <code>straw</code> + <code>berry</code>), and the inside of a token is opaque to the model. Asking it to count characters is asking it to read information that tokenization threw away at the door. It can sometimes infer the answer from training text <em>about</em> spelling, but it is not reading the letters.</li>
+      <li><strong>Arithmetic on long numbers.</strong> A number like <code>4827</code> may be one token, or split as <code>48</code> + <code>27</code>, or some other way, and the splitting is inconsistent across numbers. Digit-level structure that arithmetic depends on (carrying, place value) is fractured by the tokenizer, so reliable multi-digit math is genuinely hard for the raw model. This is one reason tool use (a calculator) beats asking the model to compute (Module 4).</li>
+      <li><strong>Rare words and exact strings.</strong> An unusual name, a product code, or an acronym may shatter into many tokens, which both costs more and makes the model less reliable about it. This is exactly why lexical retrieval like BM25 still beats embeddings on codes and acronyms (Module 3).</li>
+    </ul>
+    <p>The unifying idea: the model reasons over tokens, so anything that requires looking <em>inside</em> a token, or that depends on a consistent split, is fragile. The fix is rarely "prompt harder." It is to move that work outside the model (a tool, a regex, a retriever).</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>6 &middot; Embeddings: meaning as geometry</h2>
+  <div class="prose">
+    <p>Now the second translation, the interesting one. An <strong>embedding</strong> is a learned vector that represents something (a token, or a whole sentence) as a point in a high-dimensional space, such that <em>distance in that space tracks similarity in meaning</em>. The model is not given these vectors; it learns them, because positioning related things near each other helps it predict the next token.</p>
+    <p>Two distinct uses of the word, and senior candidates keep them separate:</p>
+    <ul>
+      <li><strong>Token embeddings</strong> live <em>inside</em> the model. They are the rows of the input embedding table from section 3: one vector per vocabulary entry, giving each token a starting representation that attention then refines using context.</li>
+      <li><strong>Sentence (or text) embeddings</strong> are produced <em>by</em> a model (often a dedicated embedding model like a Sentence-Transformer) to represent a whole passage as one fixed-length vector. This is the object you store in a vector database and compare at query time. When people say "embeddings" in a RAG context, they almost always mean these.</li>
+    </ul>
+    <p>The famous demonstration of learned geometry is vector arithmetic: <code>king - man + woman &asymp; queen</code>. Directions in the space correspond to semantic relationships. You will not do algebra on sentence vectors in practice, but the same principle, that meaning is encoded as position and direction, is exactly what makes semantic search work.</p>
+  </div>
+
+  <div class="diagram">  high-dimensional embedding space (shown in 2-D)
+
+        cat ●       ● kitten
+              ● dog
+                                    ● Berlin
+                       ● Munich
+        ● car
+            ● truck
+
+  Nearby points share meaning. "cat" and "kitten" sit close;
+  "car" and "truck" cluster elsewhere; "Berlin" and "Munich"
+  form a cities region far from the animals. Retrieval = "find
+  the stored points nearest to my query's point."</div>
+
+  <h2>7 &middot; Cosine similarity: the workhorse comparison</h2>
+  <div class="prose">
+    <p>To ask "how similar are these two pieces of text," you compare their vectors. The standard measure is <strong>cosine similarity</strong>: the cosine of the angle between two vectors, which equals their dot product divided by the product of their lengths.</p>
+  </div>
+  <pre><code><span class="tok-k">def</span> <span class="tok-f">cosine_similarity</span>(a, b):
+    dot = <span class="tok-f">sum</span>(x * y <span class="tok-k">for</span> x, y <span class="tok-k">in</span> <span class="tok-f">zip</span>(a, b))
+    na  = <span class="tok-f">sum</span>(x * x <span class="tok-k">for</span> x <span class="tok-k">in</span> a) ** <span class="tok-n">0.5</span>
+    nb  = <span class="tok-f">sum</span>(y * y <span class="tok-k">for</span> y <span class="tok-k">in</span> b) ** <span class="tok-n">0.5</span>
+    <span class="tok-k">return</span> dot / (na * nb)   <span class="tok-c"># in [-1, 1]; 1 = same direction</span></code></pre>
+  <div class="prose">
+    <p>It returns a value from -1 to 1: about <strong>1</strong> means the vectors point the same way (very similar meaning), about <strong>0</strong> means unrelated, and negative means opposed. Cosine ignores magnitude and looks only at direction, which is what you want when comparing meaning rather than length. A practical note: many embedding models output already-normalized (unit-length) vectors, in which case cosine similarity and dot product give the same ranking, which is why vector databases often default to dot product for speed. You will reach for this measure constantly in Module 3.</p>
+  </div>
+
+  <h2>How this wires into retrieval (the forward link)</h2>
+  <div class="callout concept">
+    <span class="label">Concept</span>
+    <p>Dense semantic search is this lesson, scaled. Embed every document chunk once and store the vectors. At query time, embed the query, then find the stored chunks whose vectors have the highest cosine similarity to it, and hand those to the model as grounded context. Tokenization decides how text is chunked and counted; embeddings decide what "relevant" means. Module 3 is built entirely on these two ideas.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: count tokens, then estimate cost</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>You are designing a support assistant. Each request sends a 1,200-token system prompt, about 6 retrieved chunks at roughly 400 tokens each, and a short user question (about 50 tokens). The model replies with about 300 tokens. Suppose input is billed at $3 per million tokens and output at $15 per million. What does one call cost, and where is the money going?</p>
+  </div>
+  <div class="diagram">  INPUT tokens
+    system prompt            1,200
+    6 chunks × 400           2,400   ← the retrieved context dominates
+    user question               50
+                            -------
+    input total              3,650  →  3,650 / 1e6 × $3   = $0.0110
+
+  OUTPUT tokens
+    answer                     300  →    300 / 1e6 × $15  = $0.0045
+                                                          ---------
+                                     cost per call ≈      $0.0155</div>
+  <div class="prose">
+    <p>Two lessons fall out immediately. First, the <strong>retrieved context, not the answer, dominates input cost</strong>, which is why "retrieve fewer, better chunks" (a reranker, a lower top-k) is both a quality and a cost move. Second, output tokens are individually the most expensive, so trimming a verbose answer format saves real money at scale. Multiply $0.0155 by a million requests a month and the chunk-count decision is suddenly a five-figure line item. This is the muscle that turns "use RAG" into "design RAG to a token budget."</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Say each answer out loud in full sentences, as if to an interviewer. Then open the solution and compare. The gap is your lesson.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>A teammate is baffled that the model says "strawberry" has two r's. They want to "fine-tune it to spell better." Explain the real cause and propose a cheaper fix.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>It is a tokenization artifact, not a knowledge gap. The model never sees the individual letters of "strawberry"; the word arrives as a couple of subword tokens, and the characters inside a token are opaque to the model, so character counting is asking it to read information that tokenization discarded. Fine-tuning will not reliably fix a representational limitation. The cheaper fix is to do the character-level work outside the model: a one-line function, a regex, or a tool call that the model invokes. Senior add-on: the same root cause explains why exact codes and long-digit arithmetic are unreliable, so the general pattern is "move character-exact or digit-exact work out of the token space."</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>You must fit a system prompt, chat history, and retrieved chunks into a 32K-token context, and you keep overflowing. Walk through how you would budget the window and what you would cut first, in token terms.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Treat the 32K as a fixed budget and account for it in tokens: reserve room for the output first (say 1K to 2K), then allocate the rest across system prompt, history, and retrieved context, measuring each with a tokenizer rather than guessing from word count. The retrieved context is usually the largest and most compressible piece, so cut there first: lower top-k, rerank so each chunk earns its place, and shrink chunk size if the embedder allows. Next, compress or summarize old chat history rather than carrying it verbatim. The system prompt is usually small and high-leverage, so trim it last. The discipline is "count, do not estimate," because the model truncates silently and a dropped instruction or chunk is a real bug.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>Two product descriptions return a cosine similarity of 0.94; a description and a totally unrelated legal disclaimer return 0.21. A third pair returns -0.05. Interpret each, and explain why you would use cosine rather than raw Euclidean distance on raw vectors.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>0.94 means the two vectors point in nearly the same direction, so the texts are very close in meaning, likely near-duplicates or the same topic. 0.21 means weakly related, roughly the noise floor for unrelated text in most embedding spaces. -0.05 means essentially orthogonal, no meaningful relationship (truly opposite meaning is rare with modern embeddings, so near-zero is the practical "unrelated" signal). Cosine is preferred because it compares <em>direction</em> and ignores vector length, so a long document and a short query about the same thing still score high; raw Euclidean distance on un-normalized vectors conflates "different length" with "different meaning." If the vectors are already unit-normalized, cosine and dot product rank identically, which is why vector stores often use dot product for speed.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's Foundations slice and common 2026 screens. Drill the one-line keys, then expand each into a 90-second answer with Claude using protocol prompt #2.</p>
+  <ul class="q-list">
+    <li>What is a tokenizer and why do LLMs use subword tokens?
+      <div class="a">Key: deterministic lossless text-to-ID map over a fixed vocab; subwords balance coverage (any input) against short, meaning-dense sequences.</div></li>
+    <li>What is Byte-Pair Encoding, and what does "byte-level" add?
+      <div class="a">Key: iteratively merge the most frequent adjacent pair into a new token; byte-level starts from raw bytes so there is never an out-of-vocabulary failure.</div></li>
+    <li>Why are price and context window measured in tokens, and how does that change your design?
+      <div class="a">Key: billing is per token (output costs more) and the window is a token budget; so you count tokens, trim context, and cache rather than upsize the model.</div></li>
+    <li>Why do LLMs miscount letters in a word or fail at long-number arithmetic?
+      <div class="a">Key: the model sees tokens not characters/digits; inside-token structure is opaque and splits are inconsistent, so move that work to a tool.</div></li>
+    <li>What is an embedding, and how do token embeddings differ from sentence embeddings?
+      <div class="a">Key: a learned vector where distance tracks meaning; token embeddings are internal per-vocab rows, sentence embeddings represent a whole passage for storage and search.</div></li>
+    <li>What is cosine similarity and why use it over raw distance?
+      <div class="a">Key: cosine of the angle (dot product over norms), range -1 to 1; compares direction not magnitude, so length differences do not distort meaning comparison.</div></li>
+    <li>How does this lesson connect to retrieval?
+      <div class="a">Key: embed chunks once, embed the query, return the highest-cosine chunks as grounded context; tokenization governs chunking and cost, embeddings define relevance.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (15&ndash;20 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Install a tokenizer and watch text fragment. With <code>pip install tiktoken</code>, run <code>enc = tiktoken.get_encoding("cl100k_base")</code>, then <code>enc.encode("strawberry")</code> and <code>enc.encode("antidisestablishmentarianism")</code> and print the token count and the decoded pieces. Notice how the rare word shatters while "the cat" stays whole. Then count the tokens in one of your real prompts and multiply by an input price (see the <a href="https://docs.claude.com/en/docs/build-with-claude/token-counting">Anthropic token counting</a> docs to do the same against a Claude model). You just turned "shorten the prompt" into a number.</p>
+    <p class="muted" style="font-size:13.5px">Bonus: embed three short sentences with any embedding model, compute cosine similarity by hand with the function above (or <code>numpy.dot</code> on normalized vectors), and confirm that the two related sentences score far higher than the unrelated one. That is Day 6's lab in miniature. See <a href="../../tools.html">Tools &amp; Claude</a> for setup.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>This is the layer your retrieval work sits on. At MaiQ your hybrid retrieval fuses BM25 with dense embeddings precisely because each handles a different failure of this lesson: dense vectors capture meaning via the geometry above, while BM25 catches the exact codes and acronyms that tokenization fragments and embeddings blur. Your FastAPI ingestion service embeds chunks once and writes the vectors into pgvector, which is this lesson made operational: text to tokens to vectors, stored, then compared by similarity at query time. And your 37% cost reduction lives in token economics: fewer, better chunks means fewer input tokens per call. When an interviewer asks about embeddings, you can answer the concept, then ground it in "we store sentence embeddings in pgvector and fuse them with lexical scores via RRF, because each covers the other's blind spot."</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>Every LLM call is bracketed by two translations: a deterministic tokenizer (text to integer IDs over a fixed subword vocabulary) and a learned embedding (IDs and passages to vectors where geometry encodes meaning). Tokens are the unit of both cost and context, so counting them is real engineering, not trivia. Tasks that need to peek inside a token, spelling, exact codes, long-digit math, are fragile and belong in a tool. Cosine similarity over embeddings turns "similar meaning" into a number, and that single move is the foundation of every retrieval system you will build.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d02">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: the sampling knobs (temperature, top-p, top-k) that decide which token gets picked, and why temperature 0 still is not byte-identical.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d01-how-llms-work.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 1 &middot; How LLMs actually work</div></a>
+    <a data-nav="next" class="next" href="d03-sampling-decoding.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 3 &middot; Sampling &amp; decoding</div></a>
+  </div>
+
+  <div class="foot">Module 1 &middot; LLM Foundations &middot; Day 2 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

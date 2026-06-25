@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 61 · Design an LLM gateway at scale</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 10 &middot; GenAI System Design</span>
+    <span class="pill">Day 61</span>
+    <span class="pill">70 min</span>
+    <span class="diff" title="Difficulty: advanced"><i class="on"></i><i class="on"></i><i class="on"></i></span>
+  </div>
+
+  <h1>Design an LLM gateway at scale</h1>
+  <p class="lede">The RAG assistant and the agent platform both make LLM calls. Once you have more than a handful of services calling providers directly, you want one front door. An LLM gateway is the reverse proxy for all model traffic: auth, routing, rate limiting, caching, fallback, cost metering, and tracing in a single chokepoint. Today we design it end to end.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Justify a gateway: why one entry point for all LLM traffic beats per-service SDK calls.</li>
+      <li>Design the request path: auth &rarr; rate limit &rarr; cache &rarr; route &rarr; provider call with fallback.</li>
+      <li>Implement per-tenant rate limiting with a token bucket, and prompt + semantic caching.</li>
+      <li>Build a retry/fallback chain with a circuit breaker per provider, and stream responses through.</li>
+      <li>Add cost metering, per-tenant budgets, and full logging/tracing, and argue build vs buy.</li>
+    </ul>
+  </div>
+
+  <h2>Why a gateway at all</h2>
+  <div class="prose">
+    <p>When two services call the model API directly it is fine. When twenty do, you have twenty places that each re-implement retries, twenty sets of API keys, no shared view of spend, no shared cache, and no single switch to flip when a provider has an outage or you want to swap models. A gateway pulls all of that into one component every request passes through, so cross-cutting concerns are solved once.</p>
+    <p>It is the same instinct as an API gateway in classic system design, specialized for LLM traffic: the things you centralize, caching, routing, rate limiting, fallback, cost, are exactly the things that are painful and inconsistent when scattered across services.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"An LLM gateway is a single entry point for all model traffic that centralizes the cross-cutting concerns: authentication, model routing and selection, per-tenant rate limiting, prompt and semantic caching, a retry and fallback chain with a circuit breaker per provider, cost metering and budgets, and logging/tracing. It turns provider calls into one governed, observable, swappable chokepoint, and it streams." Lead with that and you have named every component before drawing one.</p>
+  </div>
+
+  <h2>1 &middot; Clarify (functional + non-functional)</h2>
+  <div class="prose">
+    <p>Pin scope first. The questions that shape this design:</p>
+    <ul>
+      <li><strong>Who calls it?</strong> Internal services only, or external customers too? Multi-tenant changes rate limiting and cost attribution.</li>
+      <li><strong>How many providers/models?</strong> One provider, or several (Anthropic, OpenAI, a self-hosted model)? Multiple providers is what makes routing and fallback worth building.</li>
+      <li><strong>Latency overhead budget.</strong> The gateway sits in the hot path, so its own overhead must be tiny (single-digit milliseconds excluding the model call). Streaming must pass through with no buffering penalty.</li>
+      <li><strong>Caching appetite + risk.</strong> Is prompt caching enough, or do you want semantic caching too (and is that safe for this traffic)?</li>
+      <li><strong>Governance.</strong> Per-tenant budgets, audit logging, PII handling, who is allowed which models?</li>
+    </ul>
+    <p>Assume: internal services plus some external API customers (multi-tenant), three providers/models behind it, sub-5ms gateway overhead, streaming required, prompt caching always-on and semantic caching opt-in per route, and hard per-tenant rate limits and cost budgets.</p>
+  </div>
+
+  <h2>2 &middot; Estimate (capacity numbers)</h2>
+  <div class="prose">
+    <p>Size the throughput and the cost flowing through the chokepoint so you know what the gateway must survive.</p>
+  </div>
+  <div class="diagram">  Traffic        peak ~500 LLM req/s across all tenants
+  Tokens         ~3k in + ~500 out per request (mixed RAG + chat + agent)
+  Cost (raw)     @ ~$5/1M in, ~$15/1M out → ~$0.015 + $0.0075 ≈ ~$0.0225/req
+                 500 req/s ≈ 43M req/day → ~$970k/day uncached  → caching is the headline
+  Cache target   ~90% hit on hot/repeat reads → ~10x cost + latency reduction on those
+  Rate limits    per tenant: e.g. 100 req/s burst, 60 req/s sustained (token bucket)
+  Gateway state  rate-limit counters + cache keys → Redis (atomic, fast, shared)
+  Overhead       gateway adds < 5 ms (excluding the upstream model call) → must be lean
+  Logs/traces    43M spans/day → async export to a tracing/OLAP backend, never inline blocking</div>
+  <div class="prose">
+    <p>Two decisions fall out: the gateway's own work must be cheap and mostly I/O-bound (its latency is dominated by the upstream model, so it must add almost nothing), and shared mutable state, rate-limit counters and cache, belongs in Redis because it must be atomic and visible to every gateway instance. And again, caching is the cost story.</p>
+  </div>
+
+  <h2>3 &middot; High-level architecture</h2>
+  <div class="prose">
+    <p>Draw the gateway as an ordered pipeline in the request path. Order matters: reject early (auth, rate limit), serve cheap (cache), then do the expensive thing (route to a provider) with safety nets (fallback, breaker), and always emit a trace.</p>
+  </div>
+
+  <div class="diagram">  clients (RAG svc, agent runtime, external API customers)
+        │  request: {tenant, model_hint, messages, stream?}
+        ▼
+  ┌──────────────────────────────  LLM GATEWAY  ──────────────────────────────────┐
+  │                                                                                │
+  │  ① AUTH        verify API key / JWT → resolve tenant + allowed models          │
+  │       │                                                                        │
+  │  ② RATE LIMIT  token bucket per tenant (Redis, atomic) → 429 + Retry-After    │
+  │       │           if empty                                                     │
+  │  ③ CACHE       prompt-cache key (exact) → semantic-cache (cosine ≥ τ, opt-in)  │
+  │       │  HIT ──────────────────────────────────────────────▶ return cached    │
+  │       │  MISS                                                                  │
+  │  ④ ROUTE       choose model: hint / policy / cost-quality / health             │
+  │       │                                                                        │
+  │  ⑤ CALL + FALLBACK CHAIN                                                        │
+  │       │   ┌─ provider A ─[breaker]─▶ 200 ✓  ────────────────────┐              │
+  │       │   ├─ 429/5xx? backoff+jitter, retry (idempotent only)   │              │
+  │       │   └─ breaker OPEN / exhausted ▶ provider B ▶ provider C  │              │
+  │       │                                                          ▼              │
+  │  ⑥ STREAM      pass tokens straight through (SSE), no buffering   write cache   │
+  │       │                                                                        │
+  │  ⑦ METER       count tokens → cost → per-tenant budget; emit span (async)      │
+  └────────────────────────────────────┬───────────────────────────────────────────┘
+                                        ▼
+        Redis (buckets + cache)   ·   tracing/cost backend (async)</div>
+
+  <div class="prose">
+    <p>Walk it top to bottom: authenticate and resolve the tenant, check the token bucket (fail fast with a 429 and Retry-After if empty), check the prompt cache then the optional semantic cache (return immediately on a hit), route to a model, call it through the fallback chain with a per-provider breaker, stream tokens straight back while writing the cache, and meter the cost and emit a trace asynchronously. Each numbered stage is a small, independently testable middleware.</p>
+  </div>
+
+  <h2>4 &middot; Data / state model</h2>
+  <div class="prose">
+    <p>The gateway is mostly stateless compute over a little shared hot state in Redis plus an async log sink. Three pieces of state:</p>
+  </div>
+  <pre><code><span class="tok-c"># 1) per-tenant rate-limit bucket (Redis hash), refilled lazily on read</span>
+ratelimit:{tenant_id} = { tokens: 73.2, last_refill_ts: 1718900000.0 }
+<span class="tok-c">#    capacity = burst (e.g. 100), refill rate r = sustained (e.g. 60/s)</span>
+
+<span class="tok-c"># 2) cache entries</span>
+promptcache:{sha256(model + normalized_messages)} = { response, ts }   <span class="tok-c"># exact match</span>
+semcache:{route}  →  vector index of (query_embedding → cached_response) <span class="tok-c"># cosine ≥ τ</span>
+
+<span class="tok-c"># 3) per-tenant spend counter (rolling window), checked before/after a call</span>
+budget:{tenant_id}:{yyyymm} = { spent_usd: 412.55, limit_usd: 1000 }</code></pre>
+  <div class="prose">
+    <p>And every completed request appends a span to the tracing/cost backend (tenant, model, tokens in/out, cost, latency, cache-hit flag, provider used, status), written asynchronously so logging never blocks the response. Note what you do <em>not</em> store: raw PII. You log a hashed user/session and the prompt version, not the user's raw text where avoidable.</p>
+  </div>
+
+  <h2>5 &middot; Deep-dive A: per-tenant rate limiting with a token bucket</h2>
+  <div class="prose">
+    <p>Rate limiting protects providers (you have your own quotas to respect), protects tenants from each other (noisy-neighbor isolation), and protects you from runaway loops. The token bucket is the standard: a bucket holds up to <em>capacity</em> tokens (your burst allowance), refills at rate <em>r</em> per second (your sustained rate), and each request removes one token. Empty bucket means reject with 429 and a Retry-After telling the client when a token will be available.</p>
+    <p>The critical detail in a distributed gateway: the check-and-decrement must be <strong>atomic</strong>, or two gateway instances both see one token left and both let a request through. Do it in a Redis Lua script (or equivalent atomic primitive) so refill, check, and decrement happen as one operation.</p>
+  </div>
+  <pre><code><span class="tok-c">-- token bucket as one atomic Redis Lua op (refill + check + take)</span>
+<span class="tok-k">local</span> b   = redis.call(<span class="tok-s">"HMGET"</span>, KEYS[1], <span class="tok-s">"tokens"</span>, <span class="tok-s">"ts"</span>)
+<span class="tok-k">local</span> tok = <span class="tok-f">tonumber</span>(b[1]) <span class="tok-k">or</span> CAP
+<span class="tok-k">local</span> ts  = <span class="tok-f">tonumber</span>(b[2]) <span class="tok-k">or</span> NOW
+tok = math.min(CAP, tok + (NOW - ts) * RATE)   <span class="tok-c">-- lazy refill</span>
+<span class="tok-k">if</span> tok &lt; 1 <span class="tok-k">then</span> <span class="tok-k">return</span> 0 <span class="tok-k">end</span>                  <span class="tok-c">-- empty → caller returns 429</span>
+redis.call(<span class="tok-s">"HMSET"</span>, KEYS[1], <span class="tok-s">"tokens"</span>, tok - 1, <span class="tok-s">"ts"</span>, NOW)
+<span class="tok-k">return</span> 1                                       <span class="tok-c">-- token taken → proceed</span></code></pre>
+  <div class="prose">
+    <p>For LLM traffic you often rate-limit on <em>tokens per minute</em>, not just requests per second, because a 50-token request and a 50k-token request are not the same load. The same bucket math works, you just deduct estimated tokens instead of 1, and you can run two buckets (requests and tokens) in parallel.</p>
+  </div>
+
+  <h2>6 &middot; Deep-dive B: caching, the cost lever</h2>
+  <div class="prose">
+    <p>From the estimate, caching is the difference between viable and bankrupt. Two complementary layers:</p>
+    <p><strong>Prompt caching (exact, always safe).</strong> Two flavors. (1) The gateway's own response cache: identical (model + normalized messages) returns the stored completion, perfect for deterministic, repeated calls. (2) Provider-side prompt caching (Anthropic): you mark a stable cacheable prefix (system prompt, long shared context, tool definitions) so the provider bills that cached input at roughly a tenth and skips reprocessing it; the trick is to put static content <em>first</em> and the variable part last, with a short (~5 min) TTL. This is the single biggest cost lever and it is essentially risk-free because the cache key is exact.</p>
+    <p><strong>Semantic caching (fuzzy, powerful, dangerous).</strong> Embed the incoming query, and if a previously-answered query sits within a cosine threshold, return its cached answer. This catches paraphrases (huge on FAQ-style traffic) but it is risky: it is wrong for personalized, time-sensitive, or high-stakes responses, where a near-duplicate is not actually the same question. So semantic caching is opt-in per route, with a conservative threshold and an exclusion list for sensitive intents.</p>
+  </div>
+  <div class="callout warning">
+    <span class="label">Where semantic caching bites</span>
+    <p>"What is my account balance?" from two different users embeds nearly identically but must never share a cached answer. The fix is to scope the cache key by tenant/user where the response is personalized, and to disable semantic caching entirely on time-sensitive or high-stakes routes. Treat a too-eager semantic cache as a correctness bug, not a cost win.</p>
+  </div>
+
+  <h2>7 &middot; Deep-dive C: routing, retries, and the per-provider circuit breaker</h2>
+  <div class="prose">
+    <p><strong>Routing / model selection.</strong> The gateway decides which model serves a request: an explicit hint from the caller, a policy (this tenant may only use models X and Y), a cost-quality rule (cheap model for short/simple calls, strong model for hard ones), or provider health. Centralizing routing means you can swap or A/B models for every service by changing one rule, not twenty deployments.</p>
+    <p><strong>Retries.</strong> Providers return 429s and 5xxs. Respect the provider's <code>Retry-After</code> header, use exponential backoff with jitter (jitter avoids a synchronized retry stampede), cap the attempts, and only retry <em>idempotent</em> calls, retrying a non-idempotent action can double-fire it.</p>
+    <p><strong>Fallback chain + circuit breaker per provider.</strong> If provider A is erroring or its breaker is Open, fall through to provider B, then C. Each provider has its own circuit breaker: Closed (allow, count failures) &rarr; Open (fail fast for a cooldown after the error rate spikes, do not keep hammering a down provider) &rarr; Half-open (send one probe; success closes it). Per-provider isolation means an Anthropic outage trips only Anthropic's breaker and traffic flows to the fallback without manual intervention.</p>
+  </div>
+  <pre><code><span class="tok-c"># fallback chain: try providers in order, skip any whose breaker is open</span>
+<span class="tok-k">def</span> <span class="tok-f">call_with_fallback</span>(req, chain):          <span class="tok-c"># chain = [providerA, providerB, providerC]</span>
+    <span class="tok-k">for</span> p <span class="tok-k">in</span> chain:
+        <span class="tok-k">if</span> breaker[p].is_open():
+            <span class="tok-k">continue</span>                          <span class="tok-c"># down → skip to next provider</span>
+        <span class="tok-k">try</span>:
+            <span class="tok-k">return</span> retry_with_backoff(p.call, req, max_attempts=3)
+        <span class="tok-k">except</span> ProviderError:
+            breaker[p].record_failure()        <span class="tok-c"># may trip Open</span>
+    <span class="tok-k">raise</span> AllProvidersDown()                   <span class="tok-c"># last resort: clear error to caller</span></code></pre>
+
+  <h2>8 &middot; Trade-offs, ops, and build vs buy</h2>
+  <div class="prose">
+    <p><strong>Cost metering + budgets (ops).</strong> Every call's tokens are counted, converted to cost, and added to a per-tenant rolling spend counter; when a tenant hits its budget the gateway throttles or rejects with a clear error. This is where the gateway pays for itself: one authoritative view of spend, enforced before the money is gone, instead of a surprise invoice.</p>
+    <p><strong>Logging/tracing (ops).</strong> Emit a span per request (tenant, model, tokens, cost, latency, cache-hit, provider, status), exported asynchronously to a tracing backend so you get dashboards for cost-per-request, cache-hit rate, p95/p99 latency, and provider error rates, plus per-tenant attribution. Never log raw PII.</p>
+  </div>
+  <table>
+    <tr><th>Decision</th><th>You gain</th><th>You give up</th></tr>
+    <tr><td>Central gateway vs direct SDK calls</td><td>One place for cache, routing, limits, cost, fallback</td><td>A new hop, a potential SPOF, ~ms overhead (mitigate: HA, lean code)</td></tr>
+    <tr><td>Semantic cache on</td><td>Big hit-rate on paraphrased traffic</td><td>Correctness risk on personalized/time-sensitive responses</td></tr>
+    <tr><td>Multi-provider fallback</td><td>Survives a provider outage automatically</td><td>Behavioral differences between models; more to test</td></tr>
+    <tr><td>Cost-quality routing</td><td>Cheaper at scale</td><td>Mis-routing risk; needs a complexity/confidence signal</td></tr>
+    <tr><td>Token-based rate limiting</td><td>Fair load accounting for variable request sizes</td><td>Must estimate tokens up front; more bookkeeping than req/s</td></tr>
+  </table>
+  <div class="prose">
+    <p><strong>Build vs buy.</strong> Mature open-source and managed gateways exist (the LiteLLM-style proxy is the common reference) and cover most of this. The senior answer is not "always build": buy or adopt open source for the commodity 80 percent (multi-provider routing, basic caching, cost logging) and build only the parts that are genuinely yours, custom per-tenant budgets, bespoke routing policy, or deep integration with your own tracing. Reach for a custom gateway when your routing/governance needs outgrow the off-the-shelf knobs, and say exactly that, naming what you would buy versus build is the mark of someone who has weighed it.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: one request through the gateway</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>The agent runtime sends a chat completion for tenant <code>acme</code>, streaming, model hint "fast". <b>① Auth:</b> API key resolves to <code>acme</code>, allowed models {fast, strong}. <b>② Rate limit:</b> the Lua token bucket finds 41 tokens, takes one, proceeds (a burst tenant would get a 429 + Retry-After here). <b>③ Cache:</b> exact prompt-cache miss; semantic caching is off on this route (it is a personalized agent reply), so no fuzzy lookup. <b>④ Route:</b> hint "fast" plus policy selects provider A's small model. <b>⑤ Call:</b> provider A returns a 529 overload; backoff+jitter retries once, fails; A's breaker trips toward Open; the chain falls through to provider B, which returns 200. <b>⑥ Stream:</b> tokens pass straight through over SSE with no buffering; on completion the response is written to the prompt cache. <b>⑦ Meter:</b> 3.1k in + 480 out → ~$0.022 added to acme's monthly spend (well under the $1,000 budget); an async span records tenant, model, tokens, cost, 1.8s latency, cache miss, provider B, status 200. One request, every cross-cutting concern handled in one place, and a provider outage absorbed without anyone paging an engineer.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">The 11-point checklist, gateway flavor</span>
+    <p>1. <b>Auth</b> (key/JWT &rarr; tenant + allowed models) &middot; 2. <b>Rate limiting</b> (per-tenant token bucket, atomic) &middot; 3. <b>Prompt caching</b> (exact + provider prefix cache) &middot; 4. <b>Semantic caching</b> (opt-in, threshold, sensitive-route exclusion) &middot; 5. <b>Routing / model selection</b> (hint / policy / cost-quality / health) &middot; 6. <b>Retries</b> (Retry-After, backoff+jitter, idempotent only) &middot; 7. <b>Fallback chain + per-provider circuit breaker</b> &middot; 8. <b>Streaming</b> pass-through &middot; 9. <b>Cost metering + per-tenant budgets</b> &middot; 10. <b>Logging/tracing</b> (span per request, async, no PII) &middot; 11. <b>HA + build-vs-buy</b> (no SPOF, adopt OSS for the commodity 80%).</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Answer each out loud as if whiteboarding, then compare.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>You run three gateway instances behind a load balancer. A tenant's limit is 60 req/s but they are getting through at ~180 req/s. What is the bug, and how do you fix it without making the gateway slow?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Each instance is keeping its own local token bucket, so the tenant effectively gets 3 &times; 60 = 180 req/s, one limit per instance. Rate-limit state must be <strong>shared and atomic</strong>: move the bucket into Redis and do the refill-check-decrement as one atomic operation (a Lua script), so all three instances draw from the same bucket and the global limit holds. It stays fast because it is a single in-memory Redis round trip on the hot path. If even that round trip is too costly at extreme scale, a known refinement is local token leasing (each instance leases a small slice of the budget from the central bucket and refreshes periodically), trading a little precision for fewer central calls, but the default correct answer is the shared atomic bucket.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>Turning on semantic caching cut your bill nicely, but support reports a few users getting answers meant for someone else's question. Diagnose and fix without disabling caching everywhere.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Semantic caching is matching near-duplicate <em>queries</em> across users and returning a cached answer that was correct for a different context, classic on personalized or stateful questions ("my balance", "my last order") that embed almost identically. Fixes, layered: (1) scope the semantic cache key by tenant/user wherever the response depends on who is asking, so cross-user matches cannot happen; (2) exclude personalized, time-sensitive, and high-stakes routes from semantic caching entirely (keep exact prompt caching there, which is always safe); (3) raise the cosine threshold so only very close matches hit. The principle: semantic caching is a per-route opt-in, never a global default, because a fuzzy match is a correctness risk, not just a cost knob.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>Your primary provider has a 30-minute partial outage (intermittent 5xx). Describe exactly what your gateway does, second by second, so that callers barely notice, and one thing that would make it worse.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>On the first failures, retries with exponential backoff and jitter absorb the transient errors; as the error rate climbs, the provider's <strong>circuit breaker trips Open</strong>, so the gateway stops sending traffic to the failing provider (no more hammering it, no more waiting on doomed calls) and the <strong>fallback chain</strong> routes requests to provider B automatically. Callers see slightly higher latency and a possible model swap, but not failures. Periodically the breaker goes Half-open and sends a single probe; when the provider recovers, that probe succeeds and the breaker closes, restoring primary traffic, all without a human in the loop. What makes it worse: aggressive retries with <em>no</em> breaker and <em>no</em> jitter, every instance synchronously hammering the down provider in lockstep, which amplifies the outage (a retry storm / thundering herd) and can take down the fallback too.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's GenAI System Design and LLMOps slices. Drill the keys, then whiteboard each.</p>
+  <ul class="q-list">
+    <li>Design an LLM gateway.
+      <div class="a">Key: one entry point, auth, routing/model selection, per-tenant rate limiting, prompt + semantic caching, retries/fallback chain + per-provider breaker, cost metering, logging/tracing, streaming.</div></li>
+    <li>How do you design a rate limiter for an LLM API client/gateway?
+      <div class="a">Key: token bucket (refill rate r, capacity = burst), per tenant + global, atomic check-decrement in Redis Lua; rate-limit on tokens/min as well as req/s.</div></li>
+    <li>How do you handle 429s and provider outages?
+      <div class="a">Key: respect Retry-After, exponential backoff + jitter, cap attempts, retry idempotent only; circuit breaker per provider + fallback chain to the next provider.</div></li>
+    <li>What is a circuit breaker and its states?
+      <div class="a">Key: Closed (allow, count failures) &rarr; Open (fail fast, cooldown) &rarr; Half-open (one probe, success closes); per-provider isolation so one outage does not cascade.</div></li>
+    <li>What caching layers does a gateway use and where is each dangerous?
+      <div class="a">Key: exact prompt cache (safe, biggest lever, provider prefix cache billed ~10%) + semantic cache (opt-in, risky for personalized/time-sensitive, scope by user, exclude sensitive routes).</div></li>
+    <li>How do you control and attribute LLM cost across many tenants?
+      <div class="a">Key: meter tokens &rarr; cost per request, per-tenant rolling spend counter + budget enforced at the gateway, dashboards for cost/request and cache-hit rate.</div></li>
+    <li>What capacity numbers do you bring to a gateway design?
+      <div class="a">Key: ~$5/1M in and ~$15/1M out for a GPT-4-class model, aim ~90% cache hit on hot reads, keep gateway overhead to single-digit ms, state in Redis.</div></li>
+    <li>Build vs buy an LLM gateway?
+      <div class="a">Key: adopt OSS/managed (LiteLLM-style proxy) for the commodity 80% (routing, basic caching, cost logging); build only bespoke budgets/routing/governance and deep tracing integration.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (20&ndash;25 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Build a minimal gateway in <a href="https://fastapi.tiangolo.com/">FastAPI</a>. Add one endpoint that (1) checks a per-tenant token bucket in <a href="https://redis.io/docs/latest/develop/interfaces/clients/">Redis</a> via a Lua script and returns 429 + Retry-After when empty, (2) checks an exact prompt cache (hash of model + messages) and returns the cached completion on a hit, (3) on a miss calls the <a href="https://docs.claude.com/en/api/messages-streaming">Claude streaming API</a> and passes tokens straight through, and (4) writes the result to the cache and logs tokens, cost, and latency. Then wrap the provider call in a tiny circuit breaker (open after 3 failures, half-open after a cooldown) and a fallback to a second model. Hit it in a loop and watch the bucket throttle, the cache serve repeats for free, and the breaker fail fast when you point it at a dead endpoint. That is the gateway in 120 lines.</p>
+    <p class="muted" style="font-size:13.5px">Stretch: compare your hand-rolled gateway against the open-source <a href="https://docs.litellm.ai/">LiteLLM</a> proxy and list which features you would buy versus build.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>Every LLM call at MaiQ, the RAG features, the agent runs behind the Skill Store, flows out to a provider, so a gateway is the natural place to centralize the cost and reliability discipline you already practice. Your 37 percent inference-cost reduction came from exactly the levers a gateway centralizes: caching, routing to cheaper models for easy calls, and tighter context, all proven with your LLM-as-judge evaluation so you knew quality held. When this question comes up, connect it: "I have driven these cost levers per service; a gateway is where you make them a platform capability with one view of spend, one cache, and automatic provider fallback, instead of re-implementing retries in every service." That frames the gateway as the operational maturation of work you have already shipped.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>An LLM gateway is one front door for all model traffic that centralizes auth, per-tenant rate limiting, caching, routing, fallback, cost metering, and tracing. Order the request path to reject early and serve cheap: auth, token-bucket rate limit (atomic in Redis), prompt then optional semantic cache, route, call with backoff and a per-provider circuit breaker and fallback chain, stream through, then meter and trace asynchronously. Prompt caching is the safe headline cost lever; semantic caching is powerful but a per-route correctness risk. And the senior move on build-vs-buy is to adopt the commodity 80 percent and build only your bespoke governance. Tomorrow we design a search and ranking service, the retrieval engine many of these systems sit on.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d61">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: hybrid retrieval and learned ranking, the search service behind it all.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d60-design-agent-platform.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 60 &middot; Design an agent platform (MaiQ-style)</div></a>
+    <a data-nav="next" class="next" href="d62-design-semantic-search.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 62 &middot; Design a semantic search / ranking system</div></a>
+  </div>
+
+  <div class="foot">Module 10 &middot; GenAI System Design &middot; Day 61 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 26 · Agent memory</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 4 &middot; Agents &amp; Tool Use</span>
+    <span class="pill">Day 26</span>
+    <span class="pill">50 min</span>
+    <span class="diff" title="Difficulty: intermediate"><i class="on"></i><i class="on"></i><i></i></span>
+  </div>
+
+  <h1>Agent memory</h1>
+  <p class="lede">An LLM is stateless: every call starts from nothing. "Memory" is the engineering you bolt on to make an agent remember across turns and across sessions, without drowning its context window. Today you learn the three kinds and when each applies.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Distinguish short-term, long-term, and episodic memory and what each stores.</li>
+      <li>Manage short-term memory with message pruning and summarization.</li>
+      <li>Persist long-term user facts keyed by <code>user_id</code> in a vector or key-value store.</li>
+      <li>Explain why a checkpointer is short-term durability, not long-term memory.</li>
+      <li>Diagnose and mitigate context-window blow-up: lost-in-the-middle, cost, and latency.</li>
+    </ul>
+  </div>
+
+  <h2>1 &middot; Why "memory" is engineering, not a model feature</h2>
+  <div class="prose">
+    <p>The model has no memory. Each API call is a fresh forward pass over whatever tokens you send; nothing carries over unless <em>you</em> carry it. So "agent memory" is not something the LLM does, it is a system you build around it: deciding what to keep, where to store it, and what to put back into the context on the next call. The whole topic is really <strong>context management over time</strong>. Get it right and the agent feels like it knows the user; get it wrong and it either forgets everything or chokes on a bloated prompt.</p>
+    <p>There are three distinct kinds, and conflating them is a classic interview stumble. They differ on <em>scope</em> (this conversation vs forever) and <em>what</em> they hold (the raw recent exchange vs durable facts vs summaries of past sessions).</p>
+  </div>
+
+  <div class="diagram">  THREE KINDS OF AGENT MEMORY
+  ─────────────────────────────────────────────────────────────────────
+
+  SHORT-TERM (working context)        LONG-TERM (durable facts)
+  ┌─────────────────────────────┐     ┌─────────────────────────────────┐
+  │ the current conversation:   │     │ stable facts about the user:    │
+  │ recent messages + tool      │     │ "prefers metric units",         │
+  │ results, in the prompt now  │     │ "works at MaindTec", plan tier  │
+  │ • pruned / summarized       │     │ • stored in vector / KV by      │
+  │ • dies with the session     │     │   user_id, persists forever     │
+  └─────────────────────────────┘     │ • retrieved into context when   │
+                                       │   relevant                      │
+  EPISODIC (past sessions)            └─────────────────────────────────┘
+  ┌─────────────────────────────┐
+  │ summaries of WHAT HAPPENED  │      scope:  short = this chat
+  │ in earlier sessions,        │              long  = across all chats
+  │ indexed for retrieval:      │              episodic = past chats, summarized
+  │ "last week we debugged the  │
+  │  RAG eval; fix was reranker"│      what:   short = raw recent turns
+  │ • retrieved when relevant   │              long  = atomic facts
+  └─────────────────────────────┘              episodic = session summaries</div>
+
+  <h2>2 &middot; Short-term memory: the working context</h2>
+  <div class="prose">
+    <p><strong>Short-term memory is just the conversation in the prompt right now</strong>, the recent user/assistant messages plus tool results that the model needs to keep the current task coherent. It lives in the context window and <em>dies when the session ends</em>. The engineering problem is that a long conversation grows past what you want to send every turn (cost, latency, and the lost-in-the-middle effect below). Two techniques manage it:</p>
+    <ul>
+      <li><strong>Pruning / windowing.</strong> Keep the last N turns (or last N tokens) and drop older ones. Simple and cheap; the risk is dropping something that still mattered. Often you keep the system prompt and the most recent turns, and trim the middle.</li>
+      <li><strong>Summarization.</strong> When the history gets long, replace older turns with an LLM-generated summary ("the user is debugging a checkout bug; we ruled out the payment provider"). This preserves the <em>gist</em> at a fraction of the tokens. The trade-off is that summarization is lossy and costs an extra call, so you do it on a rolling basis, not every turn.</li>
+    </ul>
+    <p>In practice you combine them: keep a verbatim recent window, and a running summary of everything before it. That keeps the prompt bounded while retaining continuity.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Concept</span>
+    <p>A <strong>checkpointer (Day 25) is short-term-memory durability, not long-term memory.</strong> It persists <em>this run's</em> working state so the agent can pause, crash, and resume the same conversation. It does <em>not</em> make the agent remember the user in a brand-new session next week. Persisting a session ≠ learning durable facts about a user. Mixing these up is a common interview slip.</p>
+  </div>
+
+  <h2>3 &middot; Long-term memory: durable user facts</h2>
+  <div class="prose">
+    <p><strong>Long-term memory holds stable facts about a user that should survive across all sessions</strong>: preferences ("always reply in metric units"), profile facts ("their company is MaindTec"), settings, prior decisions. Unlike short-term, it is <em>not</em> in the prompt by default, it is stored externally and <strong>keyed by <code>user_id</code></strong>, then <em>retrieved</em> into context only when relevant. Two storage shapes:</p>
+    <ul>
+      <li><strong>Key-value, by <code>user_id</code>.</strong> Best for a known, structured set of attributes (units preference, plan tier, language). You fetch the user's record and inject the relevant fields. Fast, exact, easy to update.</li>
+      <li><strong>Vector store, by <code>user_id</code> namespace.</strong> Best for open-ended remembered facts in natural language ("mentioned they manage a fleet team," "dislikes long emails"). You embed the new fact, store it under the user's namespace, and at query time retrieve the top-k facts relevant to the current message. This is RAG over the user's own history.</li>
+    </ul>
+    <p>The deciding questions are <strong>what to remember</strong> and <strong>what to forget</strong>. Not every utterance is a durable fact, "what's the weather" is ephemeral; "I always want responses in German" is durable. A good system extracts and writes only salient, lasting facts (often via an LLM "is this worth remembering?" step), updates facts that change, and forgets the stale or one-off. Otherwise long-term memory becomes a junk drawer that pollutes retrieval. Then at query time you <strong>retrieve</strong> the relevant memories (KV lookup or vector top-k by <code>user_id</code>) and inject just those into the prompt, never the whole store.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"Short-term memory is the working conversation in the context window, managed by pruning and summarization, and it dies with the session. Long-term memory is durable user facts stored externally by user_id in a KV or vector store and retrieved when relevant. Episodic memory is summaries of past sessions, indexed for retrieval. The hard parts are deciding what to remember versus forget, and retrieving only the relevant memories so the context does not blow up." That hits scope, storage, and the real engineering tension in one breath.</p>
+  </div>
+
+  <h2>4 &middot; Episodic memory: summaries of past sessions</h2>
+  <div class="prose">
+    <p><strong>Episodic memory sits between the other two</strong>: it stores <em>summaries of what happened in earlier sessions</em>, indexed so they can be retrieved later. Where long-term memory holds atomic facts ("prefers metric"), episodic memory holds the <em>narrative</em> of past interactions ("last Tuesday we debugged the RAG eval drop; the fix was adding a reranker"). At the start of a new session, or when the current task resembles a past one, you retrieve the relevant episode summaries and seed them into context, so the agent can say "last time we tried X, it did not work, let's try Y."</p>
+    <p>You build it by summarizing each completed session (or meaningful chunk) into a compact record, embedding it, and indexing it by user/topic. It is essentially RAG over the agent's own history of interactions. The reason it is its own category: it is neither the live conversation (short-term) nor a timeless fact (long-term), it is "what we did together, compressed and recallable." For assistants that work with the same user repeatedly, episodic memory is what makes the experience feel continuous rather than amnesiac.</p>
+  </div>
+
+  <h2>5 &middot; The context-window blow-up problem</h2>
+  <div class="prose">
+    <p>Here is the failure that ties memory to everything else. The naive instinct, "just put more in the context", backfires three ways, and a senior engineer names all three:</p>
+    <ul>
+      <li><strong>Lost-in-the-middle.</strong> Models attend most reliably to the <em>start</em> and <em>end</em> of a long context and reliably <em>least</em> to the middle. Stuff 50 messages in and the crucial fact buried at position 27 gets effectively ignored. More context can <em>lower</em> accuracy. Placement matters: put the most important material near the top or bottom.</li>
+      <li><strong>Cost.</strong> Every token in the prompt is billed on every call. An agent loop that keeps appending the full history pays for the entire growing transcript on each of its many turns, costs balloon superlinearly with conversation length.</li>
+      <li><strong>Latency.</strong> Longer input means a larger prefill and slower responses. A bloated context makes every turn sluggish, which on a multi-turn agent compounds.</li>
+    </ul>
+    <p>The mitigations are exactly the memory techniques above, used deliberately: <strong>prune and summarize</strong> short-term so the working window stays bounded; <strong>retrieve</strong> only the relevant long-term facts and episode summaries instead of dumping the whole store; and <strong>place</strong> the most important content at the edges of the context, not the middle. The goal is not "remember everything", it is "have the <em>right</em> small set of things in context at the moment of the call." Memory done well is selective, not exhaustive.</p>
+  </div>
+
+  <div class="callout warning">
+    <span class="label">Anti-pattern</span>
+    <p>"We have a 200k context, so just keep the entire conversation and all the user's history in the prompt." This invites lost-in-the-middle accuracy loss, bills you for the full transcript on every turn, and slows each response. A big context window is a budget to spend wisely, not an excuse to skip memory management.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: a returning user, three memories at once</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>A user opens a new session: <code>"Can you pick up where we left off on the eval problem?"</code> Watch which memory each piece comes from.</p>
+  </div>
+  <div class="diagram">  New session starts → assemble context from THREE sources:
+
+  LONG-TERM (KV by user_id):   "prefers concise answers; works on RAG systems"
+        └─► inject as a short profile line
+
+  EPISODIC (vector, by user):  retrieve top episode for "eval problem" →
+        "Session 4: eval faithfulness dropped; we suspected chunking,
+         ran experiments, last step was testing a reranker."
+        └─► inject the summary so the agent has the thread
+
+  SHORT-TERM (this session):   just the new message so far (will grow;
+        prune + summarize as the conversation lengthens)
+
+  Result prompt = system + [profile fact] + [relevant episode summary]
+                  + [current turn]      ← small, relevant, edges-loaded
+  NOT = the entire transcript of all 4 past sessions (that would blow up).</div>
+  <div class="prose">
+    <p>Three different mechanisms, one coherent context. The agent "remembers" the user's preference (long-term fact), recalls the storyline of the eval work (episodic summary), and tracks the live exchange (short-term), yet the assembled prompt is small because each source contributed only its <em>relevant</em> slice. Crucially, the past sessions were <em>not</em> dumped in verbatim, they were summarized into episodic memory and retrieved on demand. That is the difference between an assistant that feels continuous and one that either forgets you or buries the model in a wall of stale text.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Answer each out loud in full sentences, as if to an interviewer. Then open the solution and compare. The gap is your lesson.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>A teammate says "we added a LangGraph checkpointer, so the agent now has long-term memory of the user." Correct them precisely, and say what they would actually need to build.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>The checkpointer gives <strong>short-term-memory durability</strong>, not long-term memory. It persists <em>this run's</em> working state (the messages and intermediate results of the current conversation) so the agent can pause, survive a crash, and resume <em>the same session</em>. It does nothing to make the agent recall the user in a brand-new session next week, persisting a session is not the same as learning durable facts about a person. To get actual long-term memory, they need to <strong>extract salient, lasting facts and store them externally, keyed by <code>user_id</code></strong> (a key-value record for structured attributes like preferences/plan, and/or a vector store namespace for open-ended remembered facts), then <strong>retrieve</strong> the relevant ones into context at the start of future sessions. The defining difference: a checkpointer is scoped to a single run; long-term memory is cross-session and keyed to the user.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>Your assistant has a 200k-token context, so an engineer just appends every message and every tool result and never trims. Users report it is getting slower, more expensive, and oddly worse at recalling details from earlier in long chats. Explain all three symptoms with the same root cause and give the fixes.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>All three stem from <strong>context-window blow-up</strong>, the "just keep everything" anti-pattern. <em>Slower:</em> a longer prompt means a bigger prefill, so each turn's latency grows with the transcript. <em>More expensive:</em> every token is billed on every call, and an agent re-sends the whole growing history each turn, so cost balloons superlinearly with conversation length. <em>Oddly worse at recall:</em> the <strong>lost-in-the-middle</strong> effect, models attend most to the start and end of a long context and least to the middle, so details buried mid-transcript get effectively ignored; more context can <em>reduce</em> accuracy. The fixes are deliberate memory management, not a bigger window: <strong>prune</strong> to a recent window and <strong>summarize</strong> older turns so short-term stays bounded; <strong>retrieve</strong> only the relevant long-term facts / episode summaries instead of dumping the whole history; and <strong>place</strong> the most important content at the top or bottom of the context, never the middle. The principle: keep the <em>right small</em> set of things in context, not everything.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>For a personal-finance assistant, classify each of these into short-term, long-term, or episodic memory, and justify: (a) "I prefer all amounts in EUR," (b) the last six messages of the current chat, (c) "two months ago we set up a savings plan and you advised cutting subscriptions."</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p><strong>(a) "I prefer amounts in EUR" → long-term memory.</strong> It is a stable, durable preference that should apply across <em>all</em> future sessions, so it belongs in external storage keyed by <code>user_id</code> (a KV attribute is ideal) and is retrieved/injected when relevant. <strong>(b) The last six messages of the current chat → short-term memory.</strong> It is the live working context for the conversation in progress; it stays in the prompt now and dies when the session ends (managed by pruning/summarization if the chat grows). <strong>(c) "Two months ago we set up a savings plan and advised cutting subscriptions" → episodic memory.</strong> It is a <em>summary of what happened in a past session</em>, a narrative of a prior interaction, not a timeless atomic fact and not the current conversation; you store it as an indexed episode summary and retrieve it when the current task relates to that savings plan. The tells: durability + atomic preference → long-term; live conversation → short-term; "what we did in a past session, summarized" → episodic.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's Agents module. Drill the one-line keys, then expand each into a 90-second answer.</p>
+  <ul class="q-list">
+    <li>Short-term vs long-term vs episodic memory?
+      <div class="a">Key: short = working context, pruned/summarized, dies with session; long = durable user facts in vector/KV by user_id; episodic = summaries of past sessions, indexed.</div></li>
+    <li>How do you manage short-term memory as a conversation grows?
+      <div class="a">Key: pruning/windowing (keep last N turns/tokens) plus rolling summarization of older turns; combine a verbatim recent window with a running summary.</div></li>
+    <li>How do you store and retrieve long-term memory?
+      <div class="a">Key: extract salient durable facts, store keyed by user_id (KV for structured, vector namespace for open-ended), retrieve only the relevant top-k into context; decide what to remember vs forget.</div></li>
+    <li>Is a checkpointer the same as long-term memory?
+      <div class="a">Key: no, a checkpointer is short-term durability (resume the same run); long-term is cross-session facts keyed by user_id. Persisting a session ≠ learning durable user facts.</div></li>
+    <li>What is the context-window blow-up problem and how do you mitigate it?
+      <div class="a">Key: lost-in-the-middle (accuracy), cost (billed per token per call), latency (prefill); mitigate by prune+summarize, retrieve only relevant memories, place key content at the edges.</div></li>
+    <li>What is lost-in-the-middle and why does it matter for memory?
+      <div class="a">Key: models attend most to the start/end of long context, least to the middle, so dumping everything buries key facts; placement and selectivity beat raw context size.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (15&ndash;25 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Build a tiny memory layer around the Claude API. (1) <strong>Short-term:</strong> hold a conversation; once it passes ~10 turns, replace the oldest turns with a one-paragraph summary you generate with a quick model call, and confirm the prompt stops growing. (2) <strong>Long-term:</strong> after each user message, run a cheap "is there a durable fact to remember here?" classification; if yes, write it to a dict keyed by a fake <code>user_id</code> (your stand-in for a KV/vector store), and at the start of a fresh conversation inject those facts and watch the assistant "remember" the user. Skim the <a href="https://langchain-ai.github.io/langgraph/concepts/memory/">LangGraph memory concepts</a> and <a href="https://docs.pydantic.dev/latest/">Pydantic</a> for typing the stored facts. The lesson lands when you compare two new sessions, one with retrieved memory injected, one without, and feel the difference.</p>
+    <p class="muted" style="font-size:13.5px">No API key? Design it on paper: list five user utterances and mark each as remember-as-fact, summarize, or forget, then write the retrieval rule for a new session. See <a href="../../tools.html">Tools &amp; Claude</a>.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>Your retrieval work on MaiQ is the same machinery long-term and episodic memory run on: <strong>hybrid retrieval (BM25 + dense embeddings, fused) and a FastAPI ingestion service writing into pgvector</strong> is exactly what you would use to store and recall user facts and session summaries by <code>user_id</code>. So when an interviewer asks "how would you give this agent memory," you can answer concretely: "memory is RAG over the user's own history, embed durable facts and session summaries, store them in pgvector under the user's namespace, and retrieve the relevant few into context, which is the retrieval stack I already build." Your <strong>LLM-as-judge evaluation</strong> habit also transfers, you would measure whether injecting a memory actually improves answers rather than assuming it helps, and you would be alert to the context-blow-up trade-off (more context is not free) that your cost-and-quality experiments trained you to watch. That turns an abstract question into your day job.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>The model is stateless, so memory is engineering: context management over time. Short-term memory is the working conversation, kept bounded by pruning and summarization, and it dies with the session. Long-term memory is durable user facts stored externally by <code>user_id</code> (KV or vector) and retrieved when relevant, with the hard part being what to remember versus forget. Episodic memory is indexed summaries of past sessions, RAG over the agent's own history. A checkpointer is short-term durability, not long-term memory. And the unifying discipline is fighting context-window blow-up, lost-in-the-middle, cost, and latency, by keeping the <em>right small</em> set of things in context, not everything.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d26">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: planning and task decomposition, how agents break a big goal into steps they can actually execute.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d25-langgraph-orchestration.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 25 &middot; LangGraph &amp; orchestration</div></a>
+    <a data-nav="next" class="next" href="d27-planning-decomposition.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 27 &middot; Planning &amp; decomposition</div></a>
+  </div>
+
+  <div class="foot">Module 4 &middot; Agents &amp; Tool Use &middot; Day 26 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

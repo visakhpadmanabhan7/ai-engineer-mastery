@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 39 · LoRA &amp; QLoRA</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 6 &middot; Fine-tuning &amp; Model Adaptation</span>
+    <span class="pill">Day 39</span>
+    <span class="pill">50 min</span>
+    <span class="diff" title="Difficulty: advanced"><i class="on"></i><i class="on"></i><i class="on"></i></span>
+  </div>
+
+  <h1>LoRA &amp; QLoRA</h1>
+  <p class="lede">LoRA is why fine-tuning went from a cluster-scale luxury to something a small team does on one GPU. Understand it once, properly, and you can explain the single most practical idea in modern model adaptation, and answer the QLoRA follow-up most candidates fumble.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Explain PEFT and why training a small fraction of parameters works.</li>
+      <li>Describe LoRA: freeze the base, learn a low-rank update as two small matrices A and B.</li>
+      <li>Reason about rank r and alpha, and give a sane default starting point.</li>
+      <li>Explain QLoRA as LoRA on a 4-bit quantized base, and why it fits a big model on one GPU.</li>
+      <li>Decide when to use LoRA, when to use QLoRA, and whether to merge the adapter.</li>
+    </ul>
+  </div>
+
+  <h2>The idea: most of a fine-tune lives in a tiny subspace</h2>
+  <div class="prose">
+    <p>Full fine-tuning updates every weight in the model, which is enormous and expensive (Day 38). The insight behind <strong>LoRA (Low-Rank Adaptation)</strong> is that the <em>change</em> you actually need to apply for one downstream task is far smaller than the model itself. The update has, in practice, low "intrinsic rank": it can be well approximated by a much smaller object. So instead of learning a full-size weight update, you learn a compact low-rank stand-in for it.</p>
+    <p>This is the heart of <strong>parameter-efficient fine-tuning (PEFT)</strong>: freeze the giant pretrained model entirely, and train only a small set of new parameters bolted alongside it. You get most of the quality of full fine-tuning while training on the order of one percent of the parameters, with a fraction of the memory and a small, portable artifact at the end.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"LoRA freezes the pretrained weights and learns a <strong>low-rank update</strong> beside them: for a weight matrix W, instead of training a full update &Delta;W, I train two small matrices A and B whose product B&middot;A approximates &Delta;W. Only A and B get gradients, roughly one percent of the parameters, so I can fine-tune a large model on a single GPU and keep a tiny, swappable adapter per task." That answer hits the mechanism, the efficiency, and the deployment story in three sentences.</p>
+  </div>
+
+  <h2>1 &middot; LoRA, mechanically</h2>
+  <div class="prose">
+    <p>Take any weight matrix in the model that you want to adapt, call it W (frozen). Full fine-tuning would learn a full-size update &Delta;W and use <code>W + &Delta;W</code>. LoRA refuses to materialize &Delta;W. Instead it factors that update into two skinny matrices:</p>
+    <ul>
+      <li><strong>A</strong>: projects the input <em>down</em> to a small rank r (dimensions r &times; d).</li>
+      <li><strong>B</strong>: projects back <em>up</em> to full size (dimensions d &times; r).</li>
+    </ul>
+    <p>The effective weight becomes <code>W + (alpha / r) &middot; B&middot;A</code>. W stays frozen; only A and B are trained. Because r is tiny (think 8, 16, 32) compared to the full dimension d (thousands), B&middot;A has very few parameters even though it has the same shape as &Delta;W. That is the whole trick: a big update, represented cheaply as the product of two small matrices.</p>
+  </div>
+
+  <div class="diagram">  FULL FINE-TUNE                       LoRA (rank r)
+  ──────────────                       ─────────────
+                                       W is FROZEN ❄  (no gradients)
+   input x                              input x ───────┬──────────────┐
+     │                                                 │              │
+   ┌─▼─────────────┐                        ┌──────────▼──────────┐   │
+   │   W + ΔW      │  ← ΔW is               │  W  (frozen, d×d)   │   │ (parallel path)
+   │  (d×d, ALL    │    full-size           └──────────┬──────────┘   │
+   │   trainable)  │    & trained                      │        ┌─────▼─────┐  A: d→r  (small)
+   └─┬─────────────┘                                   │        │     A     │
+     │                                                 │        └─────┬─────┘
+     ▼                                                 │        ┌─────▼─────┐  B: r→d  (small)
+   output                                              │        │     B     │  ← only A,B trained
+                                                       │        └─────┬─────┘
+                                                       │   (alpha/r)·(B·A)
+                                                       └────────►(+)◄──┘
+                                                                  │
+                                                                  ▼
+                                                                output
+   trainable params: ~100%              trainable params: ~1%  (just A and B)</div>
+
+  <div class="prose">
+    <p>Two consequences fall straight out of the diagram. First, <strong>memory plummets</strong>: you do not store gradients or optimizer state for W, only for the tiny A and B, which is most of the savings. Second, <strong>the adapter is a separate, tiny file</strong>. The base model is untouched, so you can train many adapters (one per task or tenant), store them cheaply, and load whichever you need on top of the same frozen base.</p>
+  </div>
+
+  <h2>2 &middot; Rank r and alpha: the two knobs</h2>
+  <div class="prose">
+    <p>LoRA has two parameters worth understanding:</p>
+    <ul>
+      <li><strong>Rank r</strong> is the capacity of the adapter, how expressive the low-rank update is allowed to be. Higher r can capture a more complex behavior change but adds parameters and risks overfitting on small data; lower r is leaner and often plenty for narrow form/style tasks. Common starting values sit in the 8 to 32 range, and you raise r only if the task is genuinely complex and the data supports it.</li>
+      <li><strong>Alpha</strong> is a scaling factor on the adapter's contribution; the update is applied as <code>(alpha / r) &middot; B&middot;A</code>, so alpha controls how strongly the learned update is injected relative to the frozen weights. A common convention is to set alpha to roughly r or 2r and treat the ratio, not the raw numbers, as the thing you tune.</li>
+    </ul>
+    <p>The intuition to carry into an interview: <strong>r is "how much room the adapter has to learn," alpha/r is "how loud the adapter speaks."</strong> If a LoRA fine-tune underfits, raise r (more capacity) or the effective scale; if it overfits a small dataset, lower r. You are not expected to recite exact best values, but you are expected to know what each knob does and that you would sweep them on a validation set.</p>
+  </div>
+
+  <h2>3 &middot; QLoRA: fit a big model on one GPU</h2>
+  <div class="prose">
+    <p>LoRA already shrinks the <em>trainable</em> parameters, but the frozen base model still has to live in GPU memory, and a large model in full precision can be too big to load at all. <strong>QLoRA</strong> closes that gap with one more move: <strong>quantize the frozen base to 4-bit precision</strong>, then run LoRA on top of it.</p>
+    <ul>
+      <li>The huge base weights are loaded in a compact 4-bit form, slashing the memory just to <em>hold</em> the model.</li>
+      <li>Those base weights stay frozen; you never train in 4-bit. The trainable LoRA adapters (A and B) are kept in higher precision, and gradients only flow through them.</li>
+      <li>The result: you can fine-tune a model that would not even fit in full precision on a single consumer or modest cloud GPU, with quality close to higher-precision LoRA on many tasks.</li>
+    </ul>
+    <p>The clean mental model: <strong>QLoRA = LoRA + a 4-bit frozen base</strong>. LoRA cut the cost of <em>training</em> parameters; QLoRA additionally cuts the cost of <em>storing</em> the frozen model, and together they put large-model fine-tuning within reach of one GPU.</p>
+  </div>
+
+  <div class="callout warning">
+    <span class="label">The trade-off to name</span>
+    <p>QLoRA trades a little fidelity for a lot of memory. Quantizing the base to 4-bit can introduce small quality loss versus full or 16-bit precision, usually minor and often acceptable, but it is a real knob, not free. Reach for plain LoRA (higher-precision base) when you have the memory and want maximum quality; reach for QLoRA when the model would not otherwise fit, or when one-GPU economics matter more than the last point of quality. Knowing that QLoRA is "LoRA when you are memory-bound, at a small fidelity cost" is the senior distinction.</p>
+  </div>
+
+  <h2>4 &middot; Merging adapters (and when not to)</h2>
+  <div class="prose">
+    <p>At serving time you have a choice. You can keep the adapter <strong>separate</strong> and apply it on top of the frozen base at inference, which is what lets you hot-swap adapters per task or per tenant on a single shared base. Or you can <strong>merge</strong> the adapter into the weights, folding <code>(alpha/r)&middot;B&middot;A</code> back into W to produce a single standalone model with no LoRA overhead and no extra inference step.</p>
+    <ul>
+      <li><strong>Merge</strong> when you are deploying one fixed behavior and want the simplest, fastest artifact (no adapter machinery at inference). Note you cannot cleanly merge a QLoRA adapter into a 4-bit base without dequantizing first.</li>
+      <li><strong>Keep separate</strong> when you serve many tasks or tenants from one base and want to swap adapters dynamically, or you are still iterating and want to drop in new adapter versions without touching the base.</li>
+    </ul>
+    <p>That swappability, many tiny adapters over one frozen base, is one of LoRA's quietly most useful properties for a multi-tenant or multi-task product.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: choose a config for a real task</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>Task: fine-tune a mid-size open model to emit a strict JSON ticket shape in a house tone, on 400 clean pairs, with a single modest cloud GPU. Reason out the config a senior would pick.</p>
+  </div>
+  <div class="diagram">  DECISION                  CHOICE              WHY
+  ──────────────────────────────────────────────────────────────────────
+  Full FT or PEFT?          LoRA                400 examples + one GPU; full FT is
+                                                overkill and would risk forgetting.
+
+  LoRA or QLoRA?            LoRA if the base    The model is mid-size, so a higher-
+                           fits; QLoRA if not   precision base likely fits one GPU →
+                                                plain LoRA for best quality. Switch to
+                                                QLoRA only if memory is the wall.
+
+  Rank r?                   start r ≈ 8-16      Narrow form/style task, small data:
+                                                low rank is enough; raise only if it
+                                                underfits on the val set.
+
+  Alpha?                    ≈ r or 2r           Tune the alpha/r ratio, not raw numbers.
+
+  Epochs / LR?              2-3 epochs, low LR  Day 38 forgetting rule still applies.
+
+  Merge?                    one behavior →      Single fixed task → merge for the
+                            merge               simplest serving artifact. (Keep
+                                                separate if MaiQ-style multi-tenant.)</div>
+  <div class="prose">
+    <p>The point is not that these exact numbers are universal, they are sane starting points you would validate. The senior move is reasoning from the constraints (data size, GPU memory, single vs multi-task) to the config, and knowing which knob you would turn first if the held-out eval disappointed.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Say each answer out loud in full sentences, as if to an interviewer. Then open the solution and compare. The gap is your lesson.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>Explain to a skeptical staff engineer why training two small matrices A and B can substitute for updating a full weight matrix, without hand-waving.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>The claim is not that A and B equal full fine-tuning; it is that the <em>update</em> a single downstream task requires has low intrinsic rank, so it is well approximated by a low-rank matrix, the product B&middot;A. We keep the frozen W and add <code>(alpha/r)&middot;B&middot;A</code> as the effective update, training only A (down-projection to rank r) and B (up-projection back), which is on the order of one percent of the parameters. We do not change the model's capacity, only how much of the weight space the fine-tune is allowed to move, and empirically that small subspace captures most of the task-specific behavior. If it underfits, we raise r; that is the controlled lever, and it is far cheaper and less forgetting-prone than moving every weight.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>Your model is too large to even load in full precision on the one GPU you have. You still want to fine-tune it. What do you reach for, what exactly changes versus plain LoRA, and what do you give up?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Reach for QLoRA: load the frozen base in 4-bit so it fits in memory, then train LoRA adapters (kept in higher precision) on top, with gradients flowing only through the adapters, never through the quantized base. Versus plain LoRA the only change is the base precision (4-bit instead of 16-bit), which is what makes the model fit; the adapter mechanism is identical. What you give up is a small amount of fidelity from quantizing the base, usually minor and often acceptable, but a real trade-off, so you would use plain LoRA when memory allows and reserve QLoRA for the memory-bound case. Also note you cannot cleanly merge the adapter back into a 4-bit base without dequantizing.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>You run a multi-tenant product and several tenants each want the model fine-tuned to their own tone. Why is LoRA almost ideal here, and would you merge?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>LoRA shines because the base stays frozen and each tenant's fine-tune is a tiny, separate adapter file: you store one shared base plus many small adapters instead of a full model copy per tenant, which is far cheaper, and you can load the right adapter on top of the shared base per request. You would NOT merge in this case, merging folds the adapter into the weights and produces a standalone model, which kills the swappability that makes the multi-tenant story work. Keep adapters separate and hot-swap them; merge only when you are shipping a single fixed behavior and want the leanest possible serving artifact.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's Module 6 slice and common 2026 screens. Drill the one-line keys, then expand each into a 90-second answer with Claude using protocol prompt #2.</p>
+  <ul class="q-list">
+    <li>What is LoRA and why is it efficient?
+      <div class="a">Key: freeze base weights, train small low-rank adapter matrices A and B; ~99% fewer trainable params, swappable adapters.</div></li>
+    <li>What is QLoRA?
+      <div class="a">Key: LoRA on top of a 4-bit quantized frozen base; fits big-model fine-tuning on one GPU, at a small fidelity cost.</div></li>
+    <li>What do rank r and alpha control?
+      <div class="a">Key: r = adapter capacity (how much it can learn); alpha/r = how strongly the update is injected; sweep on a val set, start r&asymp;8-32.</div></li>
+    <li>Why does LoRA cut memory so much when r is just part of the story?
+      <div class="a">Key: most savings are not storing gradients/optimizer state for the frozen base; only the tiny A and B carry optimizer state.</div></li>
+    <li>When do you keep an adapter separate vs merge it?
+      <div class="a">Key: keep separate for multi-task/multi-tenant hot-swapping; merge for one fixed behavior and the leanest serving artifact.</div></li>
+    <li>LoRA vs QLoRA &mdash; when each?
+      <div class="a">Key: plain LoRA when the base fits and you want max quality; QLoRA when memory-bound, accepting a small quantization quality drop.</div></li>
+    <li>What is the core assumption that makes LoRA work at all?
+      <div class="a">Key: the task-specific weight update has low intrinsic rank, so a low-rank product B&middot;A approximates it well.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (15&ndash;20 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>No GPU needed to build the mental model. Read the Hugging Face <a href="https://huggingface.co/docs/peft/main/en/conceptual_guides/lora">PEFT LoRA conceptual guide</a> and skim a <code>LoraConfig</code> in their <a href="https://huggingface.co/docs/peft/main/en/index">PEFT docs</a>: locate <code>r</code>, <code>lora_alpha</code>, and <code>target_modules</code>, and write one sentence each on what they do. Then sketch (on paper or in a comment) the config you would pass for the worked-example task above, and justify your r, alpha, and merge decision against the constraints. If you have a GPU or Colab, optionally run a tiny LoRA fine-tune on a few dozen pairs end to end.</p>
+    <p class="muted" style="font-size:13.5px">Stretch: read the abstract of the original QLoRA paper (Dettmers et al.) for the 4-bit-base framing in the authors' own words, just the abstract is enough to anchor the claim. See <a href="../../tools.html">Tools &amp; Claude</a> for access.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>The swappable-adapter property maps cleanly onto how you already think about MaiQ. Your hybrid retrieval into pgvector and your Skill Store both live in a multi-tenant world where users author their own behavior, so the LoRA pattern, one frozen base plus a small adapter per task or tenant, is exactly the shape you would reach for if a fine-tune were ever justified, and you would keep adapters separate to preserve that per-tenant swappability rather than merging. You do not claim to have trained production LoRA at MaiQ, and you should not; the honest, strong answer is that you can reason about the cost trade-off the same way you reasoned about retrieval cost when you cut inference cost 37%: pick the cheapest lever (LoRA over full FT, QLoRA only when memory-bound) and validate it on a held-out set. That cost-aware, measurement-first instinct is the through-line interviewers reward.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>LoRA freezes the base and learns a low-rank update as two small matrices A and B, training roughly one percent of the parameters because the task-specific update has low intrinsic rank. Rank r sets the adapter's capacity and alpha/r sets how loudly it speaks; start small and sweep. QLoRA adds a 4-bit quantized frozen base so a large model fine-tunes on one GPU, trading a little fidelity for a lot of memory. Keep adapters separate for multi-task/multi-tenant swapping, merge only for a single fixed deployment.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d39">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: preference tuning &mdash; RLHF and DPO, how models learn tone, safety, and helpfulness beyond SFT.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d38-how-finetuning-works.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 38 &middot; How fine-tuning works</div></a>
+    <a data-nav="next" class="next" href="d40-preference-tuning-dpo.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 40 &middot; Preference tuning (RLHF, DPO)</div></a>
+  </div>
+
+  <div class="foot">Module 6 &middot; Fine-tuning &amp; Model Adaptation &middot; Day 39 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

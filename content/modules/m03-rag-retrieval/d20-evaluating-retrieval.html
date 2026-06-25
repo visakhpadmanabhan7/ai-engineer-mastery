@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 20 · Evaluating retrieval</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 3 &middot; RAG &amp; Retrieval</span>
+    <span class="pill">Day 20</span>
+    <span class="pill">55 min</span>
+    <span class="diff" title="Difficulty: advanced"><i class="on"></i><i class="on"></i><i class="on"></i></span>
+  </div>
+
+  <h1>Evaluating retrieval</h1>
+  <p class="lede">Everything in this module, chunking, hybrid search, reranking, query transformation, is a guess until you can measure it. Today you build the discipline that separates engineers who <em>tune</em> RAG from engineers who <em>tweak</em> it: a golden set, the right metrics, and a path from offline numbers to a safe online rollout. This is the heart of your edge.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Build a golden set of (query, ideal_answer, ideal_chunks) and explain why each field exists.</li>
+      <li>Compute and interpret recall@k, MRR, and NDCG, and say which one you trust most and why.</li>
+      <li>Separate retrieval evaluation from generation evaluation, and stop conflating the two failures.</li>
+      <li>Name the generation-side metrics (faithfulness, answer relevancy) and where they belong.</li>
+      <li>Walk the full path from offline golden set to shadow/interleave to a guarded online A/B.</li>
+    </ul>
+  </div>
+
+  <h2>1 &middot; You cannot improve what you do not measure</h2>
+  <div class="prose">
+    <p>Here is the trap. You swap a chunking strategy, eyeball five queries, decide it "feels better," and ship. Next week answers regress on a query family you never looked at, and you have no way to know which change caused it. RAG has too many knobs, chunk size, overlap, embedder, top-k, fusion weights, reranker, query transforms, for intuition to track. Evaluation turns each of those from a vibe into a number you can move on purpose and defend in review.</p>
+    <p>The first commitment is the most important and the most skipped: <strong>build a golden set</strong>, a fixed, curated collection of questions with known-correct answers and known-correct source chunks, that you run every candidate change against. Without it, every "improvement" is a story; with it, every improvement is a measured delta.</p>
+  </div>
+
+  <h2>2 &middot; The golden set: (query, ideal_answer, ideal_chunks)</h2>
+  <div class="prose">
+    <p>Each golden example carries three fields, and the third is the one beginners omit and seniors insist on:</p>
+    <ul>
+      <li><strong>query</strong>, a realistic question, ideally mined from real user logs, not invented at your desk.</li>
+      <li><strong>ideal_answer</strong>, the correct response a human would accept. This is for evaluating <em>generation</em>.</li>
+      <li><strong>ideal_chunks</strong>, the specific source passages that <em>contain</em> the answer. This is for evaluating <em>retrieval</em>, independently of what the generator does with them.</li>
+    </ul>
+    <p>That separation is the whole point. If you only store ideal answers, a bad final answer tells you something broke but not <em>where</em>, retrieval or generation. By labeling which chunks <em>should</em> have been retrieved, you can ask a sharper question: "did the right chunk make it into the top-k at all?" That is a pure retrieval question, answerable without ever calling the generator.</p>
+  </div>
+
+  <pre><code><span class="tok-c"># A golden set is just data. Start with 30-50 hand-labeled examples;</span>
+<span class="tok-c"># grow it by mining production queries that failed.</span>
+golden = [
+  {
+    <span class="tok-s">"query"</span>: <span class="tok-s">"what is the webhook retry limit on the Pro plan?"</span>,
+    <span class="tok-s">"ideal_answer"</span>: <span class="tok-s">"Pro retries failed webhooks up to 5 times over 24h."</span>,
+    <span class="tok-s">"ideal_chunks"</span>: [<span class="tok-s">"doc_42#webhooks-retry"</span>, <span class="tok-s">"doc_42#plan-limits"</span>],
+  },
+  <span class="tok-c"># … 30-50+ of these, tagged by intent &amp; difficulty</span>
+]</code></pre>
+
+  <div class="prose">
+    <p>Two practical notes. Tag each example by intent and difficulty so you can read metrics <em>per slice</em> (a change that helps simple lookups may hurt multi-hop). And keep the set alive: a golden set that never absorbs new failures slowly stops representing real traffic, the curation discipline you will meet again in Module 5.</p>
+  </div>
+
+  <h2>3 &middot; Recall@k: the metric that matters most</h2>
+  <div class="prose">
+    <p><strong>Recall@k</strong> answers the single most important retrieval question: <em>did we retrieve the relevant chunk(s) at all, somewhere in the top k?</em> It is the recall ceiling for everything downstream, because a reranker can only reorder what was retrieved, and a generator can only ground in what it was given. If the right chunk is not in the top-k, no amount of clever prompting or reranking can save the answer. That is why recall@k is the metric you optimize first and trust most.</p>
+  </div>
+
+  <div class="diagram">  recall@k = (# of ideal chunks found in the top-k) / (total ideal chunks)
+
+  query: "Pro plan webhook retry limit"   ideal_chunks = {A, B}
+
+  retrieved top-5:  [ C, A, D, E, F ]      A found, B missed
+  recall@5 = 1/2 = 0.50      ← B never made it in: hard ceiling on quality
+
+  fix the recall miss FIRST (chunking? embedder? hybrid? wider k?),
+  THEN worry about ordering.</div>
+
+  <div class="prose">
+    <p>Watch the k. <strong>recall@20</strong> tells you whether the chunk is reachable at all (a retrieval-and-indexing question); <strong>recall@5</strong> tells you whether it survives into the small window you actually feed the generator (a ranking question). A common diagnosis pattern: recall@20 is high but recall@5 is low, your retriever <em>finds</em> the chunk but <em>ranks</em> it poorly, which is precisely the gap a reranker (Day 18) closes. Read both.</p>
+  </div>
+
+  <h2>4 &middot; MRR and NDCG: when order and grades matter</h2>
+  <div class="prose">
+    <p>Recall@k ignores <em>where</em> in the list the relevant chunk landed. Two more metrics add that.</p>
+    <p><strong>MRR (Mean Reciprocal Rank)</strong> rewards getting <em>a</em> relevant chunk high. For each query it takes <code>1 / (rank of the first relevant result)</code>, then averages over queries. First-position hits score 1.0, second 0.5, third 0.33. It is the right lens when one good chunk is enough and you care that it surfaces near the top (e.g. a single-answer lookup).</p>
+  </div>
+
+  <div class="diagram">  MRR = mean over queries of  1 / (rank of first relevant result)
+
+  q1: first relevant at rank 1  → 1/1 = 1.00
+  q2: first relevant at rank 3  → 1/3 = 0.33
+  q3: first relevant at rank 2  → 1/2 = 0.50
+  MRR = (1.00 + 0.33 + 0.50) / 3 = 0.61</div>
+
+  <div class="prose">
+    <p><strong>NDCG (Normalized Discounted Cumulative Gain)</strong> is the most complete: it handles <em>graded</em> relevance (a chunk can be "perfect = 3", "useful = 1", "irrelevant = 0", not just yes/no) and applies a <em>logarithmic discount</em> so a relevant chunk lower in the list contributes less. DCG sums each result's gain divided by <code>log2(rank + 1)</code>; you then normalize by the ideal ordering's DCG so the score sits in [0, 1] and is comparable across queries. Use NDCG when relevance is not binary and ranking quality across the whole list matters.</p>
+  </div>
+
+  <div class="diagram">  NDCG: graded gains, log-discounted by position, then normalized.
+
+  retrieved ranks →   1     2     3     4
+  relevance grade     3     0     2     1
+  discount 1/log2(r+1) /1   /1.58 /2    /2.32
+  DCG = 3/1 + 0/1.58 + 2/2 + 1/2.32 = 3 + 0 + 1.0 + 0.43 = 4.43
+
+  ideal order (3,2,1,0): IDCG = 3/1 + 2/1.58 + 1/2 = 3 + 1.27 + 0.5 = 4.77
+  NDCG = DCG / IDCG = 4.43 / 4.77 ≈ 0.93   ← strong ranking, not perfect</div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"Recall@k asks <em>did we retrieve it at all</em> and is the ceiling on every downstream step, so I optimize it first. MRR rewards ranking the first relevant result high, good when one chunk suffices. NDCG is graded and log-discounted, the most complete when relevance has degrees. I separate retrieval metrics from generation metrics so a bad answer points at the right culprit, and I never trust an offline win until it survives a shadow run and a guarded A/B."</p>
+  </div>
+
+  <h2>5 &middot; Retrieval eval is not generation eval</h2>
+  <div class="prose">
+    <p>A RAG answer can fail in two structurally different places, and collapsing them is the most common evaluation mistake.</p>
+    <ul>
+      <li><strong>Retrieval failure</strong>, the right chunk never reached the generator. The model answered from the wrong context, or from nothing. Caught by recall@k / MRR / NDCG against <code>ideal_chunks</code>. No generator needed.</li>
+      <li><strong>Generation failure</strong>, the right chunk <em>was</em> retrieved, but the model ignored it, contradicted it, or padded the answer with unsupported claims. Caught by faithfulness and answer-relevancy against the produced answer.</li>
+    </ul>
+    <p>The decision tree is liberating: <em>was the ideal chunk in the top-k?</em> If no, it is a retrieval problem, fix chunking, embeddings, hybrid weighting, or k, and do not touch the prompt. If yes but the answer is still wrong, it is a generation problem, fix the prompt, grounding instructions, or model. Evaluating them separately means every regression has a clear owner.</p>
+  </div>
+
+  <div class="diagram">  bad final answer
+        │
+        ▼
+  ideal chunk in top-k?
+     ├─ NO  → RETRIEVAL problem   → chunking / embedder / hybrid / k / rerank
+     └─ YES → GENERATION problem  → prompt / grounding / model
+                 │
+                 ▼
+           measure faithfulness (did it stick to the context?)
+           measure answer relevancy (did it address the question?)</div>
+
+  <h2>6 &middot; Generation-side metrics (forward ref to Module 5)</h2>
+  <div class="prose">
+    <p>You will go deep on these in Module 5; here is the vocabulary so the boundary is clear. RAGAS-style, LLM-as-judge metrics score the generated answer:</p>
+    <ul>
+      <li><strong>Faithfulness</strong>, the one to trust most: is every claim in the answer supported by the retrieved context? This is the anti-hallucination metric, it catches the model inventing beyond its sources.</li>
+      <li><strong>Answer relevancy</strong>: does the answer actually address the question, or does it wander?</li>
+      <li><strong>Contextual precision/recall</strong>: of the retrieved chunks, how many were relevant, and were the relevant ones ranked well, a generation-eval framing that loops back to the retrieval metrics above.</li>
+    </ul>
+    <p>The key boundary: retrieval metrics need only <code>ideal_chunks</code> and are cheap and deterministic; generation metrics need the produced answer and usually an LLM judge. Keep them in separate stages of your eval harness so a retrieval change is scored on retrieval metrics, not muddied by generator noise.</p>
+  </div>
+
+  <h2>7 &middot; Proving a change is better: offline &rarr; shadow &rarr; online</h2>
+  <div class="prose">
+    <p>An offline win on your golden set is necessary but not sufficient, the golden set is a sample, and production is the whole distribution. Promote a change through three gates, each catching what the previous misses:</p>
+  </div>
+
+  <div class="diagram">  1. OFFLINE  (golden set)        fast, cheap, repeatable
+        run candidate vs current, compare recall@k / MRR / NDCG per slice
+        gate: does it win without regressing any slice?
+                  │ pass
+                  ▼
+  2. SHADOW / INTERLEAVE          real traffic, no user impact
+        shadow: run new retriever alongside old on live queries, log both
+        interleave: blend both lists, see which gets the click/citation
+        catches: real query distribution, latency, failures offline missed
+                  │ pass
+                  ▼
+  3. ONLINE A/B  (per-user)       the real verdict, with a safety net
+        split users, compare outcome metrics, run to significance
+        GUARDRAILS: latency p95, cost/query, faithfulness floor → auto-rollback</div>
+
+  <div class="prose">
+    <p><strong>Offline</strong> on the golden set is your fast inner loop: cheap, deterministic, run on every change, and the gate is "wins without regressing any slice." <strong>Shadow mode</strong> runs the new retriever on real traffic without affecting users (log its results alongside the live one), exposing the real query distribution, real latency, and real failure modes your curated set never contained; <strong>interleaving</strong> blends old and new results into one list and sees which side earns the click or citation, a sensitive comparison with little risk. <strong>Online A/B</strong> is the final verdict: split users, compare outcome metrics, run to statistical significance, but never without <em>guardrail metrics</em>, latency p95/p99, cost per query, and a faithfulness floor, that trip an automatic rollback if the "better" retriever quietly made things slower, pricier, or less grounded. A retrieval win that doubles latency or halves faithfulness is not a win.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: a chunking change, scored honestly</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>Hypothesis: switching from fixed 256-token chunks to parent-child chunking (Day 14) will raise retrieval quality. You run both against a 40-example golden set, tagged by intent.</p>
+  </div>
+  <div class="diagram">  metric (top-5)        fixed-256    parent-child    verdict
+  recall@5 (overall)      0.78          0.86          ↑ retrieves more
+  recall@5 (multi-hop)    0.55          0.72          ↑ big win on hard slice
+  recall@5 (exact-lookup) 0.91          0.88          ↓ slight regression
+  MRR                     0.61          0.69          ↑ ranks first hit higher
+  NDCG                    0.70          0.77          ↑ better overall order
+
+  → net win, but exact-lookup regressed. Inspect those queries:
+    parent chunks dilute exact identifiers. Action: keep parent-child,
+    but ensure BM25 (Day 15) is in the hybrid mix to protect exact-match.
+  → THEN shadow on live traffic, watch latency (bigger parents = more tokens),
+    THEN guarded A/B with a faithfulness floor.</div>
+  <div class="prose">
+    <p>Notice what the per-slice read bought you. The overall recall@5 went up, an honest engineer could have shipped on that alone, but the slice view exposed a real regression on exact-lookup queries that an aggregate number hid. That is not a reason to abandon the change; it is a reason to <em>combine</em> it with hybrid search so BM25 protects exact matches, then re-measure. The aggregate tells you <em>whether</em>; the slices tell you <em>where</em>, and the where is what you act on. This is exactly the loop that lets you run many experiments and keep only the changes that win without hidden costs.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Say each answer out loud in full sentences, as if to an interviewer. Then open the solution and compare. The gap is your lesson.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>Final answers are wrong on about 20% of queries. With your golden set, how do you decide whether to fix retrieval or fix the prompt, without guessing?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Run the failing queries through retrieval alone and check recall@k against <code>ideal_chunks</code>: for each failure, was the ideal chunk actually in the top-k? Split the failures into two buckets. Where the ideal chunk was <em>missing</em>, it is a retrieval problem, fix chunking, embeddings, hybrid weighting, or widen k, and the prompt is irrelevant. Where the ideal chunk was <em>present</em> but the answer was still wrong, it is a generation problem, measure faithfulness and answer relevancy and fix the prompt, grounding instructions, or model. The labeled ideal chunks are what let you assign each failure an owner instead of guessing, and the relative size of the two buckets tells you where to spend first.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>A change improves recall@20 but barely moves recall@5, and answers do not improve. What is the diagnosis, and what would you do, both to the pipeline and to which metric you watch?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Higher recall@20 with flat recall@5 means the retriever now <em>finds</em> the relevant chunk but still <em>ranks</em> it outside the small window you actually feed the generator, so answer quality cannot improve because the generator never sees it. That is a ranking problem, not a retrieval-coverage problem, and the canonical fix is a reranker (Day 18) that rescores the top-20 candidates and lifts the relevant one into the top-5. Watch recall@5 (and MRR) as your gating metric after adding the reranker, since recall@20 was already telling you the chunk is reachable; the open question is whether it survives the precision cut.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>Your new retriever wins clearly on the offline golden set. A teammate says "ship it." Make the case for what still has to happen, and what could make this "win" a production loss.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>The golden set is a curated sample, not the live distribution, so an offline win proves the change is promising, not safe. Promote it through two more gates: shadow or interleave on real traffic to expose the true query distribution, real latency, and failure modes the golden set never contained, then a per-user A/B run to statistical significance. Crucially, attach guardrail metrics, p95/p99 latency, cost per query, and a faithfulness floor, with automatic rollback, because a retriever that raises recall but doubles latency, inflates cost, or lowers groundedness is a net loss for users even though the offline number looked great. The win is real only when it survives real traffic without tripping a guardrail.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's RAG &amp; Retrieval slice and common 2026 screens. Drill the one-line keys, then expand each into a 90-second answer with Claude using protocol prompt #2.</p>
+  <ul class="q-list">
+    <li>What are recall@k, MRR, and NDCG?
+      <div class="a">Key: recall@k = did we retrieve it at all (most important, the ceiling); MRR = 1/rank of first relevant; NDCG = graded, log-discounted, normalized.</div></li>
+    <li>How do you evaluate generation, not just retrieval?
+      <div class="a">Key: RAGAS-style LLM-as-judge, faithfulness (trust most), answer relevancy, contextual precision/recall, scored on the produced answer.</div></li>
+    <li>How do you prove a retrieval change is actually better?
+      <div class="a">Key: offline golden set (per-slice) &rarr; shadow/interleaving on live traffic &rarr; online per-user A/B with guardrail metrics and auto-rollback.</div></li>
+    <li>Why separate retrieval eval from generation eval?
+      <div class="a">Key: a bad answer can come from a missing chunk or a misused chunk; labeling ideal_chunks lets you assign each failure an owner instead of guessing.</div></li>
+    <li>What goes into a golden set and how do you keep it useful?
+      <div class="a">Key: (query, ideal_answer, ideal_chunks) tagged by intent/difficulty; mine real failed queries continuously so it keeps representing live traffic.</div></li>
+    <li>Which retrieval metric do you optimize first and why?
+      <div class="a">Key: recall@k, because reranking and generation can only work with what was retrieved; if the chunk is not in top-k nothing downstream recovers it.</div></li>
+    <li>How do you cut RAG cost ~30% without quality loss?
+      <div class="a">Key: embed once, cache reranks, route, lower top-k, smaller generator, prompt caching, measured on the golden set so quality is held (e.g. 37% cut at ~2% retrieval drop).</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (15&ndash;25 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Hand-write a tiny golden set: 8&ndash;10 questions over a handful of your docs, each with its <code>ideal_chunks</code> labeled. Write a ten-line Python function that, given a retriever's top-k for each query, computes <strong>recall@k</strong> and <strong>MRR</strong> across the set (just sets and a reciprocal-rank average, no library needed). Run it against two retrieval settings (e.g. dense-only vs hybrid) and print the deltas. Then skim the <a href="https://docs.ragas.io/en/stable/concepts/metrics/available_metrics/">RAGAS metrics docs</a> to see context-precision/recall and faithfulness formalized, you will implement these in Module 5.</p>
+    <p class="muted" style="font-size:13.5px">Stretch: add per-intent tags to your examples and print recall@k <em>per slice</em>, then deliberately make one change that wins overall but regresses one slice, exactly the trap aggregate metrics hide.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>This is your strongest interview territory. On MaiQ you built an LLM-as-judge evaluation framework and ran 11+ retrieval and chunking experiments that cut inference cost 37% with only a 2% retrieval-quality drop, that sentence <em>is</em> this lesson lived. When an interviewer asks "how do you know your RAG is good," you do not theorize: you describe measuring retrieval against a held set, treating cost and quality as a tracked trade-off, and shipping only the changes that held quality within a tight, measured band. Make the structure explicit, separating retrieval quality from generation quality, optimizing recall first, and proving a change before rolling it out, so the 37%/2% number reads as the output of a disciplined eval loop, not a lucky tweak. That framing, "I measure, I do not guess," is exactly the senior signal this lesson is built to give you, and it is genuinely yours.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>A golden set of (query, ideal_answer, ideal_chunks) turns RAG tuning from vibes into measured deltas, and the labeled chunks are what let you separate retrieval failures from generation failures. Recall@k is the metric you optimize first and trust most, because it is the ceiling on everything downstream; MRR adds "rank the first hit high," NDCG adds graded, position-discounted scoring. Read metrics per slice, an aggregate win can hide a real regression. And never ship on an offline win alone: promote through offline, then shadow/interleave, then a guarded online A/B with latency, cost, and faithfulness guardrails. Measure, do not guess.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d20">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: the module capstone, build a measured hybrid RAG end to end and prove the reranker helps.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d19-query-transformation.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 19 &middot; Query transformation</div></a>
+    <a data-nav="next" class="next" href="d21-rag-lab.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 21 &middot; Lab, a measured hybrid-RAG</div></a>
+  </div>
+
+  <div class="foot">Module 3 &middot; RAG &amp; Retrieval &middot; Day 20 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

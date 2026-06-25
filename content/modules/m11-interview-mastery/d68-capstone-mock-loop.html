@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 68 · Capstone &mdash; a full mock loop</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 11 &middot; Interview Mastery</span>
+    <span class="pill">Day 68</span>
+    <span class="pill">120 min</span>
+    <span class="diff" title="Difficulty: advanced"><i class="on"></i><i class="on"></i><i class="on"></i></span>
+  </div>
+
+  <h1>Capstone &mdash; a full mock loop</h1>
+  <p class="lede">This is the finale. Sixty-seven days of knowledge meet the one thing that actually gets offers: performing it under interview conditions, end to end, in one sitting. Today you run the whole loop, score yourself honestly, and find the two areas to sharpen before the real thing.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Run a complete four-round interview loop solo, using Claude as the interviewer.</li>
+      <li>Perform under back-to-back pressure, the way a real on-site actually feels.</li>
+      <li>Score each round on a concrete rubric and total a readiness signal.</li>
+      <li>Identify your two weakest areas and route back to the exact days that fix them.</li>
+      <li>Walk into the real loop knowing your structure holds.</li>
+    </ul>
+  </div>
+
+  <h2>How the capstone works</h2>
+  <div class="prose">
+    <p>A real interview loop is four conversations in a row, and the difficulty is not any single one, it is doing all four while tired, without your notes, holding structure when you would rather ramble. So that is exactly how you will practice today. Block two uninterrupted hours. Run the four rounds in order, out loud, with Claude playing each interviewer. Do not pause to look things up mid-round; that is not available on the day. After each round, fill the scorecard while it is fresh.</p>
+    <p>Everything you need is below: which protocol prompt to use, what to paste, and what each round is testing. The protocol prompts live in <a href="../../tools.html">Tools &amp; Claude</a>; #2 grades a single answer, #3 runs an interactive mock.</p>
+  </div>
+
+  <div class="diagram">  THE FULL LOOP &mdash; run in order, ~2 hours
+  ┌──────────────────────────────────────────────────────────────┐
+  │ ROUND 1  Recruiter screen        ~15 min   fit, arc, comms    │
+  │ ROUND 2  Technical / AI deep-dive ~35 min  depth, correctness │
+  │ ROUND 3  Live system design       ~35 min  structure, trade-  │
+  │                                            offs, the clock    │
+  │ ROUND 4  Behavioral               ~25 min  STAR, ownership    │
+  └──────────────────────────────────────────────────────────────┘
+       then: score all four  →  pick the 2 weakest  →  revisit
+       those days  →  re-run only those rounds tomorrow</div>
+
+  <h2>Round 1 &middot; Recruiter screen (~15 min)</h2>
+  <div class="prose">
+    <p>The recruiter screen is not technical. It tests communication, your career arc, salary/logistics alignment, and a basic "can this person talk like a colleague." It is also where many strong engineers get filtered for sounding unprepared on the easy questions.</p>
+  </div>
+  <div class="callout example">
+    <span class="label">Run it &mdash; protocol #3</span>
+    <p>Paste into Claude: <em>"You are a recruiter doing a 15-minute phone screen for a mid-to-senior AI Engineer role in Germany. Ask me, one at a time: a quick intro / walk me through your background, why you are looking, why this kind of role, what you know about working with LLMs day to day, and salary expectations. Keep it conversational, push gently if an answer is vague, and at the end tell me whether you would pass me to the hiring manager and why."</em> Answer out loud. Lead with your <strong>career arc</strong> from Day 67.</p>
+  </div>
+  <div class="callout key">
+    <span class="label">What good looks like</span>
+    <p>A crisp 75-second arc that ends pointed at the role; a "why looking" answer that runs toward the opportunity, not away from the current job; and a calm, specific read on what AI engineering involves day to day. No rambling, no apologizing, no "um, I guess."</p>
+  </div>
+
+  <h2>Round 2 &middot; Technical / AI-engineering deep-dive (~35 min)</h2>
+  <div class="prose">
+    <p>This is the depth round: RAG, agents, evaluation, serving, the real mechanics. The interviewer drills until they hit the edge of your knowledge, so the test is not just correctness but how you handle the follow-up that goes one level deeper than you are comfortable.</p>
+  </div>
+  <div class="callout example">
+    <span class="label">Run it &mdash; protocol #3</span>
+    <p>Paste: <em>"You are a senior AI engineer running a 35-minute technical interview. Ask me one question at a time across RAG, agents, evaluation, and LLM serving. After each answer, ask one harder follow-up that probes the edge of what I said. Do not show me answers. Cover at least: a RAG failure-mode question, an agent design-decision question, an LLM-as-judge question, and a cost/latency optimization question. At the end, score me 1-5 on correctness, depth, and how I handled the follow-ups."</em> Answer out loud, and when you hit your edge, say so honestly and reason from first principles rather than bluffing.</p>
+  </div>
+  <div class="callout key">
+    <span class="label">What good looks like</span>
+    <p>Correct one-liners that expand into real depth on the follow-up; naming trade-offs unprompted ("I would rerank, accepting the latency cost"); and grounding answers in your MaiQ work where it fits. Handling "go deeper" gracefully, even admitting an edge and reasoning forward, scores higher than a confident wrong answer.</p>
+  </div>
+
+  <h2>Round 3 &middot; Live system design (~35 min)</h2>
+  <div class="prose">
+    <p>Now you run the Day 66 playbook for real, under time, talking the whole way. The test is structure: do you clarify before you draw, put numbers on it, deep-dive the bottleneck, and name a trade-off at every fork.</p>
+  </div>
+  <div class="callout example">
+    <span class="label">Run it &mdash; protocol #3</span>
+    <p>Paste: <em>"You are a staff engineer running a 35-minute system-design interview. Give me ONE AI/GenAI design prompt (your choice: a multi-tenant RAG assistant, an LLM gateway, an agent platform, or a semantic search service). Then play the interviewer: do not let me skip requirements or numbers, push back if I jump to architecture, and ask for trade-offs if I do not volunteer them. At the end, score me 1-5 on each of: requirements, estimates, architecture, depth of deep-dive, trade-offs, and operations."</em> Sketch on paper. Open with the clarifying sentence. Run the six phases.</p>
+  </div>
+  <div class="callout key">
+    <span class="label">What good looks like</span>
+    <p>You scope before you draw, drop at least one real number, say "the bottleneck here is X so I will deep-dive that," and state a trade-off ("I am trading Y for Z because...") at every choice. You sweep the 11-point checklist near the end and volunteer your own design's risks. The clock never runs you; you run it.</p>
+  </div>
+
+  <h2>Round 4 &middot; Behavioral (~25 min)</h2>
+  <div class="prose">
+    <p>The closer. Your five STAR stories and your set-pieces, under the social pressure of "tell me about a time...". The test is proportions, ownership, honesty, and ending on learnings.</p>
+  </div>
+  <div class="callout example">
+    <span class="label">Run it &mdash; protocol #3</span>
+    <p>Paste: <em>"You are a hiring manager running a 25-minute behavioral interview. Ask me, one at a time: tell me about something you shipped, a time something broke in production, a disagreement with a teammate, a decision you made without enough data, and finally why this company. After each, ask one probing follow-up. Score each answer 1-5 on STAR structure (was it Action-heavy?), ownership ('I' vs 'we'), a concrete result, and a learning."</em> Answer out loud, map each prompt to one of your five stories, and watch your "we" count.</p>
+  </div>
+  <div class="callout key">
+    <span class="label">What good looks like</span>
+    <p>Each story hits the proportions (Action over half), says "I" for your decisions, lands a real number, and ends on a transferable lesson. The "why this company" answer fails the copy-paste test. No hero narratives, one honest stumble per failure story.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>The scorecard &mdash; fill this honestly</h2>
+  <div class="prose">
+    <p>Score each round out of the points shown, using Claude's feedback plus your own gut read of how it <em>felt</em>. Total out of 100. This is a calibration tool, not a grade to feel good about, so be tougher on yourself than Claude is.</p>
+  </div>
+
+  <table>
+    <tr><th>Round</th><th>What you are scoring</th><th>Out of</th><th>Your score</th></tr>
+    <tr><td><b>1 &middot; Recruiter screen</b></td><td>Clear arc, ran-toward framing, calm communication</td><td>15</td><td>____ / 15</td></tr>
+    <tr><td><b>2 &middot; Technical deep-dive</b></td><td>Correctness, depth on follow-ups, trade-offs unprompted</td><td>35</td><td>____ / 35</td></tr>
+    <tr><td><b>3 &middot; System design</b></td><td>Structure, numbers, bottleneck deep-dive, trade-offs, ops</td><td>35</td><td>____ / 35</td></tr>
+    <tr><td><b>4 &middot; Behavioral</b></td><td>STAR proportions, ownership, results, learnings</td><td>15</td><td>____ / 15</td></tr>
+    <tr><td colspan="2"><b>TOTAL</b></td><td><b>100</b></td><td><b>____ / 100</b></td></tr>
+  </table>
+
+  <div class="callout concept">
+    <span class="label">Reading your total</span>
+    <p>This is a rough self-signal, not a verdict. <b>80+</b>: you are interview-ready; keep the bank warm and go apply. <b>65&ndash;79</b>: solid, with one or two soft rounds; target those before a real loop. <b>Under 65</b>: do not panic, you have the knowledge; you need reps on delivery. Re-run the weakest rounds every other day for a week and watch the number climb. The score that matters is the <em>trend</em> across repeated mock loops, not any single run.</p>
+  </div>
+
+  <h2>The loop back into the path</h2>
+  <div class="prose">
+    <p>Now make the capstone actually useful: take your <strong>two lowest-scoring areas</strong> and route straight back to the days that fix them. This is the whole point of scoring, to aim your remaining prep instead of re-reviewing everything.</p>
+  </div>
+
+  <table>
+    <tr><th>If your weakest area was...</th><th>Revisit</th></tr>
+    <tr><td>Telling project stories / behavioral structure</td><td><a href="d64-your-project-stories.html">Day 64 &middot; Your project stories (STAR)</a></td></tr>
+    <tr><td>Recall on core concepts under pressure</td><td><a href="d65-question-bank-drills.html">Day 65 &middot; Rapid-fire drills</a> + the <a href="../../question-bank.html">Question Bank</a></td></tr>
+    <tr><td>System-design structure or trade-offs</td><td><a href="d66-system-design-playbook.html">Day 66 &middot; System design playbook</a></td></tr>
+    <tr><td>Career arc / "why this company" / asking back</td><td><a href="d67-behavioral-why-company.html">Day 67 &middot; Behavioral &amp; why this company</a></td></tr>
+    <tr><td>A specific technical topic (RAG, agents, eval, serving)</td><td>The source module: <a href="../../index.html">browse the path</a> and re-drill that module's lessons</td></tr>
+  </table>
+
+  <div class="prose">
+    <p>Pick exactly two, revisit them today or tomorrow, and re-run only those rounds. Then run the full loop again in a few days with a fresh prompt. Two or three full loops, spaced, is what turns "I know this" into "I can perform this on demand."</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; the capstone itself is the practice</h2>
+  <p class="muted">Today there is one assignment, and it is the whole loop. These prompts help you run and debrief it well.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>You finish the full loop and your total is a 72, dragged down by Round 3 (system design, 22/35) and Round 1 (recruiter, 9/15). What is your exact plan for the next 48 hours?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Route to the two specific fixes, do not re-review everything. For Round 3, reopen Day 66 and re-drill the time-boxed structure and the two seniority phrases ("the bottleneck here is X" and "I am trading Y for Z"), then run two fresh system-design mocks back to back tomorrow, because that round's weakness is almost always structure under the clock, which only reps fix. For Round 1, reopen Day 67 and rehearse the career arc out loud five times until it is effortless, since a 9/15 recruiter score is usually a rusty arc, not a knowledge gap. Then, two days out, run the <em>full</em> loop again with new prompts and confirm both rounds climbed. The plan is targeted reps on the two weak rounds plus one full re-run to verify, not a vague "study more."</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>During the technical round you froze on a question you actually know, then nailed an easier one right after. In a real loop, freezing happens. What is the in-the-moment recovery, and how do you train it?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>In the moment: buy time out loud instead of going silent. "Let me think about that for a second" is completely acceptable and far better than a panicked non-answer; then anchor to first principles you do know ("okay, an LLM is a next-token predictor, so...") and build forward from there. Freezing is a state problem, not a knowledge problem, and the cure is reps under pressure, which is exactly why this capstone exists. The more cold mock questions you have faced (Day 65's uncued drills and these loops), the less the freeze fires, because the situation stops being novel. Train it by deliberately running mocks when you are a little tired, since that is the real on-site condition.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>A few final questions, mixing everything</h2>
+  <p class="muted">A grab-bag across the whole path. If all of these come out clean and cold, you are ready.</p>
+  <ul class="q-list">
+    <li>Explain how an LLM works, then pivot to why you obsess over retrieval and evaluation.
+      <div class="a">Key: next-token prediction, lossy parametric memory; that mechanism is exactly why grounding (RAG) and measurement (eval) are non-optional.</div></li>
+    <li>Design a multi-tenant RAG assistant, end to end.
+      <div class="a">Key: clarify + estimate first; ingestion &rarr; hybrid retrieval + rerank + data-layer tenant filter &rarr; grounded generation with citations &rarr; eval + tracing + cost; sweep the 11 points.</div></li>
+    <li>When would you NOT reach for an agent, and how do you eval one if you do?
+      <div class="a">Key: skip agents for small/scoped/deterministic/latency-tight tasks; eval = final-answer correctness + tool-call accuracy + trajectory, plus tracing.</div></li>
+    <li>Tell me about an AI system you shipped and what broke first.
+      <div class="a">Key: Action-heavy STAR; the retrieval-cost work or the debugging story; a ruled-out alternative, a real number, a process learning.</div></li>
+    <li>How do you cut LLM cost without losing quality, and how do you prove it?
+      <div class="a">Key: prompt caching, routing, lower top-k, smaller generator; prove with an LLM-as-judge harness against a quality floor (you did: 37% for a 2% drop).</div></li>
+    <li>Why AI engineering, why now, and why this company?
+      <div class="a">Key: forward arc (data science &rarr; JURIX research turn &rarr; MaiQ production) ending at the role; one researched specific that fails the copy-paste test.</div></li>
+    <li>What is the strongest reason I might NOT want to join? (you, to the founder)
+      <div class="a">Key: the anti-pitch; asking for the honest downside signals a clear-eyed candidate and gets you the real risks.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (your standing practice)</h2>
+  <div class="callout example">
+    <span class="label">Keep the loop alive</span>
+    <p>Save your four protocol-#3 mock prompts (recruiter, technical, design, behavioral) in a notes file as your reusable interview gym. Before any real on-site, run the matching round once the day before. Schedule a <strong>full loop every week</strong> while you are actively interviewing, each time with a different design prompt and different behavioral angles, and keep the rolling scorecard so you can see the trend. The bank from <a href="../../question-bank.html">Day 65</a> stays your daily five-minute warm-up. Tools and the protocol prompts: <a href="../../tools.html">Tools &amp; Claude</a>.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">You are interviewing from strength</span>
+    <p>Walk in remembering what you actually carry. You ship production AI on MaiQ, you built an LLM-as-judge harness and cut inference cost 37% for a 2% quality drop, you run hybrid retrieval into pgvector behind a FastAPI service, and you shipped a Skill Store that lets users build their own agents in chat, a genuinely rare credential. Behind that sits a JURIX 2024 Best Student Paper and a Grade 1.4 with Best Outgoing Student. Most candidates are reciting concepts; you have operated them. The capstone is not there to find out whether you know enough, you do. It is there to make sure the room <em>hears</em> it.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">You are ready &mdash; keep the bank alive</span>
+    <p>Sixty-eight days ago an LLM was a next-token predictor you could define; now you can design the systems around it, evaluate them, serve them at cost, and tell the story of building them under interview pressure. The knowledge is done. From here it is reps: keep the question bank warm five minutes a day, run a full mock loop each week you are interviewing, and route every weak round back to the day that fixes it. Trust your trajectory, lead with your real work, and go get the offer. You are ready.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d68">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">That is the path. Return to the dashboard, keep the bank alive, and go interview.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d67-behavioral-why-company.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 67 &middot; Behavioral &amp; "why this company"</div></a>
+    <a data-nav="next" class="next" href="../../index.html"><div class="dir">Next &rarr;</div><div class="ttl">Back to the dashboard</div></a>
+  </div>
+
+  <div class="foot">Module 11 &middot; Interview Mastery &middot; Day 68 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

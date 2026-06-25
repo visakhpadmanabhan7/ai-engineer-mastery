@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 1 · How LLMs actually work</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 1 &middot; LLM Foundations</span>
+    <span class="pill">Day 1</span>
+    <span class="pill">50 min</span>
+    <span class="diff" title="Difficulty: foundational"><i class="on"></i><i></i><i></i></span>
+  </div>
+
+  <h1>How LLMs actually work</h1>
+  <p class="lede">Before you can design RAG pipelines, agents, or evaluation harnesses, you need a crisp mental model of the thing underneath all of it. Today you build the model that makes every later topic obvious.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Explain an LLM as a next-token predictor in one sentence, then defend it.</li>
+      <li>Sketch the Transformer from the outside in: embeddings &rarr; attention &rarr; MLP &rarr; unembed.</li>
+      <li>Describe what attention computes and why it is the key idea.</li>
+      <li>Separate the three training stages (pretraining, SFT, preference tuning) and say what each buys.</li>
+      <li>Derive three engineering consequences &mdash; hallucination, knowledge cutoff, non-determinism &mdash; directly from the mechanism.</li>
+    </ul>
+  </div>
+
+  <h2>The one-sentence mental model</h2>
+  <div class="prose">
+    <p>A large language model is a function that, given a sequence of tokens, returns a <strong>probability distribution over the next token</strong>. That is the entire job. Everything else &mdash; chat, reasoning, code, "agents" &mdash; is that one operation, run in a loop, dressed up.</p>
+    <p>Hold onto that. When a model hallucinates, when it ignores half your prompt, when temperature changes the answer &mdash; you will explain all of it by returning to "it is predicting the next token from a distribution."</p>
+  </div>
+
+  <h2>1 &middot; Next-token prediction is the whole game</h2>
+  <div class="prose">
+    <p>During training the model sees trillions of tokens of text and plays one game over and over: <em>cover the next token, predict it, check, adjust.</em> Formally it learns to maximize the probability it assigns to the token that actually came next, across the whole corpus. No labels, no humans &mdash; the text labels itself. This is why it is called <strong>self-supervised</strong> pretraining.</p>
+    <p>To predict the next token <em>well</em> across all of human text, the model is forced to internalize grammar, facts, formats, styles, a bit of arithmetic, and rough world knowledge &mdash; not because anyone taught those, but because they are useful for the prediction game. Capability is a side effect of compression.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Concept</span>
+    <p>An LLM does not "look things up." Its knowledge is <strong>parametric</strong>: baked into billions of weights as a lossy compression of its training data. That single fact explains hallucination and the knowledge cutoff, and it is the reason RAG exists.</p>
+  </div>
+
+  <h2>2 &middot; The Transformer, from the outside in</h2>
+  <div class="prose">
+    <p>You do not need the math today. You need the data flow. A decoder-only Transformer (the GPT / Claude / Llama family) processes a sequence like this:</p>
+  </div>
+
+  <div class="diagram">  tokens:   "The"   "capital"   "of"   "France"   "is"
+              │         │         │        │        │
+        [ tokenizer → integer IDs ]                        ← Day 2
+              │
+        [ embedding lookup ] + [ positional info ]         turns each ID into a vector
+              │
+   ┌──────────▼───────────────────────────────────┐
+   │  Transformer block  ×  N  (e.g. 32, 80, …)    │
+   │   ├─ multi-head SELF-ATTENTION   (mix tokens) │   ← the only place tokens "talk"
+   │   ├─ feed-forward MLP            (think)      │
+   │   └─ residual + layer-norm around each        │
+   └──────────┬───────────────────────────────────┘
+              │   one rich vector per position
+        [ unembedding / linear ] → logits over the whole vocabulary
+              │
+        [ softmax ] → P(next token)   →   e.g.  "Paris" 0.91, "the" 0.02, …</div>
+
+  <div class="prose">
+    <p>Three things to notice, because interviewers probe each:</p>
+    <ul>
+      <li><strong>Attention is the only operation that moves information between positions.</strong> The MLP processes each position independently. If two tokens need to interact, attention is where it happens.</li>
+      <li><strong>Depth is repetition.</strong> The same block shape stacks N times. Early layers tend to capture syntax and local patterns; later layers capture more abstract, task-level structure.</li>
+      <li><strong>The output is a distribution, every step.</strong> The final layer projects each position's vector onto the vocabulary to get a <em>logit</em> per possible token, then softmax turns logits into probabilities.</li>
+    </ul>
+  </div>
+
+  <h2>3 &middot; Attention: the key idea</h2>
+  <div class="prose">
+    <p>Attention lets every token decide <em>which other tokens to pull information from</em>. Each token emits three vectors: a <strong>Query</strong> ("what am I looking for?"), a <strong>Key</strong> ("what do I offer?"), and a <strong>Value</strong> ("here is my content"). A token's new representation is a weighted sum of all Values, where the weight of token <em>j</em> is how well <em>i</em>'s Query matches <em>j</em>'s Key.</p>
+    <p>Intuition: in "The animal didn't cross the street because <em>it</em> was too tired," the token "it" sends out a Query that matches the Key of "animal" more than "street," so it pulls in meaning from "animal." That is coreference, learned, with no rule written for it.</p>
+    <p><strong>Multi-head</strong> means several of these attention patterns run in parallel, each free to specialize (one head tracks subjects, another tracks syntax, etc.). <strong>Causal masking</strong> means a token can only attend to earlier tokens, never future ones &mdash; mandatory for next-token prediction, and the reason generation is left-to-right.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"Attention computes, for each token, a content-based weighted average over the values of the tokens it is allowed to see, with weights given by a softmax over query&middot;key similarity. Self-attention is the mechanism that lets context change a token's meaning." Say that and you sound like you understand it, because you do.</p>
+  </div>
+
+  <h2>4 &middot; How it actually learned to be useful</h2>
+  <div class="prose">
+    <p>A raw pretrained model is a brilliant autocomplete, not an assistant. Ask it a question and it might continue with <em>more questions</em>, because that is what the internet looks like. Three stages turn it into something you can ship:</p>
+  </div>
+
+  <table>
+    <tr><th>Stage</th><th>What happens</th><th>What it buys</th></tr>
+    <tr><td><b>1. Pretraining</b></td><td>Next-token prediction on web-scale text. Months, huge GPU clusters.</td><td>Raw knowledge &amp; language ability &rarr; a <em>base model</em>.</td></tr>
+    <tr><td><b>2. SFT</b><br><span class="muted">supervised fine-tuning</span></td><td>Train on curated (instruction &rarr; good response) pairs written/curated by humans.</td><td>It learns the <em>format</em> of being a helpful assistant.</td></tr>
+    <tr><td><b>3. Preference tuning</b><br><span class="muted">RLHF / DPO</span></td><td>Humans rank responses; the model is optimized to prefer the better ones.</td><td>Tone, safety, helpfulness, refusal behavior &rarr; a <em>chat model</em>.</td></tr>
+  </table>
+
+  <div class="prose">
+    <p>You will revisit SFT and DPO properly in Module 6. For now, the takeaway is that "the model" you call via an API is a base model wrapped in two layers of human-preference shaping &mdash; which is exactly why prompting style and system messages have such leverage (Module 2).</p>
+  </div>
+
+  <h2>5 &middot; Generation is a loop</h2>
+  <div class="prose">
+    <p>The model predicts <em>one</em> token. To write a paragraph it runs autoregressively: predict a token, append it to the input, predict the next, and so on until a stop token or limit.</p>
+  </div>
+  <div class="diagram">  "The capital of France is"        → P(next) → pick "Paris"
+  "The capital of France is Paris"  → P(next) → pick "."
+  "The capital of France is Paris." → P(next) → pick &lt;end&gt;  ■ stop</div>
+  <div class="prose">
+    <p>Two consequences you will use for the rest of your career: <strong>output is generated serially</strong>, so latency grows with the number of <em>output</em> tokens (Module 7); and <strong>which token gets "picked"</strong> depends on a sampling rule (Day 3), which is where non-determinism enters.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: trace one completion</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>Prompt: <code>Translate to French: "cheese" →</code></p>
+    <p>Step 1 &mdash; tokenize the prompt into IDs. Step 2 &mdash; one forward pass produces, at the final position, a logit for every token in the vocabulary. After softmax the top of the distribution might be:</p>
+  </div>
+  <div class="diagram">  token        logit     P
+  "from"        14.2    0.74     ← "fromage" often starts here as a sub-word
+  "from" "age"  (next step continues the word)
+  " from"        9.1    0.004
+  "cheese"       8.7    0.003
+  "Kä"           7.0    0.0005   ← German leaked in; low probability
+  …</div>
+  <div class="prose">
+    <p>The model picks (say) <code>from</code>, appends it, runs again, gets <code>age</code>, appends, and converges on <strong>fromage</strong>. Notice: it never "knew" the French word as a fact it retrieved; it assigned high probability to the sub-word continuation because that pattern dominated its training data. Correctness and confidence are <em>not</em> the same thing &mdash; a wrong but common pattern can also get high probability. That gap is hallucination.</p>
+  </div>
+
+  <h2>Why this matters for you as an AI engineer</h2>
+  <div class="callout key">
+    <span class="label">Three consequences, derived not memorized</span>
+    <p><b>Hallucination</b> &larr; knowledge is lossy parametric compression, and the objective rewards <em>plausible</em> tokens, not <em>true</em> ones. Fix: ground it (RAG, Module 3) and check it (eval, Module 5).<br>
+    <b>Knowledge cutoff</b> &larr; weights freeze at the end of training. Fix: put fresh facts in the context, don't expect them in the weights.<br>
+    <b>Non-determinism</b> &larr; generation samples from a distribution. Fix: lower temperature for reproducibility; never assume byte-identical outputs (Day 3).</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Say each answer out loud in full sentences, as if to an interviewer. Then open the solution and compare. The gap is your lesson.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>A colleague says: "We don't need RAG, the model already knows our product docs because they're on the internet." Give the two-sentence rebuttal grounded in how LLMs store knowledge.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Even if the docs were in pretraining, the model stores them as <em>lossy parametric</em> memory blended with everything else, so it will confidently paraphrase, conflate versions, and invent specifics &mdash; and anything updated after the cutoff is simply absent. RAG puts the exact, current passage in the context at query time, which is both more accurate and auditable (you can cite the source). Bonus senior signal: "and it lets us update knowledge by changing a database row instead of retraining."</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>Why does an LLM's response latency depend much more on the length of the <em>output</em> than the length of the <em>input</em>?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>The input prompt is processed in a single parallel forward pass (the "prefill"). Output, by contrast, is autoregressive: each new token needs its own forward pass and cannot start until the previous token exists. So output tokens are produced serially, one network pass each, while input tokens are consumed roughly all at once. N output tokens &asymp; N sequential steps. (We will quantify this and meet the KV cache on Day 4 and in Module 7.)</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>In one sentence each, name what pretraining, SFT, and RLHF/DPO contribute. Then: which stage most explains why a good system prompt changes behavior so much?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Pretraining = raw knowledge and language from next-token prediction; SFT = the <em>format</em> of following instructions, learned from curated instruction/response pairs; preference tuning (RLHF/DPO) = alignment to human preference for tone, helpfulness and safety. System prompts have leverage chiefly because of SFT and preference tuning: the model was explicitly shaped to treat instruction-style and system-style context as something to obey, so steering it through that channel is using a behavior it was trained into.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's Foundations deep-dive and common 2026 screens. Drill the one-line keys, then expand each into a 90-second answer with Claude using protocol prompt #2.</p>
+  <ul class="q-list">
+    <li>Explain how an LLM generates text, to a smart non-engineer.
+      <div class="a">Key: next-token prediction over a vocabulary, run in a loop; context steers the distribution.</div></li>
+    <li>What is self-attention and why was it the breakthrough?
+      <div class="a">Key: content-based weighted mixing of tokens; lets context reshape meaning, parallelizable across the sequence (unlike RNNs).</div></li>
+    <li>What is the difference between a base model and an instruct/chat model?
+      <div class="a">Key: base = pure next-token predictor; chat = base + SFT + preference tuning, so it follows instructions and is aligned.</div></li>
+    <li>Why do LLMs hallucinate, mechanistically?
+      <div class="a">Key: objective rewards plausible continuations, knowledge is lossy & parametric; high probability &ne; true.</div></li>
+    <li>What does "knowledge cutoff" mean and how do you work around it in production?
+      <div class="a">Key: weights freeze at training end; supply fresh facts via context/RAG or tools, don't rely on the weights.</div></li>
+    <li>Why might the same prompt give different answers on two calls?
+      <div class="a">Key: sampling from a distribution (temperature/top-p); set temperature low/0 for near-determinism, but caveats remain.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (15&ndash;20 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Open the Anthropic <a href="https://docs.claude.com/en/docs/build-with-claude/overview">API docs</a> or the Workbench and make one call with a trivial prompt. Then change <strong>one thing</strong>: set <code>temperature: 0</code> on <code>claude-haiku-4-5</code>, call it 3&times;, and confirm the outputs are (near) identical. Now set <code>temperature: 1</code> and call 3&times; more. Watch the distribution come to life. You just observed Day 3's entire lesson before reading it. (Use Haiku or Sonnet here: the Opus and Fable tiers do not accept <code>temperature</code> and steer through prompting instead, see <a href="../../tools.html">Tools &amp; Claude</a>.)</p>
+    <p class="muted" style="font-size:13.5px">No API key yet? Do it conceptually in the Claude web app: ask the same creative question in three fresh chats and note how answers diverge. See <a href="../../tools.html">Tools &amp; Claude</a> to set up access.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>At MaiQ you ship features <em>on top of</em> this mechanism, so you can speak to it from experience: your retrieval and grounding work exists precisely because parametric memory is lossy; your LLM-as-judge evaluation exists because "plausible" output needs to be checked against "correct." When an interviewer asks "how do LLMs work," the strong move is to answer the mechanism in 60 seconds, then pivot: "and the reason I obsess over retrieval and evaluation is that this mechanism makes grounding and measurement non-optional." That links theory to your 37% cost-reduction story without rehearsing it yet.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>LLM = next-token predictor over a vocabulary. Attention is the only cross-token operation and is what makes context matter. Knowledge is lossy and parametric, which directly forces RAG, grounding, and evaluation. Generation is a serial loop, which directly forces caching and latency work. You now have the spine the whole path hangs on.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d01">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: how text becomes tokens, and why that quietly controls cost and quality.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="../../index.html"><div class="dir">&larr; Path</div><div class="ttl">Back to the dashboard</div></a>
+    <a data-nav="next" class="next" href="d02-tokenization-embeddings.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 2 &middot; Tokenization &amp; embeddings</div></a>
+  </div>
+
+  <div class="foot">Module 1 &middot; LLM Foundations &middot; Day 1 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 31 · Why evaluation is the job</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 5 &middot; Evaluation &amp; Observability</span>
+    <span class="pill">Day 31</span>
+    <span class="pill">50 min</span>
+    <span class="diff" title="Difficulty: foundational"><i class="on"></i><i></i><i></i></span>
+  </div>
+
+  <h1>Why evaluation is the job</h1>
+  <p class="lede">Anyone can wire an LLM into a demo. The engineers who get hired and promoted are the ones who can prove a system got better. Evaluation is the skill that turns "it feels good" into "it improved 9 points on faithfulness, here is the run." This module is your edge.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>State the eval-driven development loop in one sentence and explain why "you cannot improve what you cannot measure" is literally the job.</li>
+      <li>Argue why evaluation is the single most underrated AI engineering skill of 2026.</li>
+      <li>Draw the three-layer eval pyramid and assign the right method to each layer.</li>
+      <li>Separate offline from online evaluation and say what each one can and cannot catch.</li>
+      <li>Spot and rewrite the "accuracy is 92 percent" anti-pattern into a defensible claim.</li>
+    </ul>
+  </div>
+
+  <h2>The loop that defines the discipline</h2>
+  <div class="prose">
+    <p>Software you write deterministically: same input, same output, a unit test passes or fails forever. LLM systems are not like that. The same prompt can shift with a model update, a retrieval change, a temperature setting, or the phase of the moon (sampling). So you cannot rely on "I changed the prompt and it looks better." You need a <strong>measurement harness</strong> that scores the system the same way every time, so that a change is a number that went up or down, not a vibe.</p>
+    <p>That harness drives an iteration loop. It is the same loop whether you are tuning a chunker, a prompt, an agent, or a model choice:</p>
+  </div>
+
+  <div class="diagram">  ┌──────────────────────────────────────────────────────────────┐
+  │   EVAL-DRIVEN DEVELOPMENT LOOP                                │
+  │                                                              │
+  │   1. define "good"   →  a metric + a dataset of cases        │
+  │            │                                                 │
+  │   2. measure baseline  →  score the current system          │
+  │            │                                                 │
+  │   3. change ONE thing  →  prompt / chunker / model / top-k   │
+  │            │                                                 │
+  │   4. re-measure        →  same dataset, same metric          │
+  │            │                                                 │
+  │   5. compare           →  better? keep. worse? revert.       │
+  │            │                                                 │
+  │            └────────────────► back to 3  (next idea)         │
+  └──────────────────────────────────────────────────────────────┘</div>
+
+  <div class="prose">
+    <p>Notice what this loop forbids. You cannot change three things at once and claim credit, because you will not know which one helped. You cannot ship on a hunch, because the number, not the hunch, is the gate. And you cannot improve what you never defined, because step 1 forces you to write down what "good" even means <em>before</em> you start fiddling. The loop is not bureaucracy. It is the only thing that makes progress on a non-deterministic system additive instead of a random walk.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"For an LLM feature I treat evaluation as the development environment, not a final QA step. I define a metric and a dataset first, measure a baseline, then change one variable at a time and re-measure on the same set. A change ships only if the number moves in the right direction. You cannot improve what you cannot measure, and with non-deterministic systems measurement is the only honest signal."</p>
+  </div>
+
+  <h2>Why this is the most underrated skill of 2026</h2>
+  <div class="prose">
+    <p>Two years ago the hard part was getting an LLM to do anything useful at all. That is now a solved, commoditized API call. The hard part moved. In 2026 the bottleneck on almost every AI product is the same: a team can build a prototype in a week, but they cannot tell whether their changes make it better or worse, so they stall in an endless loop of subjective tweaks that nobody can defend to a stakeholder.</p>
+    <p>Evaluation is underrated for a simple human reason: it is unglamorous. Building a flashy agent demo gets applause. Building the harness that catches a 6 percent faithfulness regression before it reaches a customer gets a shrug, right up until the day it saves the product. The engineers who internalize this early are disproportionately valuable, because they are the ones who can say "ship it" or "do not ship it" with evidence. That sentence, backed by data, is what separates a senior AI engineer from someone who writes prompts.</p>
+    <p>It is also the most transferable skill in the field. Models change every quarter, frameworks come and go, but the discipline of defining a metric, building a dataset, and measuring honestly outlives all of them. Invest here and the investment compounds.</p>
+  </div>
+
+  <h2>The three-layer eval pyramid</h2>
+  <div class="prose">
+    <p>You do not run every kind of check at every moment. Cost and speed force a hierarchy. Cheap deterministic checks run constantly, expensive LLM-based judgment runs nightly, and irreplaceable human judgment runs sparingly on a small sample. Think of it as a pyramid: wide and cheap at the bottom, narrow and expensive at the top.</p>
+  </div>
+
+  <div class="diagram">                    ▲  expensive, slow, irreplaceable
+                   ╱ ╲
+                  ╱ H ╲      HUMAN spot-checks      — weekly, ~20-50 cases
+                 ╱─────╲     experts read outputs, catch what nothing
+                ╱       ╲    else can; ground-truth for calibration
+               ╱  JUDGE  ╲   LLM-AS-JUDGE           — nightly / per-PR
+              ╱           ╲  LLM scores vs a rubric (faithfulness,
+             ╱─────────────╲ helpfulness); scales human-like judgment
+            ╱  PROGRAMMATIC  ╲ PROGRAMMATIC checks   — every request / CI
+           ╱                  ╲ exact match, JSON-valid, regex, contains,
+          ╱────────────────────╲ latency, cost, schema — cheap & instant
+                    ▼  cheap, fast, runs constantly</div>
+
+  <div class="prose">
+    <p>Each layer earns its place:</p>
+    <ul>
+      <li><strong>Programmatic (bottom, run cheap and often).</strong> Deterministic assertions with a true ground truth: is the JSON valid, does the answer contain the required ID, is the date in range, did it stay under the latency and cost budget. These are nearly free, so you run them on every request and in CI. They catch the dumb, frequent failures fast.</li>
+      <li><strong>LLM-as-judge (middle, run nightly).</strong> For qualities with no string-equality answer, faithfulness, relevance, tone, you have an LLM score the output against a rubric. It approximates human judgment at a fraction of the cost, so you run it nightly or on every pull request over a golden set. This is tomorrow's lesson and your signature skill.</li>
+      <li><strong>Human spot-checks (top, run sparingly).</strong> Humans, ideally domain experts, read a small weekly sample. They catch the subtle failures a judge misses and, crucially, they are the ground truth you calibrate the judge against. You cannot afford them at scale, which is exactly why the lower layers exist.</li>
+    </ul>
+    <p>The mistake juniors make is running only the top or only the bottom. All programmatic and you measure nothing about quality. All human and you cannot iterate fast enough to matter. The pyramid is the answer: most of your signal comes cheaply, the expensive layers are reserved for what only they can do.</p>
+  </div>
+
+  <h2>Offline versus online</h2>
+  <div class="prose">
+    <p>There is a second axis, orthogonal to the pyramid: <strong>when</strong> you measure relative to real traffic.</p>
+    <ul>
+      <li><strong>Offline evaluation</strong> runs against a fixed dataset, your golden set, before you ship. You control the inputs and you know the expected answers, so it is repeatable and safe. It answers "is the new version better than the old version on cases I curated?" It is your pre-deploy gate.</li>
+      <li><strong>Online evaluation</strong> measures the live system on real user traffic. There is usually no labeled ground truth, so you lean on implicit signals: thumbs-down rate, escalation to a human, whether the user's task actually succeeded, retry rate. It answers "is it actually working for real people, on inputs I never anticipated?"</li>
+    </ul>
+    <p>You need both, and neither substitutes for the other. Offline is repeatable but blind to the real input distribution. Online is real but noisy, lagging, and arrives only after you have shipped. The senior framing: offline eval gives you the confidence to deploy, online eval tells you the truth about whether you should have. We go deep on both in Day 34.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: trace a real iteration</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>You suspect a smaller, cheaper generator model would save money on a support assistant. Watch the loop run.</p>
+    <p><strong>1. Define good.</strong> Metric: faithfulness (is every claim supported by the retrieved context?) scored 1 to 5 by an LLM judge, plus a hard programmatic check that the answer cites at least one source ID. Dataset: 40 real support questions with known-good source documents.</p>
+    <p><strong>2. Baseline.</strong> Current large model scores mean faithfulness 4.6, citation-present 100 percent, cost $0.011 per query.</p>
+    <p><strong>3. Change one thing.</strong> Swap only the generator to the smaller model. Nothing else moves.</p>
+    <p><strong>4. Re-measure on the same 40.</strong> Faithfulness 4.5, citation-present 98 percent, cost $0.004 per query.</p>
+    <p><strong>5. Compare.</strong> Quality dropped 0.1 (inside noise), one case lost its citation, cost fell 64 percent. You inspect the one failure, find it was a formatting slip you can fix with a prompt tweak, fix it, re-run, citations back to 100 percent. Ship.</p>
+  </div>
+  <div class="prose">
+    <p>That is the entire discipline in one trace. The decision was not "the small model felt fine." It was a measured, defensible trade made one variable at a time. This is exactly the shape of the experiments you have run on MaiQ, dozens of small, measured changes instead of one big guess.</p>
+  </div>
+
+  <h2>The anti-pattern that flunks interviews</h2>
+  <div class="callout warning">
+    <span class="label">Anti-pattern: "accuracy is 92 percent"</span>
+    <p>A naked accuracy number is meaningless and an interviewer will pounce. <b>92 percent of what, measured how, against what baseline, on which data?</b> "Accuracy" hides a dozen choices: what counts as correct, who decided, was the test set representative, and most damning, what was the number <em>before</em> your change? A model can be 92 percent accurate and strictly worse than the 94 percent baseline it replaced. A number with no baseline and no denominator is not evidence, it is decoration.</p>
+  </div>
+  <div class="prose">
+    <p>Rewrite it like an engineer: "On a held-out set of 200 support tickets, labeled by two annotators, faithfulness rose from 4.2 to 4.6 out of 5 and unsupported-claim rate fell from 11 percent to 4 percent, while latency held flat." Now every word is defensible. The number is anchored to a baseline, a denominator, a definition, and a measurement method. That is the difference between sounding senior and sounding like you read a blog post.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Say each answer out loud in full sentences, as if to an interviewer. Then open the solution and compare. The gap is your lesson.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>A teammate says: "I improved the prompt, the answers are clearly better, let us ship it." What is wrong with this, and what minimum process would you ask for before you approve the merge?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>The claim is unfalsifiable: "clearly better" is a vibe, measured on whatever handful of cases the teammate happened to look at, with no baseline. The risk is real, prompt changes routinely fix the three examples you eyeballed while silently regressing a dozen you did not. Minimum process: (1) a small fixed evaluation set of representative cases, (2) a metric that captures what "better" means here (e.g. faithfulness plus a format check), (3) the baseline score of the current prompt on that set, (4) the new prompt's score on the same set. Approve only if the metric moved up without regressing the guardrails. The senior addition: "and check the cases that got worse, not just the average, an average can rise while your worst cases get dangerous."</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>You can afford to run human review on only 30 examples a week, but you ship changes daily. Design which checks run at which layer so you still iterate daily without flying blind.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Use the pyramid. <strong>Bottom (every request and every CI run):</strong> programmatic checks, JSON validity, required-field presence, citation present, latency and cost budgets. These gate every deploy automatically and cost nothing. <strong>Middle (nightly and on every PR):</strong> an LLM-as-judge over a frozen golden set scoring faithfulness and relevance, this is what lets you iterate daily with a quality signal, not just a format signal. <strong>Top (weekly, 30 cases):</strong> spend the scarce human budget on a curated sample, deliberately oversampling low-confidence and recently-changed areas, and use those labels to confirm the judge is still calibrated. The daily loop runs on programmatic plus judge; the weekly human pass keeps the judge honest. You are never blind, and you never burn the human budget on things a machine could have caught.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>Your offline golden set says the new retrieval config is 8 points better, so you ship it. A week later users complain it is worse. Both measurements are real. What is the most likely explanation, and what does it teach you about offline versus online?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>The golden set is not representative of real traffic. Most likely your curated cases over-represent the clean, well-formed questions you thought of when you built the set, while real users send messier, more ambiguous, or differently-distributed queries that the new config handles worse. Offline eval can only measure what is in the dataset; if the dataset's distribution differs from production, an offline win can be a real regression online. The lesson: offline eval is necessary but never sufficient, it gives confidence to deploy, not proof of success. The fix is to continuously mine real production traces (especially failures and low-confidence cases) back into the golden set so it tracks reality, and to confirm offline wins with an online signal (shadow or canary) before fully rolling out. We build exactly this in Day 33 and Day 34.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's Evaluation &amp; Observability slice and common 2026 screens. Drill the one-line keys, then expand each into a 90-second answer with Claude using protocol prompt #2.</p>
+  <ul class="q-list">
+    <li>Offline versus online evaluation, when do you use each?
+      <div class="a">Key: offline = fixed dataset vs expected (golden / replay / synthetic), repeatable pre-deploy gate; online = live signals (thumbs-down, escalation, task success) on real traffic. Use both, neither substitutes for the other.</div></li>
+    <li>Why is evaluation considered the hardest and most underrated part of AI engineering in 2026?
+      <div class="a">Key: building a prototype is commoditized; the bottleneck is proving a change is better on a non-deterministic system, so teams stall in subjective tweaks. Eval is the unglamorous skill that lets you ship or block with evidence.</div></li>
+    <li>What is eval-driven development?
+      <div class="a">Key: treat the eval harness as the dev environment, define metric + dataset first, measure baseline, change one variable, re-measure on the same set, keep only if the number improves. You cannot improve what you cannot measure.</div></li>
+    <li>Walk me through the layers of an evaluation strategy.
+      <div class="a">Key: pyramid, programmatic checks cheap and constant (format, latency, cost, exact match), LLM-as-judge nightly for subjective quality (faithfulness, tone), human spot-checks weekly on a small sample as ground truth and judge calibration.</div></li>
+    <li>What is wrong with reporting "our model is 92 percent accurate"?
+      <div class="a">Key: 92 percent of what, measured how, against which baseline, on what data. No denominator, definition, or baseline means it is not evidence, a model can be 92 percent and worse than the 94 percent it replaced.</div></li>
+    <li>How do you decide whether a change is good enough to ship?
+      <div class="a">Key: it must beat the current baseline on the offline metric without regressing guardrails, inspect the cases that got worse not just the mean, then confirm with an online signal (shadow / canary) before full rollout, with rollback ready.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (15&ndash;20 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Pick any small LLM task you have running, or spin up a trivial one with the Anthropic <a href="https://docs.claude.com/en/docs/build-with-claude/overview">API</a>: "summarize this paragraph in one sentence." Write down, on paper, the full eval-driven loop for it before you touch code: (1) what does "good" mean here, in one measurable sentence; (2) what 5 example inputs would form a tiny golden set; (3) what is the cheapest programmatic check you could run on the output (length cap? must not invent a number not in the source?); (4) what is your current baseline behavior. Then change one thing about the prompt, run your 5 cases by hand, and decide keep-or-revert using your own rule. You just executed the loop the whole module formalizes.</p>
+    <p class="muted" style="font-size:13.5px">No API key yet? Do it in three fresh chats in the Claude web app and score by hand. See <a href="../../tools.html">Tools &amp; Claude</a> to set up access.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>This module is where your resume bullet becomes a 20-minute interview answer. Your 11+ retrieval and chunking experiments on MaiQ were not tinkering, they were the eval-driven loop run 11 times: define a metric, measure a baseline, change one variable, re-measure, keep or revert. That is why you could land a 37 percent inference-cost cut with only a 2 percent retrieval-quality drop, you had a measurement harness that let you trade cost against quality deliberately instead of guessing. When an interviewer asks "how do you know your AI changes are improvements," do not start with the number. Start with the method: "I run an eval-driven loop, one variable at a time against a fixed set, and let the measurement gate the change." Then land the 37 percent as the payoff. The method is the senior signal, the number is the proof.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>Evaluation is the development environment for non-deterministic systems, not a QA afterthought, you cannot improve what you cannot measure. The eval-driven loop (define, baseline, change one thing, re-measure, keep or revert) is the discipline that makes progress additive. Match method to cost with the pyramid: programmatic cheap and constant, LLM-judge nightly, human weekly. Offline gives confidence to deploy, online tells the truth about whether you should have. Never report a number without a baseline, a denominator, and a definition. Master this module and you own the skill the 2026 market most undervalues.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d31">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: LLM-as-judge, your signature skill, building a rubric that scores quality the same way every time.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="../m04-agents/d30-agents-lab.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 30 &middot; Agents lab</div></a>
+    <a data-nav="next" class="next" href="d32-llm-as-judge.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 32 &middot; LLM-as-judge</div></a>
+  </div>
+
+  <div class="foot">Module 5 &middot; Evaluation &amp; Observability &middot; Day 31 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

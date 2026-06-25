@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 14 · Chunking strategies</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 3 &middot; RAG &amp; Retrieval</span>
+    <span class="pill">Day 14</span>
+    <span class="pill">55 min</span>
+    <span class="diff" title="Difficulty: intermediate"><i class="on"></i><i class="on"></i><i></i></span>
+  </div>
+
+  <h1>Chunking strategies</h1>
+  <p class="lede">Chunking is the most underrated decision in RAG and the one that most quietly determines whether your system works. Get it right and mediocre embeddings still retrieve well; get it wrong and the best embedder cannot rescue you.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Explain why chunking, not the embedding model, usually sets the quality ceiling.</li>
+      <li>Compare fixed-size, semantic, sentence-window, and parent-child chunking and pick a default.</li>
+      <li>Choose a starting chunk size and overlap, and say what each knob trades off.</li>
+      <li>Handle PDFs and tables with layout-aware parsing instead of naive text extraction.</li>
+      <li>Name the production splitters and when to use each, plus Anthropic's Contextual Retrieval.</li>
+    </ul>
+  </div>
+
+  <h2>Why chunking dominates quality</h2>
+  <div class="prose">
+    <p>You cannot embed a 40-page document as one vector and expect precise retrieval, a single vector cannot represent dozens of distinct ideas, and you cannot fit whole documents into the context budget anyway. So you split documents into <strong>chunks</strong>: the atomic unit that gets embedded, indexed, retrieved, and handed to the model. Every downstream stage operates on chunks, which means the chunk boundary is the resolution of your entire system.</p>
+    <p>Here is the asymmetry that makes chunking the highest-leverage decision. If the answer to a question is split across a chunk boundary, no embedding model, no reranker, and no clever query can ever retrieve it whole, the information simply is not in any one unit. Conversely, a clean chunk that holds a complete thought retrieves well even with an ordinary embedder. Chunking sets the ceiling; everything downstream operates under it.</p>
+  </div>
+
+  <div class="diagram">  BAD chunking (split mid-thought):
+    chunk A: "...SSO is available on the Pro and Enterprise plans"
+    chunk B: "starting in release 3.2. Configuration is under Settings..."
+    query "which version added SSO to Pro?"  →  retrieves A  →  answer has no version  ✗
+
+  GOOD chunking (thought stays whole):
+    chunk A: "SSO is available on Pro and Enterprise plans starting in release 3.2.
+              Configuration is under Settings > Security."
+    query "which version added SSO to Pro?"  →  retrieves A  →  complete, citable answer  ✓</div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"Chunking sets the retrieval ceiling: it decides what a single retrievable unit even is. If the evidence for a question is split across a boundary, no embedder or reranker can recover it. So I treat chunk design as the first thing to tune, not the last." That is a senior framing.</p>
+  </div>
+
+  <h2>1 &middot; The four strategies you must know</h2>
+  <div class="prose">
+    <p>There are many splitters, but four mental models cover the field. Know each, its trade-off, and when it wins.</p>
+  </div>
+
+  <table>
+    <tr><th>Strategy</th><th>How it works</th><th>Trade-off</th><th>Use when</th></tr>
+    <tr><td><b>Fixed-size + overlap</b></td><td>Cut every N tokens, carry an overlap window into the next chunk.</td><td>Cheap, fast, predictable. Blindly cuts mid-sentence and mid-idea.</td><td>Baseline, uniform prose, fast prototyping.</td></tr>
+    <tr><td><b>Semantic</b></td><td>Split where adjacent sentences' embeddings diverge (a topic shift).</td><td>Boundaries follow meaning, but costs embeddings up front and is sensitive to the threshold.</td><td>Topically dense docs where fixed-size mangles boundaries.</td></tr>
+    <tr><td><b>Sentence-window</b></td><td>Index single sentences; at retrieval, expand the hit with its neighbors.</td><td>Pinpoint retrieval, fuller context to the model. Two-step plumbing.</td><td>FAQs, dense factual text, precise lookups.</td></tr>
+    <tr><td><b>Parent-child</b></td><td>Index small child chunks; return the larger parent (section) they belong to.</td><td>Best of both: precise matching, rich context. Stores two granularities.</td><td><b>Start here.</b> Strong general default.</td></tr>
+  </table>
+
+  <div class="prose">
+    <p>The pattern shared by the two best options, sentence-window and parent-child, is <strong>decoupling what you match on from what you return</strong>. Small units retrieve precisely (a tight vector means a sharp match); large units give the model enough surrounding context to actually answer. Match small, return big. That single idea is why parent-child is the recommended starting point: index granular children, hand the model their parent section.</p>
+  </div>
+
+  <div class="diagram">  PARENT-CHILD  (match small, return big)
+
+    parent section  ─────────────────────────────────────────────
+    "Single Sign-On. SSO is available on Pro and Enterprise plans
+     starting in release 3.2. Configuration is under Settings >
+     Security. Supported providers are Okta, Azure AD, and Google."
+        │ split into children, embed each
+        ├── child c1  "SSO available on Pro and Enterprise, release 3.2"   ← matched
+        ├── child c2  "Configuration under Settings > Security"
+        └── child c3  "Supported providers: Okta, Azure AD, Google"
+                 │
+        query matches c1  →  but RETURN the whole parent section to the model
+                              (precise match, full context)</div>
+
+  <h2>2 &middot; Chunk size and overlap</h2>
+  <div class="prose">
+    <p>Two knobs, both with a clear intuition. There is no universal best value; the right number depends on your embedder's max tokens, the granularity of your questions, and the context budget. But you need defaults to start, and you need to know which way to turn each dial.</p>
+    <ul>
+      <li><strong>Chunk size: start at 256 to 512 tokens.</strong> Too small and a chunk lacks the context to answer (a sentence fragment retrieves but does not inform). Too large and the vector becomes a blurry average of several ideas, so it matches everything weakly and nothing strongly, and you waste context budget shipping irrelevant text. Smaller favors precision; larger favors recall and context.</li>
+      <li><strong>Overlap: 10 to 20 percent of chunk size.</strong> Overlap repeats a window of text between adjacent chunks so a thought straddling a boundary survives in at least one whole. Too little and you reintroduce the boundary problem; too much and you bloat the index with near-duplicates that crowd retrieval and cost more to store and embed.</li>
+    </ul>
+    <p>Crucial detail: measure in <strong>tokens, not characters</strong>, because the embedder has a token limit, and exceeding it silently truncates the chunk so the tail is never embedded. Use the same tokenizer family your embedder uses.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Concept</span>
+    <p>Chunk size is a precision-versus-context dial. Small chunks make sharp vectors that match exactly but may lack the surrounding context to answer; large chunks carry context but blur into an average that matches weakly. Parent-child sidesteps the trade by matching on small children and returning the large parent.</p>
+  </div>
+
+  <h2>3 &middot; Layout-aware parsing: PDFs and tables</h2>
+  <div class="prose">
+    <p>Before you can chunk, you must extract clean text, and this is where real corpora bite. A naive PDF-to-text dump reads multi-column layouts in the wrong order, glues headers into body text, drops the structure of lists, and turns tables into an unreadable smear of numbers with the row and column meaning gone. Garbage extraction guarantees garbage chunks no matter how clever your splitter.</p>
+    <ul>
+      <li><strong>Respect document structure.</strong> Use a parser that recovers headings, sections, lists, and reading order, then chunk <em>along</em> those boundaries (split on headers, keep a section together) rather than cutting blind every N tokens.</li>
+      <li><strong>Treat tables specially.</strong> A table flattened to text loses the row/column relation that gives a cell meaning. Better: keep the table as a unit (e.g. as Markdown so headers stay attached to cells), or generate a short natural-language summary of the table to embed alongside it so a semantic query can find it.</li>
+      <li><strong>Carry metadata onto every chunk.</strong> Source document, section title, page, and any tenant or access tag. You will need these for filtering, citations, and multi-tenant isolation later in the module.</li>
+    </ul>
+    <p>Layout-aware parsing tools (Unstructured, LlamaParse, Docling, and similar) exist precisely because this step is hard and high-impact. Budget real effort here; it pays back across every query.</p>
+  </div>
+
+  <h2>4 &middot; Production splitters and Contextual Retrieval</h2>
+  <div class="prose">
+    <p>You rarely write a splitter from scratch. The common production-grade ones, and when each fits:</p>
+    <ul>
+      <li><strong>RecursiveCharacterTextSplitter</strong> — the sane default. Tries to split on a priority list of separators (paragraphs, then lines, then sentences, then words) so it breaks at the largest natural boundary that fits the size. Far better than a blind fixed cut.</li>
+      <li><strong>MarkdownHeaderTextSplitter</strong> — splits on Markdown headings and attaches the heading path as metadata. Ideal for docs, wikis, and anything with clean structure.</li>
+      <li><strong>Token splitter</strong> — splits by exact token count using the model's tokenizer, so you never exceed the embedder's limit. Pair with the recursive splitter for the size guarantee.</li>
+      <li><strong>Semantic splitter</strong> — embeds sentences and cuts at similarity valleys. More expensive, best where topic boundaries matter more than uniform size.</li>
+    </ul>
+    <p>One technique worth knowing by name because it directly attacks the boundary problem: <strong>Anthropic's Contextual Retrieval</strong>. The idea is that an isolated chunk often loses the context that made it meaningful (a chunk says "the policy applies to all plans" but never names <em>which</em> policy). Before embedding, you prepend a short, model-generated sentence that situates the chunk within its document (for example, "This chunk is from the SSO section of the 2026 Enterprise security guide, discussing plan availability"). You embed the contextualized chunk. The retrievable unit now carries its own context, which measurably improves retrieval, especially for chunks that would otherwise be ambiguous in isolation.</p>
+  </div>
+
+  <div class="diagram">  CONTEXTUAL RETRIEVAL  (situate the chunk before embedding)
+
+    raw chunk:   "It is available on Pro and Enterprise starting in 3.2."
+                  └─ ambiguous alone: WHAT is available?
+
+    + generated context prefix:
+                 "From the SSO section of the Acme Security Guide:"
+
+    embed THIS:  "From the SSO section of the Acme Security Guide:
+                  It is available on Pro and Enterprise starting in 3.2."
+                  └─ now self-describing → retrieves on 'SSO version' queries  ✓</div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: pick a strategy for a messy corpus</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>You are indexing a product knowledge base: 60 percent prose help articles, 30 percent API reference with code blocks and tables, 10 percent scanned policy PDFs. Walk the decision.</p>
+  </div>
+  <div class="prose">
+    <p><strong>Parse first.</strong> The scanned PDFs need OCR plus layout recovery; the API reference needs a parser that keeps code blocks and tables intact (flattening a parameter table destroys it). <strong>Chunk by type.</strong> Help articles: Markdown-header split into sections, then recursive split to ~400 tokens with 15 percent overlap, indexed parent-child so a matched sentence returns its whole section. API reference: keep each endpoint and its parameter table as one unit; do not let a 400-token cut sever a function from its arguments. Tables: store as Markdown and add a one-line summary to embed. <strong>Add context.</strong> Apply Contextual Retrieval so a chunk like "returns a 404 if not found" carries "from the GET /users endpoint" into its embedding. <strong>Metadata everywhere.</strong> Tag source, section, and doc type so you can filter and cite.</p>
+    <p>Notice there is no single chunk size for the whole corpus. The senior move is to chunk <em>by content type</em>, then measure. Which is exactly the experiment loop Day 19 formalizes.</p>
+  </div>
+
+  <h2>Why this matters for you as an AI engineer</h2>
+  <div class="callout key">
+    <span class="label">Three consequences, derived not memorized</span>
+    <p><b>Tune chunking first</b> &larr; it sets the ceiling every other stage operates under, so a chunking experiment often beats swapping the embedding model.<br>
+    <b>Match small, return big</b> &larr; parent-child and sentence-window decouple precise matching from rich context, which is why parent-child is the default starting point.<br>
+    <b>Parsing is half the battle</b> &larr; layout-aware extraction of PDFs and tables determines chunk quality before any splitter runs, so naive text dumps quietly cap your accuracy.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Say each answer out loud in full sentences, as if to an interviewer. Then open the solution and compare. The gap is your lesson.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>Your RAG system retrieves the right document but the answer is always missing a key detail (a version number, a price, a date). Chunk size is 800 tokens, overlap is zero. Diagnose and propose two fixes.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>The likely cause is two-fold. First, <strong>zero overlap</strong> means any fact that straddles a chunk boundary lands half in one chunk and half in the next, so the specific detail is severed from its subject. Second, <strong>800 tokens is large</strong>, so each chunk's vector is a blurry average of several ideas and matches the query weakly, surfacing an adjacent chunk rather than the one with the detail. Fixes: (1) add 10 to 20 percent overlap so boundary-straddling facts survive whole in at least one chunk; (2) reduce chunk size toward 300 to 500 tokens for sharper, more precise vectors, ideally with a parent-child setup so you match on the small precise child but still return the surrounding parent for context. Then re-evaluate on a golden set to confirm the detail now appears.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>A teammate proposes embedding each whole document as one vector "to keep context complete." Give the two-sentence rebuttal and one case where a larger unit is actually fine.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>A single document vector averages dozens of distinct ideas into one blurry point, so it matches almost any query weakly and pinpoints nothing, and it cannot fit into the context budget anyway, defeating retrieval's purpose of finding the <em>relevant passage</em>. You want chunks small enough to make sharp, discriminating vectors, then optionally return a larger parent for context. The one case where a larger unit is fine: very short, single-topic documents (a one-paragraph FAQ entry, a single Slack message) that already <em>are</em> one coherent thought, where there is nothing to split.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>Explain Contextual Retrieval to an engineer who says "just make the chunks bigger so they have more context." Why is prepending generated context different from, and often better than, enlarging the chunk?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Enlarging the chunk adds <em>adjacent</em> text, which dilutes the vector and may still not include the document-level facts a chunk needs to be self-describing (a chunk three pages into a doc has no idea which product or section it belongs to no matter how big you make it). Contextual Retrieval instead prepends a short, targeted, model-generated sentence that names exactly the missing context (which document, which section, which entity) before embedding, so the unit becomes self-describing without ballooning in size. You get the disambiguation that makes a chunk retrievable on the right queries while keeping chunks small and precise, you are adding the <em>right</em> context, not just <em>more</em> text. It is a precision tool, where "make it bigger" is a blunt one.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's RAG &amp; Retrieval slice and common 2026 screens. Drill the one-line keys, then expand each into a 90-second answer with Claude using protocol prompt #2.</p>
+  <ul class="q-list">
+    <li>Compare fixed-size, semantic, sentence-window, and parent-child chunking.
+      <div class="a">Key: fixed = N-token + overlap (cheap, breaks boundaries); semantic = embedding-similarity splits; sentence-window = index a sentence, expand at retrieval; parent-child = index small, return parent. Start parent-child.</div></li>
+    <li>How do you choose chunk size and overlap?
+      <div class="a">Key: embedder max tokens + question granularity + context budget; start 256 to 512 tokens, 10 to 20 percent overlap, measured in tokens not characters.</div></li>
+    <li>Why does chunking dominate RAG quality so much?
+      <div class="a">Key: it sets the retrievable unit; if evidence is split across a boundary no embedder or reranker can recover it. Tune it first.</div></li>
+    <li>How do you handle PDFs and tables in ingestion?
+      <div class="a">Key: layout-aware parsing to recover reading order and structure; keep tables as a unit (Markdown) or summarize them; carry section/page metadata onto each chunk.</div></li>
+    <li>What is Anthropic's Contextual Retrieval and what does it fix?
+      <div class="a">Key: prepend a short generated context sentence situating the chunk in its document before embedding, so isolated chunks stop being ambiguous and retrieve correctly.</div></li>
+    <li>Why measure chunk size in tokens rather than characters?
+      <div class="a">Key: the embedder has a token limit; exceeding it silently truncates the chunk tail so part of the text is never embedded. Use the embedder's tokenizer.</div></li>
+    <li>Why is parent-child usually the recommended default?
+      <div class="a">Key: it decouples matching from returning, precise small-child vectors for the match, large parent section for context, getting precision and context at once.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (15&ndash;25 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Take one real document and chunk it three ways, then compare by eye. Using LangChain's <a href="https://python.langchain.com/docs/how_to/#text-splitters">text splitters</a>, run (1) a fixed character split at 200 tokens with no overlap, (2) a <code>RecursiveCharacterTextSplitter</code> at 400 tokens with 60-token overlap, and (3) a <code>MarkdownHeaderTextSplitter</code> if the doc has headings. Print the chunks and ask: does any chunk cut a sentence or a table in half? Does any chunk lack the context to stand alone? Then read Anthropic's <a href="https://www.anthropic.com/news/contextual-retrieval">Contextual Retrieval</a> write-up and, for two of your worst chunks, hand-write the one-line context prefix you would prepend before embedding.</p>
+    <p class="muted" style="font-size:13.5px">No environment set up? Do it in the Claude web app: paste a document, ask Claude to split it into ~400-token chunks at natural boundaries, and critique where it cut. See <a href="../../tools.html">Tools &amp; Claude</a>.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>This lesson is your <strong>11+ retrieval and chunking experiments</strong> on MaiQ, in detail. You did not guess at a chunk size; you ran a structured sweep over chunking choices under an <strong>LLM-as-judge evaluation framework</strong> and let measured retrieval quality pick the winner. The headline result, <strong>cutting inference cost 37 percent with only a 2 percent retrieval-quality drop</strong>, is precisely the kind of outcome you get when chunking is the variable you tune (smaller, better-targeted units mean less text shipped to the model per query). In an interview, this is your strongest RAG story: "I treated chunking as the first lever, ran more than eleven experiments scored by an LLM judge, and traded a two percent quality drop for a thirty-seven percent cost reduction." It proves both the principle (chunking dominates) and the discipline (measure, do not guess), feeding straight into the <strong>pgvector</strong> ingestion path you own.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>Chunking sets the retrieval ceiling, so tune it before you touch the embedding model. Know the four strategies, and default to parent-child because it matches on small precise children and returns large context-rich parents. Start at 256 to 512 tokens with 10 to 20 percent overlap, measured in tokens, then adjust by evaluation. Layout-aware parsing of PDFs and tables is half the battle, because naive extraction caps quality before any splitter runs. Contextual Retrieval prepends a short generated context sentence so isolated chunks stop being ambiguous, a precision tool, not just "make it bigger."</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d14">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: turning chunks into vectors, and finding nearest neighbors fast with pgvector.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d13-why-rag-architecture.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 13 &middot; Why RAG &amp; the full architecture</div></a>
+    <a data-nav="next" class="next" href="d15-embeddings-vector-search.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 15 &middot; Embeddings &amp; vector search</div></a>
+  </div>
+
+  <div class="foot">Module 3 &middot; RAG &amp; Retrieval &middot; Day 14 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 62 · Design a semantic search / ranking system</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 10 &middot; GenAI System Design</span>
+    <span class="pill">Day 62</span>
+    <span class="pill">70 min</span>
+    <span class="diff" title="Difficulty: advanced"><i class="on"></i><i class="on"></i><i class="on"></i></span>
+  </div>
+
+  <h1>Design a semantic search / ranking system</h1>
+  <p class="lede">Search and ranking is the most common ML-shaped design at product companies, eBay, Wolt, trivago, marketplaces and travel all run a hybrid retrieve-then-rank stack. It is also the engine the RAG assistant sits on. Today we design a semantic plus lexical search service end to end, with a learned ranker, a latency budget, and both offline and online evaluation.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Design a search/ranking service: hybrid retrieval &rarr; cross-encoder rerank &rarr; filters/tenant isolation.</li>
+      <li>Explain the candidate-generation / ranking / re-rank funnel and why each stage exists.</li>
+      <li>Use an embedding feature store and query understanding to feed the ranker.</li>
+      <li>Evaluate offline (NDCG, recall) and online (CTR, conversion) and connect the two.</li>
+      <li>Hold a latency budget with caching and explain freshness/indexing for changing inventory.</li>
+    </ul>
+  </div>
+
+  <h2>The funnel: why search is staged</h2>
+  <div class="prose">
+    <p>You cannot run an expensive scoring model over a million items per query, and you cannot get good ordering from a cheap one. So search is a <strong>funnel</strong>: a cheap, high-recall stage narrows millions to hundreds, then progressively richer (and slower) stages refine the order of that short list. Each stage trades a bit of recall for a lot of precision, in the direction where it is affordable. This is the same shape as the recommendation/ranking framework from Module 9: candidate generation, then ranking, then re-rank.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"A search service is a three-stage funnel: <strong>candidate generation</strong> (cheap, high-recall hybrid retrieval, BM25 plus dense, narrows millions to a few hundred), <strong>ranking</strong> (a learned model scores that short list on rich features), and <strong>re-ranking</strong> (a cross-encoder for precision, plus business rules, diversity, and freshness). Tenant and permission filters live in the retrieval query, and I tune it against offline NDCG/recall and online CTR." That sentence is the whole architecture.</p>
+  </div>
+
+  <h2>1 &middot; Clarify (functional + non-functional)</h2>
+  <div class="prose">
+    <p>Pin scope first. The questions that move a search design:</p>
+    <ul>
+      <li><strong>What are we searching?</strong> Documents, products, restaurants, hotels? Corpus size, and how often items change (a marketplace's inventory churns constantly).</li>
+      <li><strong>Query type.</strong> Short keyword queries, natural-language questions, or both? Are there strong exact-match needs (SKUs, brand names) that lexical must own?</li>
+      <li><strong>Personalization + filters.</strong> Per-user ranking? Hard filters (price, location, in-stock, tenant)? Filters are constraints, not ranking signals.</li>
+      <li><strong>Latency + scale.</strong> Search is interactive: a typical budget is well under ~200ms p95 end to end. Peak QPS?</li>
+      <li><strong>What is "good"?</strong> The business metric, clicks, conversions, bookings, and the offline proxy (NDCG/recall) you will optimize between launches.</li>
+    </ul>
+    <p>Assume: a multi-tenant product catalog of ~10M items that change often, mixed keyword and natural-language queries with real exact-match needs, hard filters plus light personalization, p95 under 150ms, and the north-star metric is conversion with CTR as the faster online signal.</p>
+  </div>
+
+  <h2>2 &middot; Estimate (capacity)</h2>
+  <div class="diagram">  Catalog        ~10M items        ×  1 embedding each (384-768 dim is common for search)
+  Vector store   10M × ~1.5 KB (int8, 384-dim)        ≈  15 GB     → fits a dedicated ANN index
+  Traffic        peak ~1,000 search QPS
+  Latency budget  ~150 ms p95 end-to-end, spent roughly:
+                   retrieval (ANN + BM25)   ~20-40 ms
+                   ranking (GBDT/features)  ~10-30 ms
+                   rerank (cross-encoder, top ~50-100)  ~30-60 ms  ← the costly stage
+                   filters/assembly/network  remainder
+  Funnel widths  ~10M  ──candidate gen──▶ ~500  ──rank──▶ ~50  ──rerank/business──▶ top 10
+  Freshness      inventory changes/min → near-real-time index updates, not nightly rebuilds</div>
+  <div class="prose">
+    <p>Two decisions fall out: at 10M vectors with a tight latency budget you want a dedicated ANN index (HNSW/IVF) rather than vectors-beside-relational, because brute-force cosine is O(N&middot;d) and hits a scaling cliff; and the cross-encoder reranker is your latency bottleneck, so it only ever runs over the top ~50 to 100, never the full candidate set. The funnel widths are the design.</p>
+  </div>
+
+  <h2>3 &middot; High-level architecture</h2>
+  <div class="prose">
+    <p>Draw two lanes again: an <strong>indexing</strong> lane that keeps the search index fresh as items change, and a <strong>query</strong> lane that runs the funnel per request. Query understanding sits at the front of the query lane; the feature store feeds the ranker.</p>
+  </div>
+
+  <div class="diagram">  ══════════════ INDEXING (keeps search fresh as inventory changes) ════════════════
+   item create/update ─▶ ┌──────────┐  ┌───────────┐  ┌─────────────────────────┐
+   (CDC / event stream)  │ ENRICH   │─▶│ EMBED      │─▶│ INDEX: ANN (dense) + BM25│
+                         │ +features│  │ item→vector│  │ + filter fields (price,  │
+                         └──────────┘  └───────────┘  │ loc, tenant, in_stock)   │
+                                  │ write item features → FEATURE STORE          │
+                                  ▼   (offline + online, same values = no skew)  │
+  ══════════════ QUERY (the funnel, per request, p95 < 150 ms) ═════════════════════
+   query
+     │
+     ▼
+   ┌────────────────┐   ┌──────────────────────────┐   ┌──────────┐   ┌──────────────┐
+   │ QUERY          │──▶│ ① CANDIDATE GENERATION     │──▶│ ② RANK   │──▶│ ③ RE-RANK     │
+   │ UNDERSTANDING  │   │   ┌─ BM25 (lexical) ─┐     │   │ learned  │   │ cross-encoder│
+   │ normalize,     │   │   │                  ├─RRF─┼──▶│ GBDT /   │   │ (top 50-100) │
+   │ spellfix,      │   │   └─ dense ANN ──────┘     │   │ ranker:  │   │ + business   │
+   │ intent, embed  │   │   ★ HARD FILTERS in query: │   │ features │   │ rules,       │
+   │ +personalize   │   │     tenant, price, in_stock│   │ from FS  │   │ diversity,   │
+   └────────────────┘   │     (~10M → ~500)          │   │ (~500→50)│   │ freshness    │
+        ▲               └──────────────────────────┘   └──────────┘   └──────┬───────┘
+   cache (hot queries)                                                       ▼  top 10
+   ════════════ EVAL: offline NDCG/recall on a judged set · online CTR/conversion A/B ═══</div>
+
+  <div class="prose">
+    <p>Walk it: a query is normalized and embedded (with intent and personalization signals), candidate generation runs hybrid retrieval with hard filters baked into the query to narrow ~10M to ~500, the learned ranker scores those ~500 on rich features pulled from the feature store down to ~50, the cross-encoder reranker plus business rules order the final top 10, and the whole thing is tuned offline on NDCG/recall and validated online on CTR/conversion. Hot queries short-circuit at the cache.</p>
+  </div>
+
+  <h2>4 &middot; Data model and the feature store</h2>
+  <div class="prose">
+    <p>Search needs three data shapes: the inverted/ANN indexes for retrieval, the filterable item attributes, and the features the ranker consumes. The feature store is what keeps offline (training) and online (serving) features identical.</p>
+  </div>
+  <pre><code><span class="tok-c"># item document in the search index (dense + lexical + filter fields)</span>
+{
+  <span class="tok-s">"item_id"</span>:   <span class="tok-s">"sku-918273"</span>,
+  <span class="tok-s">"tenant_id"</span>: <span class="tok-s">"acme"</span>,            <span class="tok-c"># isolation filter</span>
+  <span class="tok-s">"text"</span>:      <span class="tok-s">"... title + description ..."</span>,  <span class="tok-c"># → BM25 (lexical)</span>
+  <span class="tok-s">"vector"</span>:    [<span class="tok-n">0.02</span>, ...],         <span class="tok-c"># → ANN (dense, semantic)</span>
+  <span class="tok-s">"price"</span>: <span class="tok-n">39.0</span>, <span class="tok-s">"in_stock"</span>: <span class="tok-k">true</span>, <span class="tok-s">"geo"</span>: [..],  <span class="tok-c"># → HARD filters</span>
+  <span class="tok-s">"updated_at"</span>: <span class="tok-s">"..."</span>             <span class="tok-c"># → freshness</span>
+}
+
+<span class="tok-c"># FEATURE STORE: features the ranker scores, served consistently train + serve</span>
+item_features[item_id]   = { ctr_7d, conversion_rate, popularity, recency, price_z, ... }
+query_features[query]    = { length, intent, embedding, has_brand_token, ... }
+user_features[user_id]   = { category_affinity, locale, recent_clicks, ... }
+<span class="tok-c"># ranker input per (query,item,user) = concat(query_f, item_f, user_f, retrieval_scores)</span></code></pre>
+  <div class="prose">
+    <p>The point of the feature store: the exact same feature values and transforms are used to <em>train</em> the ranker offline and to <em>serve</em> it online, which is how you prevent <strong>training-serving skew</strong> (the silent killer where a feature is computed one way in the notebook and another way in production, so the live model underperforms its offline numbers). It also gives point-in-time correctness so you do not train on a feature value that did not exist yet at query time.</p>
+  </div>
+
+  <h2>5 &middot; Deep-dive: the three funnel stages</h2>
+  <div class="prose">
+    <p><strong>Stage 1, candidate generation (recall).</strong> Hybrid retrieval is the default: BM25 owns exact matches (brand names, model numbers, the literal token the user typed) and dense ANN owns semantic matches (synonyms, paraphrase, "running shoes" matching "trainers"). Fuse with RRF so a lexical rank and a vector rank combine without a score-scale fight. Hard filters, tenant, price range, in-stock, geo, are applied <em>in the retrieval query</em>, not as a post-filter, so excluded items never consume a candidate slot and isolation is guaranteed at the data layer. Goal: do not miss anything relevant; precision comes later.</p>
+    <p><strong>Stage 2, ranking (the learned model).</strong> The ~500 candidates are scored by a learned ranker, typically a gradient-boosted tree model (e.g. XGBoost-style, which is strong and cheap for tabular ranking features) trained with a learning-to-rank objective. Its inputs are the rich features from the feature store: item signals (historical CTR, conversion, popularity, recency), query signals (intent, length), user signals (affinity, locale), and the retrieval scores themselves. This stage turns "topically relevant" into "actually good for this query and this user," and it is where most of the quality lives.</p>
+    <p><strong>Stage 3, re-ranking (precision + policy).</strong> A cross-encoder reads the (query, item) pair jointly for the very top ~50 to 100 and gives the most accurate relevance signal, the same precision booster as in RAG. Then business logic shapes the final list: diversity (do not return ten near-identical items), freshness boosts, sponsored/promoted placement, and any hard policy. This is where product requirements that are not pure relevance get encoded, kept separate from the learned score so they are auditable.</p>
+  </div>
+
+  <div class="callout warning">
+    <span class="label">Filters are constraints, not features</span>
+    <p>A hard filter (in-stock, tenant, price &le; X, within delivery radius) must be enforced as a query predicate, never blended into a relevance score. If you let the ranker "mostly" respect a constraint, it will eventually surface an out-of-stock or out-of-area result that ranked highly on other signals, which is a correctness bug, not a ranking quirk. Filter first, rank within the filtered set.</p>
+  </div>
+
+  <h2>6 &middot; Query understanding</h2>
+  <div class="prose">
+    <p>The query is a first-class input, not just a string. A small front-end stage improves everything downstream: normalize and spell-correct ("nike runing shoez"), detect intent (navigational vs broad), extract structured tokens (brand, category, price phrases that become filters), and produce the query embedding for dense retrieval. For ambiguous or multi-part queries you can rewrite or decompose before retrieval. The payoff is concrete: catching a brand token routes it to a lexical exact-match boost, and fixing a typo prevents a zero-result page. Keep it cheap, this runs on every keystroke-driven search, so it sits inside the latency budget.</p>
+  </div>
+
+  <h2>7 &middot; Evaluation: offline and online, connected</h2>
+  <div class="prose">
+    <p>You optimize between launches on offline metrics and you decide ship/no-ship on online metrics, and you must keep the two correlated.</p>
+    <p><strong>Offline (fast, cheap, run on every change).</strong> Build a judged set of (query, ranked results with graded relevance labels). Score with <strong>NDCG</strong> (graded, position-discounted, rewards putting the best results highest), <strong>recall@k</strong> (did candidate generation even retrieve the relevant items, the recall stage's own KPI), and MRR for known-item queries. Mine real query logs to build and refresh the judged set so it reflects actual traffic, not a stale benchmark.</p>
+    <p><strong>Online (slow, true, decides launches).</strong> The metric that matters is behavior: <strong>CTR</strong>, dwell, and ultimately conversion/bookings. Run a per-user A/B test of the new ranker against the old, with guardrail metrics (latency, zero-result rate, revenue) so a CTR win that tanks latency or conversion is caught, and run to significance. For risky changes, shadow first to see real input distribution and latency before exposing users.</p>
+    <p>Connect them: pick the offline metric (NDCG) that best correlates with your online metric (conversion) on historical experiments, so an offline win is a trustworthy predictor of an online win. If they diverge, your judged labels or features are off, fix that before trusting offline numbers.</p>
+  </div>
+
+  <h2>8 &middot; Trade-offs, latency, freshness (ops)</h2>
+  <table>
+    <tr><th>Decision</th><th>You gain</th><th>You give up</th></tr>
+    <tr><td>Hybrid vs pure-vector</td><td>Exact-match recall (SKUs, brands) that dense alone misses</td><td>Two indexes + fusion to maintain</td></tr>
+    <tr><td>Hybrid vs pure-lexical (BM25 only)</td><td>Semantic/synonym recall, NL queries work</td><td>Embedding infra, ANN index, drift to manage</td></tr>
+    <tr><td>Cross-encoder rerank</td><td>Best precision at the top</td><td>The latency bottleneck, so cap it to top ~50-100</td></tr>
+    <tr><td>Learned ranker (GBDT)</td><td>Big quality lift from rich features</td><td>Training pipeline, feature store, skew risk, retraining</td></tr>
+    <tr><td>Near-real-time indexing</td><td>Fresh inventory, no stale results</td><td>More complex pipeline than nightly batch rebuilds</td></tr>
+  </table>
+  <div class="prose">
+    <p><strong>Latency budget (ops).</strong> Spend it deliberately, the funnel exists to keep the expensive stage small. Cache hot queries and their results (a large share of search traffic is repeated head queries), cache item features in the online store, run BM25 and ANN in parallel, and keep the cross-encoder strictly on the short list. Aim for a high cache-hit rate on head queries and a tight p95.</p>
+    <p><strong>Freshness / indexing (ops).</strong> A marketplace's inventory changes constantly, so the index cannot be a nightly rebuild. Drive updates from a change stream (CDC / events): when an item is created, updated, sold out, or removed, enrich, embed, and upsert it into the ANN and lexical indexes within seconds, and update its features. Stale results (showing an out-of-stock item, missing a just-listed one) are a real quality and trust problem, so freshness gets first-class treatment, not a cron job.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: one search through the funnel</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>A user on tenant <code>acme</code> in Berlin searches <em>"waterproof hiking boots under 100"</em>, in-stock only. <b>Query understanding:</b> normalizes the text, extracts the price phrase into a hard filter <code>price &le; 100</code>, infers a broad product intent, and embeds the query. <b>① Candidate generation:</b> BM25 matches "waterproof", "hiking", "boots" lexically while dense ANN pulls semantically close items ("trekking boots", "GORE-TEX footwear") that never use the exact words; the retrieval query carries <code>tenant_id='acme' AND in_stock=true AND price&le;100 AND within(geo, Berlin_radius)</code>, so out-of-stock, over-budget, or out-of-area items are never candidates; RRF fuses to ~500. <b>② Rank:</b> the GBDT ranker scores those 500 using item CTR/conversion, recency, the user's category affinity, and the retrieval scores, narrowing to ~50. <b>③ Re-rank:</b> a cross-encoder reads each (query, item) pair for true relevance, then diversity logic ensures the top 10 are not all the same brand and a couple of fresh new arrivals get a boost. The user sees ten in-stock, in-budget, in-area boots ordered by likelihood to convert, in under 150ms, and the click that follows feeds tomorrow's CTR feature and the next A/B.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">The 11-point checklist, search flavor</span>
+    <p>1. <b>Indexing</b> (enrich, embed, upsert; near-real-time freshness) &middot; 2. <b>Query understanding</b> (normalize, spellfix, intent, embed) &middot; 3. <b>Candidate generation</b> (hybrid BM25 + dense, RRF) &middot; 4. <b>Hard filters + tenant isolation in the query</b> &middot; 5. <b>Learned ranking</b> (GBDT + feature store) &middot; 6. <b>Re-rank</b> (cross-encoder + business rules + diversity) &middot; 7. <b>Feature store</b> (no train/serve skew, point-in-time) &middot; 8. <b>Offline eval</b> (NDCG, recall@k, MRR on a judged set) &middot; 9. <b>Online eval</b> (CTR/conversion A/B + guardrails) &middot; 10. <b>Latency budget + caching</b> &middot; 11. <b>Freshness/indexing pipeline</b> (CDC-driven).</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Answer each out loud as if whiteboarding, then compare.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>A teammate proposes "just embed everything and do pure vector search, it is simpler than maintaining BM25 too." On a product catalog, what breaks, and what do you propose?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Pure vector search fails on <strong>exact-match</strong> queries: SKUs, model numbers, brand names, and rare tokens embed poorly and get drowned by semantically "near" but wrong items, so a user searching a precise product code may not find it. Dense retrieval is great at synonymy and paraphrase but weak where the literal token is the intent. Propose <strong>hybrid</strong>: run BM25 (which dominates exact-match via TF-IDF with length normalization and TF saturation) alongside dense ANN, and fuse with RRF so each contributes by rank without a score-scale clash. You keep dense's semantic recall for natural-language queries and lexical's precision for codes and names, which is exactly the mix a catalog needs. The maintenance cost of a second index is worth it; losing exact-match is not acceptable on a marketplace.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>Your new ranker scores beautifully offline (NDCG up 8%) but in the A/B test conversion is flat. Give three plausible causes and how you would investigate.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>(1) <strong>Training-serving skew</strong>: a feature is computed differently offline than online, so the live model is not the one you evaluated, check that the feature store serves identical values and transforms in both paths, and log served features to compare against training. (2) <strong>Label/metric mismatch</strong>: your offline judged labels or NDCG do not correlate with conversion (maybe they reward relevance but ignore price/availability that drive purchase), re-pick the offline metric that historically tracks conversion and refresh labels from real logs. (3) <strong>A guardrail is masking the win</strong>: the new ranker is slower (latency up) or raised the zero-result rate, suppressing conversion despite better ordering, inspect the guardrail metrics in the A/B. Investigate by segmenting the A/B (does it win for some query types and lose for others?), confirming feature parity, and shadow-running to compare live vs offline scores on the same traffic. Offline is a proxy; the A/B is truth, so the bug is almost always in the gap between them.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>Sellers complain their just-listed and just-restocked items take hours to appear, and out-of-stock items keep showing. What in your design is wrong, and how do you fix freshness without rebuilding the whole index constantly?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>The symptom says the index is being refreshed in slow batches (e.g. a nightly or hourly rebuild) while inventory changes by the minute, so the index is chronically stale. The fix is <strong>incremental, event-driven indexing</strong>: emit a change event (CDC or an app event) on every item create, update, sold-out, and delete, and have an indexing consumer enrich, embed, and <em>upsert</em> just that item into the ANN and lexical indexes within seconds, plus refresh its features and its <code>in_stock</code> filter field. You never rebuild the whole index for a single change. To keep out-of-stock items from surfacing immediately even before re-embedding, the <code>in_stock</code> hard filter in the retrieval query excludes them the moment the flag flips. Freshness is a first-class pipeline driven by change events, not a cron job.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's GenAI/ML System Design slices. Drill the keys, then whiteboard each.</p>
+  <ul class="q-list">
+    <li>Design a semantic search / ranking service.
+      <div class="a">Key: hybrid (BM25 + dense) candidate generation &rarr; learned rank &rarr; cross-encoder rerank + business rules; filters/tenant isolation in the query; feature store; offline NDCG/recall + online CTR; latency budget.</div></li>
+    <li>Design a recommendation / ranking system.
+      <div class="a">Key: candidate generation (cheap recall) &rarr; ranking (rich features) &rarr; re-rank (business rules/diversity); offline + online metrics; cold start.</div></li>
+    <li>Why hybrid retrieval instead of pure vector or pure lexical?
+      <div class="a">Key: BM25 owns exact match (codes, brands), dense owns semantics/synonyms; fuse with RRF (rank-only, scale-free); each alone misses a whole query class.</div></li>
+    <li>Where does reranking sit and why?
+      <div class="a">Key: rescore the top ~50-100 with a cross-encoder (joint query,item) for precision; too slow for the full set, perfect for the short list; the latency bottleneck.</div></li>
+    <li>What is a feature store and what does it solve?
+      <div class="a">Key: serves identical features offline (train) and online (serve) &rarr; prevents training-serving skew; point-in-time correctness.</div></li>
+    <li>What offline metrics do you use and how do they relate to online ones?
+      <div class="a">Key: NDCG (graded, position-discounted), recall@k (candidate-gen KPI), MRR; pick the offline metric that correlates with the online metric (CTR/conversion); validate via A/B.</div></li>
+    <li>How do you keep a search index fresh for changing inventory?
+      <div class="a">Key: CDC/event-driven incremental upserts (seconds, not nightly rebuilds); in-stock/price as hard filter fields flipped immediately.</div></li>
+    <li>How do you hold a tight search latency budget?
+      <div class="a">Key: the funnel keeps the costly stage small; parallel BM25 + ANN, cache head queries + item features, cap the cross-encoder to the top short list.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (20&ndash;25 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Build the funnel small. Index ~1,000 product records (use any open catalog) into both a lexical index and a dense ANN index, <a href="https://github.com/pgvector/pgvector">pgvector</a> or an in-memory ANN library is fine. For a query, run BM25 and dense in parallel, fuse with RRF, and apply a hard <code>in_stock</code> + price filter inside the retrieval step. Then add a simple ranking step (sort the fused candidates by a blend of fused score and a popularity/CTR field) and, for the top ~50, a cross-encoder rerank (a small reranker model). Finally, write ten judged queries with relevance labels and compute <strong>NDCG@10</strong> and <strong>recall@50</strong> before and after adding the reranker, you will see the precision lift the funnel is built for. Reading: <a href="https://www.elastic.co/what-is/semantic-search">semantic vs lexical search</a> and the <a href="https://docs.cohere.com/docs/reranking">reranking</a> concept.</p>
+    <p class="muted" style="font-size:13.5px">Stretch: deliberately add an exact-match query (a product code) and confirm BM25 finds it while pure dense ranks it poorly, the case that justifies hybrid.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>This is the same retrieval engine you built for RAG at MaiQ, just optimized for ranking instead of grounding, so you can speak to every stage from experience: hybrid BM25 plus dense embeddings fused with RRF is exactly your retrieval stack, and your 11+ retrieval and chunking experiments under an LLM-as-judge framework are a search-tuning loop (offline metric, change one thing, measure, keep or revert) that produced a 37 percent cost reduction with a 2 percent quality drop. When a search-ranking question comes up at an eBay-, Wolt-, or trivago-style company, lead with that: "I have built and tuned hybrid retrieval in production and run the offline-then-online evaluation loop to prove a change is real, which is precisely how you ship a ranker safely." Your JURIX 2024 thesis, hybrid legal retrieval combining knowledge graphs with Sentence-BERT on the Japanese Civil Code, is a second, research-grade signal that you understand retrieval deeply, not just at the API level.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>Search is a funnel: cheap high-recall hybrid candidate generation, then a learned ranker on rich features, then a cross-encoder rerank plus business rules, each stage trading recall for precision where it is affordable. Hard filters and tenant isolation live in the retrieval query, never in the ranking score. A feature store keeps train and serve features identical so the live ranker matches its offline numbers. You optimize on offline NDCG/recall and decide launches on online CTR/conversion A/Bs, and you keep the two correlated. Freshness is an event-driven indexing pipeline, not a nightly rebuild. Tomorrow you run a full GenAI design mock against the clock.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d62">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: a timed, self-run GenAI design mock with a scoring rubric.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d61-design-llm-gateway.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 61 &middot; Design an LLM gateway at scale</div></a>
+    <a data-nav="next" class="next" href="d63-genai-sd-lab.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 63 &middot; Lab &mdash; full GenAI design mock</div></a>
+  </div>
+
+  <div class="foot">Module 10 &middot; GenAI System Design &middot; Day 62 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

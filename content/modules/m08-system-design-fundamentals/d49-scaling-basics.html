@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 49 · Scaling, load balancing, statelessness</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 8 &middot; System Design Fundamentals</span>
+    <span class="pill">Day 49</span>
+    <span class="pill">50 min</span>
+    <span class="diff" title="Difficulty: intermediate"><i class="on"></i><i class="on"></i><i></i></span>
+  </div>
+
+  <h1>Scaling, load balancing, statelessness</h1>
+  <p class="lede">"How would you handle 10x the traffic?" is the most common follow-up in any system design interview. Today you learn the answer that always works: make the app tier stateless, put a load balancer in front of it, and add boxes. This is the foundation every other scaling technique sits on.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Contrast vertical and horizontal scaling and say why horizontal is the real answer at scale.</li>
+      <li>Explain statelessness and why it is the precondition for horizontal scaling.</li>
+      <li>Describe what a load balancer does, the difference between L4 and L7, and the common algorithms.</li>
+      <li>Use health checks and read replicas to scale reads and survive node failure.</li>
+      <li>Spot single points of failure and the scaling cliff before they bite.</li>
+      <li>Translate a DAU number into a server count with back-of-envelope QPS math.</li>
+    </ul>
+  </div>
+
+  <h2>Two ways to scale</h2>
+  <div class="prose">
+    <p>When a single machine can no longer keep up, you have exactly two moves, and an interviewer wants to hear that you reach for the second one by default.</p>
+    <p><strong>Vertical scaling (scale up)</strong> means a bigger box: more CPU, more RAM, faster disk. It is the easy first move because your code does not change. But it has a hard ceiling (the biggest instance money can buy), it gets exponentially expensive near the top, it usually requires downtime to resize, and crucially <strong>one big box is still one box</strong>, so it is a single point of failure. Vertical scaling is a fine starting point and a terrible end state.</p>
+    <p><strong>Horizontal scaling (scale out)</strong> means more boxes working together behind a load balancer. It scales (nearly) linearly and far beyond any single machine, it uses cheap commodity instances, and it gives you fault tolerance for free, because losing one node out of many is survivable. The cost is complexity: you now have a distributed system, with all the coordination, consistency, and routing problems that implies. The entire rest of this module is, in a sense, about paying that complexity tax well.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"Vertical scaling buys time and is the right first move, but it hits a ceiling, gets expensive fast, and leaves you with a single point of failure. The durable answer is to scale horizontally: stateless app servers behind a load balancer, so I add capacity by adding nodes and I survive losing any one of them." That framing tells the interviewer you know both and default correctly.</p>
+  </div>
+
+  <h2>Statelessness: the precondition</h2>
+  <div class="prose">
+    <p>Horizontal scaling only works if any node can serve any request. The thing that breaks this is <strong>state stored on the server</strong>. If user A's session lives in the memory of server 2, then every one of A's requests must come back to server 2, which means you cannot freely load-balance, you cannot add and remove nodes at will, and if server 2 dies, A is logged out. Server-local state is the enemy of horizontal scale.</p>
+    <p>The fix is to make the app tier <strong>stateless</strong>: the servers hold no per-user data between requests. All state moves to a shared backing store that every node can reach, a database for durable data, a cache (Redis) for sessions and hot data. Now any request can go to any server, you can scale the fleet up and down elastically, and a dying node takes nothing with it because it owned nothing.</p>
+    <p>"Stateless" does not mean the system has no state, it means the <em>app servers</em> have no state. The state still exists, it just lives in a tier built to be shared and durable. A classic mistake is in-memory sessions: convenient on one server, fatal the moment you add a second. The fix is sticky sessions (a band-aid that re-couples requests to nodes) or, better, externalize the session to Redis and stay genuinely stateless.</p>
+  </div>
+
+  <div class="diagram">  STATEFUL (does not scale)              STATELESS (scales out)
+
+   user A ─sticky─▶ [ srv 1: A's session ]    user A ─▶ [ LB ] ─▶ any of:
+   user B ─sticky─▶ [ srv 2: B's session ]    user B ─▶          [ srv 1 ]
+                                                                 [ srv 2 ]
+   • request must return to its server          [ srv 3 ]
+   • srv dies → that user's session lost              │ read/write session
+   • cannot freely add/remove nodes                   ▼
+                                              [ Redis: sessions ] [ DB: data ]
+                                              shared, durable, any node reaches it</div>
+
+  <h2>The load balancer</h2>
+  <div class="prose">
+    <p>A load balancer (LB) sits in front of your fleet and spreads incoming requests across the healthy nodes. It is the single entry point clients talk to, and it is what makes a pile of servers look like one service. Two things to know cold: the layer it operates at, and the algorithm it uses.</p>
+    <h3>L4 vs L7</h3>
+    <p><strong>Layer 4 (transport)</strong> balancing routes on IP and port without looking inside the packet. It is fast and cheap because it just forwards TCP/UDP connections, but it is dumb: it cannot route based on the URL path, headers, or cookies. <strong>Layer 7 (application)</strong> balancing terminates the connection and reads the HTTP request, so it can route by path (<code>/api</code> to one pool, <code>/static</code> to another), do TLS termination, inspect headers, and support content-based rules. L7 is more capable and slightly more expensive per request; L4 is for raw throughput. Most modern web apps use an L7 balancer (an application load balancer) because the routing flexibility is worth it.</p>
+    <h3>Algorithms</h3>
+    <ul>
+      <li><strong>Round-robin</strong> &mdash; hand requests to nodes in rotation. Simple, fair when requests are uniform.</li>
+      <li><strong>Least connections</strong> &mdash; send the next request to the node with the fewest active connections. Better when request durations vary, because it avoids piling slow requests on one node.</li>
+      <li><strong>Weighted</strong> &mdash; bias toward bigger nodes, useful in a heterogeneous fleet.</li>
+      <li><strong>IP hash / consistent hashing</strong> &mdash; route a given client to the same node deterministically. Needed for sticky sessions and for cache-node selection, where you want the same key to land on the same node even as the fleet changes size.</li>
+    </ul>
+    <h3>Health checks</h3>
+    <p>The LB continuously probes each node (for example a <code>GET /healthz</code> every few seconds). A node that fails its checks is pulled out of rotation automatically, so requests stop going to a broken or overloaded box, and re-added when it recovers. This is what turns "horizontal scaling" into "fault tolerance": with health checks plus a stateless fleet, losing a node is a non-event, the LB just routes around it.</p>
+  </div>
+
+  <h2>Scaling the data tier with read replicas</h2>
+  <div class="prose">
+    <p>Adding app servers is the easy half, because the app tier is stateless and symmetric. The database is the hard half, because it holds the state and is usually the real bottleneck. The first and cheapest database scaling move, for the common read-heavy workload, is <strong>read replicas</strong>: one primary takes all writes and asynchronously copies its changes to one or more follower replicas that serve reads only.</p>
+    <p>This works beautifully when reads vastly outnumber writes (feeds, catalogs, dashboards), because you can absorb a huge read load by adding replicas while the single primary comfortably handles the writes. The trade-off is <strong>replication lag</strong>: a follower can be a few milliseconds to seconds behind the primary, so a read just after a write may see stale data. You will go deep on replication, sync vs async, and read-your-writes consistency next lesson; for now, know that read replicas are the default first answer to "the database is overloaded with reads," and that they introduce eventual consistency on the read path.</p>
+    <p>When writes themselves become the bottleneck, replicas do not help (every replica still replays every write). That is when you reach for partitioning the data across multiple primaries, which is sharding, the topic of Day 50. Recognizing "this is a read problem, add replicas" versus "this is a write problem, I must shard" is the senior distinction.</p>
+  </div>
+
+  <div class="diagram">  reads + writes                         writes only        reads
+   from app fleet                            │                 ▲
+        │                                     ▼                 │
+   [ load balancer ]                  [ PRIMARY DB ] ──async──▶ [ replica 1 ]
+        │                                                  └──▶ [ replica 2 ]
+        ├──writes──────────────────────────▲                   [ replica 3 ]
+        └──reads──────────────────────────────────────────────────┘
+                                   replicas absorb the read flood;
+                                   one primary owns the writes (and is the
+                                   write bottleneck until you shard)</div>
+
+  <h2>The scaling cliff and single points of failure</h2>
+  <div class="prose">
+    <p>Two failure shapes show up constantly, and naming them earns points.</p>
+    <p>A <strong>single point of failure (SPOF)</strong> is any component whose loss takes down the whole system: a lone database primary, a single load balancer, one cache node holding all the hot data. The fix is always redundancy: run at least two of everything across availability zones, and have a failover path. Even the load balancer needs a partner (the cloud-managed ones are themselves redundant under the hood). When you present a design, scan it for the box that, if it died, kills everything, and say how you remove it.</p>
+    <p>A <strong>scaling cliff</strong> is a component that scales smoothly right up until it suddenly does not. The classic is a design that scales the app tier linearly but routes everything through one database primary: it looks fine in the demo and falls over a cliff the moment write volume crosses what one primary can take. Brute-force algorithms hide cliffs too (an O(N) scan is fine at N=1,000 and lethal at N=10M, which is exactly why approximate nearest neighbor exists for vector search). The lesson: find the component that does not scale with the rest and plan its next move before you hit the edge.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: from one box to a fleet</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>A service has 10M daily active users, each making ~20 requests per day. Size it and lay out the tier.</p>
+    <p><b>Average QPS</b> = 10M &times; 20 &divide; 100,000 s/day = 200M &divide; 100k = <b>2,000 req/s</b>. <b>Peak</b> at &times;3 &asymp; <b>6,000 req/s</b>. Suppose one app server handles ~500 req/s comfortably; you need ~12 servers at peak, so run ~16 for headroom and node-failure slack (N+spare). The workload is read-heavy at, say, 50:1, so reads &asymp; 6,000 &times; (50/51) &asymp; 5,900 read/s, writes &asymp; 100 write/s.</p>
+  </div>
+  <div class="diagram">  6,000 req/s peak
+        │
+   [ L7 load balancer, multi-AZ ]  ── health-checks every node
+        │  least-connections
+   ┌────┴──────────────────────────┐
+   │  ~16 stateless app servers     │   (add nodes → linear capacity)
+   └────┬──────────────────────────┘
+        │  sessions + hot data in Redis (so any node serves any request)
+        ▼
+   reads ~5,900/s ─▶ [ read replicas ×3 ]      writes ~100/s ─▶ [ primary DB ]
+                     absorb the read flood                       light, no shard yet</div>
+  <div class="prose">
+    <p>The shape falls straight out of the numbers: the app tier is a stateless fleet sized from peak QPS, sessions live in Redis so the fleet stays stateless, reads go to replicas, and the single primary is comfortable because writes are light. If writes were 100x heavier, this same exercise would tell you to shard the primary, and the design would change shape there, not at the app tier.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Say each answer out loud in full sentences, as if to an interviewer. Then open the solution and compare. The gap is your lesson.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>Your app stores each logged-in user's shopping cart in the memory of the server that handled their first request, and uses sticky sessions to route them back. Traffic triples and you add servers. Two complaints arrive: carts randomly empty, and the new servers sit nearly idle while the old ones are pegged. Diagnose both and give the real fix.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Both symptoms trace to server-local state plus sticky sessions. Carts empty because the cart lives only in one server's memory: when that node restarts, is replaced during a deploy, or fails a health check, every cart it held is gone, and there is no shared store to recover from. The new servers stay idle because stickiness pins each existing session to the server that first served it, so the load balancer cannot move that traffic; fresh capacity only picks up brand-new sessions, leaving the long-lived ones hammering the original nodes. The real fix is to make the app tier stateless: move the cart out of process into a shared store both servers can reach, Redis for the live session and the database for durable cart contents, and drop stickiness. Then any request can go to any node, the load balancer can spread load evenly across the whole fleet including the new boxes, and a node dying loses nothing because it owned nothing. Sticky sessions are a band-aid that re-couples requests to nodes and reintroduces the exact fragility you scaled out to escape.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>A teammate proposes scaling the database for a read-heavy product by adding more read replicas, and is confident this also fixes an upcoming spike in <em>writes</em> from a new ingestion feature. Where are they right, where are they wrong, and what should they actually do for the writes?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>They are right for the reads: in a read-heavy workload, read replicas are exactly the move, you offload the read flood onto followers while the primary handles writes, scaling reads almost linearly by adding replicas (accepting some replication lag, which means a read just after a write may be stale). They are wrong about writes. Replicas do not help write throughput at all, because every replica must replay every write the primary takes, so adding followers multiplies the work, it does not divide it. A single primary is still the write bottleneck and a single point of failure on the write path. For a genuine increase in write volume you must partition the data, that is, shard it across multiple primaries so each owns a slice of the keyspace and the write load splits between them. The senior framing is recognizing that "too many reads" and "too many writes" are different problems with different fixes: replicas for reads, sharding for writes.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>An interviewer asks: "your design has a load balancer in front of a stateless fleet. What happens when the load balancer itself dies, and how is that different from a node dying?" Answer both halves.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>When an app node dies it is a non-event by design: the load balancer's health checks detect the failed node within a few seconds, pull it out of rotation, and route all traffic to the remaining healthy nodes; because the fleet is stateless the dead node owned no session data, so nothing is lost and users do not notice beyond maybe one retried request. The load balancer dying is different because, as drawn, it is a single point of failure: it is the one entry point every client talks to, so if it is truly a single box, losing it takes the whole service down regardless of how healthy the fleet behind it is. The fix is to make the entry point itself redundant rather than singular: run the load balancer in a redundant pair or active-active set across availability zones with health-checked failover and DNS or anycast in front, which is exactly what cloud-managed load balancers do internally. The general principle the question is probing is "scan your design for the component whose loss is unsurvivable, and remove the SPOF with redundancy," and the load balancer is the one candidates most often forget to harden.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's System Design Fundamentals slice. Drill the one-line keys, then expand each into a 90-second answer with Claude using protocol prompt #2.</p>
+  <ul class="q-list">
+    <li>Vertical vs horizontal scaling, and why statelessness?
+      <div class="a">Key: vertical = bigger box (ceiling + SPOF); horizontal = more boxes behind a load balancer; stateless app servers so any node serves any request (state in DB/cache).</div></li>
+    <li>What does a load balancer do, and what is the L4 vs L7 difference?
+      <div class="a">Key: spreads requests over healthy nodes; L4 routes on IP/port (fast, dumb), L7 reads HTTP so it can route by path/header and do TLS termination.</div></li>
+    <li>Name the common load-balancing algorithms and when each fits.
+      <div class="a">Key: round-robin (uniform requests), least-connections (variable durations), weighted (heterogeneous fleet), IP/consistent hash (stickiness, cache-node selection).</div></li>
+    <li>How do health checks turn horizontal scaling into fault tolerance?
+      <div class="a">Key: LB probes each node, drops failing ones from rotation and re-adds on recovery; with a stateless fleet, losing a node is a non-event.</div></li>
+    <li>How do you scale a read-heavy database, and what is the cost?
+      <div class="a">Key: read replicas, one primary writes and async-replicates to followers that serve reads; cost is replication lag (stale reads / eventual consistency).</div></li>
+    <li>What is a scaling cliff and how do you avoid one?
+      <div class="a">Key: a component that scales smoothly then falls over suddenly (e.g. one DB primary, an O(N) scan); find the part that does not scale with the rest and plan its next move early.</div></li>
+    <li>How do you turn a DAU number into a server count?
+      <div class="a">Key: DAU &times; actions &divide; ~100k s/day = avg QPS, &times;3 for peak, divide by per-server capacity, add headroom for node failure.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (15&ndash;20 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Make statelessness concrete. Write a tiny FastAPI app with a <code>GET /counter</code> endpoint that increments and returns a counter. First store the counter in a module-level Python variable, run two instances on different ports, and put a trivial round-robin in front (or just hit each port in turn): watch the count diverge between instances, that is server-local state breaking horizontal scale. Now move the counter into Redis with <code>INCR</code>, run both instances again, and confirm the count is consistent no matter which instance serves the request. You just demonstrated, in 20 lines, why the app tier must be stateless and the state must live in a shared store. See the FastAPI docs at <a href="https://fastapi.tiangolo.com/">fastapi.tiangolo.com</a> and Redis <code>INCR</code> at <a href="https://redis.io/docs/latest/commands/incr/">redis.io</a>.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>Your FastAPI ingestion service at MaiQ is a textbook stateless app tier: it does the work of parsing and embedding documents into pgvector, but it holds no per-request state itself, the durable state lives in Postgres and the hot state in Redis. That is exactly the design that lets you run more than one instance behind a load balancer without the instances stepping on each other. When an interviewer asks how you would scale that ingestion path, you can answer from experience: the service is stateless so it scales horizontally by adding workers, the write target is the database, and the moment ingestion writes outgrew a single primary the next move would be partitioning, not bigger boxes. Grounding the abstract "stateless fleet plus load balancer" pattern in a service you actually built is far more convincing than reciting it.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>Default to horizontal scaling: stateless app servers behind a load balancer, so you add capacity by adding nodes and survive losing any one of them. Statelessness is the precondition, push session and hot state into a shared store (Redis) and durable state into the database so any node serves any request. The load balancer spreads load (L4 for raw speed, L7 for routing flexibility) and, with health checks, turns node failure into a non-event. Scale reads with replicas (accepting replication lag) and recognize that write bottlenecks need sharding instead. Always hunt for the single point of failure and the scaling cliff, the component that does not scale with the rest, before it bites.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d49">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: databases, the hard half, SQL vs NoSQL, indexing, replication, sharding, and CAP.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d48-sd-interview-framework.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 48 &middot; The system design framework</div></a>
+    <a data-nav="next" class="next" href="d50-databases.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 50 &middot; Databases: SQL/NoSQL, sharding, CAP</div></a>
+  </div>
+
+  <div class="foot">Module 8 &middot; System Design Fundamentals &middot; Day 49 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

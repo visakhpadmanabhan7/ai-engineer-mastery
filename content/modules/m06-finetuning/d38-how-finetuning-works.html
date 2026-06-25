@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 38 · How fine-tuning works</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 6 &middot; Fine-tuning &amp; Model Adaptation</span>
+    <span class="pill">Day 38</span>
+    <span class="pill">50 min</span>
+    <span class="diff" title="Difficulty: intermediate"><i class="on"></i><i class="on"></i><i></i></span>
+  </div>
+
+  <h1>How fine-tuning works</h1>
+  <p class="lede">Yesterday you learned when to fine-tune. Today you open the hood: what supervised fine-tuning actually does to the weights, how the data must be shaped, and the one failure that ruins most first attempts. No GPU required, this is a conceptual lesson you can fully reason about from a laptop.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Explain SFT as continuing next-token training on curated (instruction &rarr; ideal response) pairs.</li>
+      <li>Distinguish full fine-tuning from adapter-based fine-tuning at a conceptual level.</li>
+      <li>Specify a fine-tuning dataset: format, the chat template, and why quality beats quantity.</li>
+      <li>Define catastrophic forgetting and name four levers that prevent it.</li>
+      <li>Describe a sane train/val split and how to know the run actually worked.</li>
+    </ul>
+  </div>
+
+  <h2>SFT is just more next-token prediction, on better data</h2>
+  <div class="prose">
+    <p>There is no new mechanism here. <strong>Supervised fine-tuning is the exact same next-token objective from Day 1</strong>, continued on a small, curated dataset of examples that demonstrate the behavior you want. The model still predicts the next token and adjusts its weights to raise the probability of the token that actually came next. The only thing that changed is the diet: instead of trillions of tokens of arbitrary internet text, it sees a few hundred to a few thousand examples of <em>exactly the way you want it to respond</em>.</p>
+    <p>That is why fine-tuning teaches FORM so well and FACTS so unreliably (yesterday's rule). You are not stuffing a database into the weights; you are nudging the model's existing distribution toward your style, your format, your task boundary. Capability it already has gets sharpened and made consistent. Knowledge it never had does not get implanted just because you mentioned it twice.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"SFT continues the pretraining objective, next-token prediction, on a curated set of (instruction, ideal response) pairs. It teaches the model the <strong>form and behavior</strong> of the task, not new world facts in any reliable way. Mechanically nothing exotic happens: gradients flow on the response tokens and shift the weights toward your demonstrated outputs." That sentence tells the interviewer you understand fine-tuning is not magic, it is the same training loop with a better dataset.</p>
+  </div>
+
+  <h2>1 &middot; Full fine-tuning vs adapters</h2>
+  <div class="prose">
+    <p>There are two ways to actually move the model toward your data, and the difference is which weights you are allowed to change.</p>
+    <ul>
+      <li><strong>Full fine-tuning</strong> updates <em>every</em> weight in the model. It is the most expressive option and historically the default, but it is expensive: you need enough GPU memory to hold the model, its gradients, and the optimizer state (often several times the model's size), and you produce a complete new copy of the model per task. For a large model this is out of reach for most teams.</li>
+      <li><strong>Parameter-efficient fine-tuning (PEFT)</strong> freezes the original weights and trains a tiny number of new ones instead. <strong>LoRA</strong> is the dominant form, and it is tomorrow's whole lesson. The conceptual point for today: you can get most of the benefit of full fine-tuning while training roughly one percent of the parameters, which is why nearly every team fine-tunes this way now.</li>
+    </ul>
+    <p>For today, hold both as "the same SFT objective; full FT moves all weights, PEFT moves a small added set." The data, the forgetting risk, and the evaluation discipline below apply to both.</p>
+  </div>
+
+  <h2>2 &middot; The data is the whole job</h2>
+  <div class="prose">
+    <p>Fine-tuning success is decided almost entirely by the dataset, not the hyperparameters. Three principles, in priority order:</p>
+  </div>
+
+  <div class="diagram">  QUALITY  >  CONSISTENCY  >  QUANTITY
+  ───────────────────────────────────────────────────────────────
+  QUALITY      Every "ideal response" must be genuinely ideal. The model
+               copies what you show it, including the mistakes. 200 hand-checked
+               examples beat 5,000 scraped, noisy ones. Garbage pairs teach garbage.
+
+  CONSISTENCY  Same format, same tone, same structure across every example.
+               If half your responses use bullets and half use prose, you teach
+               the model to be inconsistent. Pick one shape and hold it.
+
+  QUANTITY     Useful, but last. For narrow form/style tasks, a few hundred to a
+               few thousand clean examples is a common starting range. More helps
+               only if it is the SAME quality and consistency.</div>
+
+  <div class="prose">
+    <p>Each training example is a pair: an <strong>instruction (or input)</strong> and the <strong>ideal response</strong> you want the model to produce for it. Crucially, the loss is usually computed only on the <em>response</em> tokens, not the instruction, you want the model to learn to <em>produce</em> the answer, not to memorize and regenerate your prompts.</p>
+  </div>
+
+  <h3>The chat template is not optional</h3>
+  <div class="prose">
+    <p>Instruct and chat models were trained with a specific <strong>chat template</strong>: special tokens and role markers that delimit system, user, and assistant turns (the exact strings differ per model family). When you fine-tune one of these models, your data must be wrapped in the <em>same</em> template the base model expects. Get this wrong and you are training the model on a format it does not recognize, which degrades it and can undo its instruction-following. The senior habit: use the model's own tokenizer and its <code>apply_chat_template</code> helper to format every example, never hand-roll the role markers.</p>
+  </div>
+
+  <div class="diagram">  ONE TRAINING EXAMPLE (conceptual; real special tokens vary by model)
+  ┌──────────────────────────────────────────────────────────────┐
+  │ &lt;system&gt;   You are MaiQ's ticket formatter. Output strict JSON. │  ← context
+  │ &lt;user&gt;     Login button is broken on Safari, blocks checkout.  │  ← instruction
+  │ &lt;assistant&gt; {"category":"bug","priority":"high",               │  ┐
+  │              "summary":"Safari login button blocks checkout"}   │  ┘ ← LOSS computed
+  └──────────────────────────────────────────────────────────────┘     here only
+         the model learns: given THIS context + THIS input,
+         produce THIS shape of output, every time.</div>
+
+  <h2>3 &middot; Catastrophic forgetting: the failure that ruins first attempts</h2>
+  <div class="prose">
+    <p>Here is the trap. You fine-tune a capable general model on 500 examples of your narrow task. It nails the task, and it has quietly gotten <em>worse at everything else</em>, it forgets how to reason on out-of-distribution questions, loses some of its safety behavior, becomes brittle. This is <strong>catastrophic forgetting</strong>: by pushing the weights hard toward a narrow distribution, you overwrite general capability the model had.</p>
+    <p>It happens when you over-tune: learning rate too high, too many epochs, dataset too small and too homogeneous, all weights moving. You are not "adding a skill," you are dragging the whole distribution, and if you drag too far the broad competence behind it tears.</p>
+  </div>
+
+  <div class="callout warning">
+    <span class="label">Four levers against forgetting</span>
+    <p><strong>Low learning rate</strong> &mdash; nudge the weights, do not shove them; fine-tuning LRs are far smaller than pretraining LRs. <strong>Few epochs</strong> &mdash; one to three passes is often plenty; more memorizes and erodes. <strong>Mixed data</strong> &mdash; blend in some general examples so the narrow task does not dominate the gradient. <strong>Adapters (PEFT/LoRA)</strong> &mdash; freezing the base weights and training a small adapter structurally limits how far you can drift, which is one more reason LoRA is the default. The senior phrasing: "I fine-tune gently and verify general ability did not regress, because the failure mode is winning the task and losing the model."</p>
+  </div>
+
+  <h2>4 &middot; Splits, eval, and knowing it worked</h2>
+  <div class="prose">
+    <p>Fine-tuning is an empirical loop, so you instrument it like any model training. Hold out a <strong>validation split</strong> (say 10 to 20 percent) that the model never trains on, and watch training loss and validation loss together:</p>
+    <ul>
+      <li><strong>Both fall, then val flattens or ticks up while train keeps falling</strong> &rarr; you have started <em>overfitting</em>; stop around the elbow.</li>
+      <li><strong>Train loss barely moves</strong> &rarr; LR too low, or the task is not learnable from this data.</li>
+      <li><strong>Loss looks great but outputs are worse</strong> &rarr; classic sign of a chat-template mismatch or catastrophic forgetting; loss is necessary, not sufficient.</li>
+    </ul>
+    <p>Loss alone never tells you the model is good. You need a <strong>held-out eval that measures the actual behavior</strong>: for a format task, what fraction of outputs parse and conform to the schema; for a style task, an LLM-as-judge score (Module 5) against a rubric; and a <strong>regression check</strong> on general questions to catch forgetting. That is the bar for "it worked," not a pretty loss curve.</p>
+  </div>
+
+  <h2>5 &middot; Compute realities (just enough to be credible)</h2>
+  <div class="prose">
+    <p>You do not need to run this to discuss it, but know the shape. Full fine-tuning of a large model needs many high-memory GPUs because memory must hold the weights plus gradients plus optimizer state. PEFT/LoRA collapses that: you freeze the base and train a small adapter, so a single modern GPU can fine-tune a model that full FT could never fit, and a managed API (OpenAI, and others) hides the infrastructure entirely behind an upload-and-train endpoint. The practical takeaway for a product team: fine-tuning is usually a LoRA job on one GPU or a managed endpoint, not a cluster, and the cost and effort sit in <em>building the dataset</em>, not in renting hardware.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: trace a tiny SFT run end to end</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>Goal: make a model always output your strict JSON ticket shape. Trace the pipeline a senior would run.</p>
+  </div>
+  <div class="diagram">  1. COLLECT   400 real tickets, each hand-labeled into the exact JSON shape.
+               Drop any sloppy label. Result: 400 clean (input → ideal JSON) pairs.
+
+  2. SPLIT     ~340 train / ~60 validation. Never let a val example leak into train.
+
+  3. FORMAT    Wrap every pair in the base model's chat template via its tokenizer.
+               Mask loss to the assistant (JSON) tokens only.
+
+  4. TRAIN     LoRA, low LR, 2-3 epochs. Watch train vs val loss for the overfit elbow.
+
+  5. EVAL      On the 60 held-out: % that parse as valid JSON AND match the schema.
+               Plus a regression probe: ask 20 general questions, confirm it still
+               reasons normally (no catastrophic forgetting).
+
+  6. DECIDE    Schema-conformance up to ~99%? General ability intact? Ship the adapter.
+               Otherwise: more/better data, not more epochs.</div>
+  <div class="prose">
+    <p>The lesson inside the trace: every hard decision was about <em>data and stopping</em>, not architecture. That is where fine-tuning is actually won, and it is why the lab on Day 41 is a design lab, not a GPU lab.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Say each answer out loud in full sentences, as if to an interviewer. Then open the solution and compare. The gap is your lesson.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>A teammate fine-tuned a strong general model on 300 examples and reports: "Validation loss is great and it crushes our task, but customers say it has gotten dumber on everything else." What happened, and what are two fixes?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>That is catastrophic forgetting: the run pushed the weights too hard toward a narrow, homogeneous distribution and overwrote general capability, which a low task-loss will not reveal because loss only measures the narrow task. Fixes: tune more gently (lower learning rate, fewer epochs, stop at the val elbow), mix in general examples so the gradient is not dominated by the narrow task, and prefer LoRA/adapters so the frozen base limits drift. Add a regression eval on general questions to your pipeline so this is caught before customers do. Loss is necessary, not sufficient.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>Why is the chat template such a common silent failure in fine-tuning, and how do you avoid it?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Instruct/chat models were trained with specific special tokens marking system/user/assistant turns; if your training data uses a different wrapper (or none), you are teaching the model on a format it does not recognize, which degrades quality and can break instruction-following, yet the loss curve can still look fine, so it fails silently. Avoid it by formatting every example with the base model's own tokenizer and its <code>apply_chat_template</code> helper rather than hand-writing role markers, and by masking the loss to the assistant tokens so the model learns to produce the response, not echo the prompt. The senior signal is treating the template as part of the contract with that specific model, not a formatting afterthought.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>You have 50,000 noisy, auto-generated (instruction, response) pairs and 400 hand-verified ones. You can only use one set for a first fine-tune. Which do you pick and why?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Pick the 400 clean ones. Fine-tuning copies what you show it, so quality and consistency dominate quantity: 50,000 noisy pairs teach the model the noise, including bad formats and wrong answers, while 400 genuinely-ideal, consistently-formatted pairs are enough to pin a narrow form or style task and will not poison the model. Start small and clean, measure on a held-out set, and only scale the dataset if it can be scaled at the SAME quality. "More data" is the last lever, not the first, and dirty data is worse than little data.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's Module 6 slice and common 2026 screens. Drill the one-line keys, then expand each into a 90-second answer with Claude using protocol prompt #2.</p>
+  <ul class="q-list">
+    <li>What does SFT actually do?
+      <div class="a">Key: continues next-token training on curated (instruction &rarr; ideal response) pairs; teaches form and behavior, not new world facts reliably.</div></li>
+    <li>What is catastrophic forgetting and how do you avoid it?
+      <div class="a">Key: over-tuning erodes general ability; mitigate with low LR, few epochs, mixed data, and adapters (LoRA).</div></li>
+    <li>What makes a good fine-tuning dataset?
+      <div class="a">Key: quality &gt; consistency &gt; quantity; ideal responses, one consistent format, a few hundred to a few thousand clean pairs to start.</div></li>
+    <li>Why does the chat template matter when fine-tuning?
+      <div class="a">Key: the base model expects its own special role tokens; mismatched formatting degrades it and can break instruction-following, silently.</div></li>
+    <li>Full fine-tuning vs PEFT &mdash; what is the difference and why does PEFT dominate?
+      <div class="a">Key: full FT updates all weights (expensive, full copy per task); PEFT freezes the base and trains ~1% of params, cheaper and swappable.</div></li>
+    <li>How do you know a fine-tune actually worked?
+      <div class="a">Key: held-out eval on the real behavior (schema conformance, judge score) plus a regression check for forgetting; loss alone is not sufficient.</div></li>
+    <li>How do you read train vs validation loss during a run?
+      <div class="a">Key: both fall then val flattens/rises while train keeps falling means overfitting, stop at the elbow; flat train loss means LR too low or data not learnable.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (15&ndash;20 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>No training run, just build the dataset spec, which is the real skill. Pick a narrow form task (e.g. "turn a support message into our JSON ticket shape"). Hand-write 8 to 10 (instruction &rarr; ideal response) pairs in a <code>.jsonl</code> file, keeping format and tone rigidly consistent. Then read the Hugging Face <a href="https://huggingface.co/docs/transformers/main/en/chat_templating">chat templating</a> docs and the OpenAI <a href="https://platform.openai.com/docs/guides/fine-tuning">fine-tuning data format</a> section, and rewrite your pairs into the exact structure each expects. The exercise teaches you why the template and consistency are 90% of the work.</p>
+    <p class="muted" style="font-size:13.5px">Stretch: write the eval you would run on a held-out split, in words. What exactly counts as a correct output, and what general-ability probe would catch catastrophic forgetting? You will reuse this on Day 41. See <a href="../../tools.html">Tools &amp; Claude</a> for access.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>Your evaluation instinct at MaiQ transfers directly: the same LLM-as-judge framework and held-out discipline you used to run 11-plus retrieval and chunking experiments is exactly what gates a fine-tune, you would never declare an SFT run "good" on loss alone any more than you trusted a retrieval change on vibes. If MaiQ ever needed an airtight house JSON or a consistent ticket tone at the very last percent of reliability, you can describe the honest plan: a few hundred hand-checked pairs in the model's chat template, a LoRA run tuned gently, and a held-out eval plus a regression probe for forgetting. That measured, data-first framing is precisely the senior signal, and it leads straight into tomorrow's lesson on the LoRA mechanism that makes such a run cheap.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>SFT is the same next-token objective continued on curated (instruction, ideal response) pairs, which is why it teaches form well and facts poorly. The dataset decides everything: quality beats consistency beats quantity, and the base model's chat template is part of the contract. Catastrophic forgetting is the headline failure, fight it with a low learning rate, few epochs, mixed data, and adapters. Judge success on a held-out behavioral eval plus a regression check, never on the loss curve alone.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d38">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: LoRA and QLoRA &mdash; how to fine-tune a big model on one GPU by training ~1% of the weights.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d37-prompt-rag-finetune.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 37 &middot; Prompt vs RAG vs fine-tune</div></a>
+    <a data-nav="next" class="next" href="d39-lora-qlora.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 39 &middot; LoRA &amp; QLoRA</div></a>
+  </div>
+
+  <div class="foot">Module 6 &middot; Fine-tuning &amp; Model Adaptation &middot; Day 38 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

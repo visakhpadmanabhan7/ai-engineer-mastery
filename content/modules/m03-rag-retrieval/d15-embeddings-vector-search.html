@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 15 · Embeddings &amp; vector search</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 3 &middot; RAG &amp; Retrieval</span>
+    <span class="pill">Day 15</span>
+    <span class="pill">55 min</span>
+    <span class="diff" title="Difficulty: intermediate"><i class="on"></i><i class="on"></i><i></i></span>
+  </div>
+
+  <h1>Embeddings &amp; vector search</h1>
+  <p class="lede">Dense retrieval is the engine of semantic search: it finds passages that <em>mean</em> the same thing, not just ones that share words. Today you learn what an embedder does, why brute force collapses at scale, and how pgvector lets you do it next to your relational data.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Explain what an embedding model produces and what cosine and dot product measure.</li>
+      <li>Show why brute-force search is O(N&middot;d) and hits a scaling cliff.</li>
+      <li>Compare HNSW, IVF, PQ, and LSH and pick a default index.</li>
+      <li>Distinguish pre-filter from post-filter metadata and know when each is safe.</li>
+      <li>Decide when pgvector is right and when a dedicated vector DB earns its keep.</li>
+    </ul>
+  </div>
+
+  <h2>What an embedder does</h2>
+  <div class="prose">
+    <p>An embedding model is a function that maps a piece of text to a <strong>fixed-length vector</strong> of floats (often 384, 768, or 1536 dimensions). It is trained so that texts with similar meaning land close together in that high-dimensional space and unrelated texts land far apart. "How do I reset my password?" and "I forgot my login credentials" share almost no words but should be near neighbors; that is what the embedder buys you that keyword search cannot.</p>
+    <p>The same model embeds both your chunks (offline, at ingestion) and the user's query (online, per request). Retrieval is then a geometry problem: <strong>find the chunk vectors closest to the query vector</strong>. The model did the hard semantic work up front; search is just nearest-neighbor lookup. This is why it is called <em>dense</em> retrieval, the vectors are dense and continuous, unlike the sparse word-count vectors of BM25 you meet tomorrow.</p>
+  </div>
+
+  <h2>1 &middot; Measuring closeness: cosine and dot product</h2>
+  <div class="prose">
+    <p>"Closest" needs a metric. Two dominate:</p>
+    <ul>
+      <li><strong>Cosine similarity</strong> measures the angle between two vectors and ignores their length: it asks "do these point the same direction?" Range -1 to 1, where 1 is identical direction. This is the usual choice because for text we care about semantic direction, not magnitude.</li>
+      <li><strong>Dot product</strong> multiplies the components and sums; it is cosine scaled by both vectors' lengths, so magnitude matters. If your embeddings are <strong>normalized</strong> to unit length (many are), dot product and cosine rank candidates identically, and dot product is cheaper to compute.</li>
+    </ul>
+    <p>Euclidean (L2) distance also appears; for normalized vectors it produces the same ordering as cosine. The practical rule: use the metric the embedding model was <em>trained</em> with (the model card says), and if vectors are normalized, dot product is the fast equivalent of cosine.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"An embedder maps text to a fixed-dimensional vector where semantic neighbors are geometrically close. Retrieval ranks chunks by cosine similarity to the query vector. With normalized embeddings, dot product gives the same ranking faster." That sentence tells the interviewer you know what the numbers mean.</p>
+  </div>
+
+  <h2>2 &middot; Why brute force hits a cliff</h2>
+  <div class="prose">
+    <p>The obvious algorithm: compare the query vector against <em>every</em> stored vector, sort, take the top-k. This is exact and trivial to write. It is also O(N&middot;d), where N is the number of chunks and d the dimensionality. With 10,000 chunks of 768 dims it is instant. With 50 million chunks it is a wall: every single query touches all 50 million vectors, and latency grows linearly with corpus size. You cannot serve a product on that.</p>
+  </div>
+
+  <div class="diagram">  BRUTE FORCE (exact):  query · every vector  →  O(N · d)
+
+     N = 10K   →  fine, milliseconds
+     N = 1M    →  getting slow
+     N = 50M   →  every query scans 50M vectors  →  the cliff  ✗
+
+  APPROXIMATE NEAREST NEIGHBOR (ANN):  smart index  →  ~O(log N) typical
+
+     trade a little RECALL  (might miss a true neighbor occasionally)
+     for a lot of SPEED     (sub-linear lookup, scales to billions)</div>
+
+  <div class="prose">
+    <p>The escape is <strong>Approximate Nearest Neighbor (ANN)</strong> search. You build an index that lets a query skip most of the corpus and inspect only a promising slice. The deal: you accept that occasionally a true neighbor is missed (recall slightly below 100 percent) in exchange for sub-linear lookup that scales to billions of vectors. For RAG this trade is almost always worth it, a 98 to 99 percent recall ANN search that is a hundred times faster beats exact search that times out.</p>
+  </div>
+
+  <h2>3 &middot; The ANN index families</h2>
+  <div class="prose">
+    <p>Four families, each a different way to avoid scanning everything. Know what each does and when it fits.</p>
+  </div>
+
+  <table>
+    <tr><th>Index</th><th>Idea</th><th>Trade-off</th><th>Use when</th></tr>
+    <tr><td><b>HNSW</b><br><span class="muted">graph</span></td><td>A navigable small-world graph; greedily hop toward the query through layers of links.</td><td>Excellent recall and speed; higher memory and slower build. The default.</td><td><b>Most cases.</b> Best recall/latency, fits in RAM.</td></tr>
+    <tr><td><b>IVF</b><br><span class="muted">clustering</span></td><td>Cluster vectors into cells; at query time search only the nearest few cells (probes).</td><td>Lower memory, fast build; recall depends on how many cells you probe.</td><td>Large corpora where memory matters; tune nprobe.</td></tr>
+    <tr><td><b>PQ</b><br><span class="muted">compression</span></td><td>Product quantization compresses each vector into a few bytes via codebooks.</td><td>Massive memory savings; some accuracy loss. Often layered on IVF (IVF-PQ).</td><td>Billions of vectors where RAM is the binding constraint.</td></tr>
+    <tr><td><b>LSH</b><br><span class="muted">hashing</span></td><td>Hash so that nearby vectors collide into the same bucket.</td><td>Simple, but usually weaker recall/speed than graph methods today.</td><td>Niche / legacy; rarely the first choice now.</td></tr>
+  </table>
+
+  <div class="prose">
+    <p>The decision is mostly memory versus recall. <strong>HNSW is the default</strong>: it gives the best recall-latency balance and is what you reach for until something forces otherwise. When the corpus is too big to hold full vectors in RAM, you move to <strong>IVF</strong> (probe a subset of clusters) and then add <strong>PQ</strong> compression (IVF-PQ) at the extreme scale of billions of vectors. <strong>LSH</strong> is mostly of historical interest for text RAG today. Say "HNSW unless memory forces IVF or IVF-PQ" and you have the senior answer.</p>
+  </div>
+
+  <h2>4 &middot; Filtering by metadata: pre vs post</h2>
+  <div class="prose">
+    <p>Real queries are rarely "search the whole corpus." They are "search <em>this tenant's</em> docs," "only the 2026 policies," "exclude archived." That means combining vector search with a metadata filter, and the order matters enormously.</p>
+    <ul>
+      <li><strong>Post-filter:</strong> run ANN first to get top-k, then drop results that fail the filter. Simple, but dangerous: if you fetch the top 10 and 9 belong to other tenants, you return 1 result, or zero, even though plenty of valid matches exist deeper in the index. The filter silently starves recall.</li>
+      <li><strong>Pre-filter:</strong> restrict the search to vectors that satisfy the filter, then do ANN within that subset. Correct recall, but harder to make fast, because most ANN indexes are built over the whole set and a tight filter can fight the index structure.</li>
+    </ul>
+    <p>Modern vector stores implement <strong>filtered ANN</strong> that pushes the predicate into the search so you get pre-filter correctness at near post-filter speed. The non-negotiable case is multi-tenancy: a tenant filter is a <em>correctness and security</em> constraint, never an afterthought, so it must be a true pre-filter (or a per-tenant index/namespace), never a post-hoc drop. You will see this again under multi-tenant RAG isolation later in the module.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Concept</span>
+    <p>Post-filtering applies the predicate <em>after</em> retrieval and can starve recall (it filters out most of a small top-k). Pre-filtering restricts the candidate set <em>before</em> ANN and preserves recall. For tenant isolation, always pre-filter or use per-tenant namespaces; a post-filter is a recall bug and a data-leak risk waiting to happen.</p>
+  </div>
+
+  <h2>5 &middot; pgvector, and when to choose it</h2>
+  <div class="prose">
+    <p><strong>pgvector</strong> is a Postgres extension that adds a <code>vector</code> column type and ANN indexes (HNSW and IVFFlat) directly inside your relational database. Its killer feature is not raw speed; it is that your vectors live <em>next to your relational data</em>. The chunk text, its embedding, the source document, tenant id, permissions, and timestamps are all rows in the same database, so a filtered semantic search is one SQL query with a normal <code>WHERE</code> clause and a vector ordering, inside one transaction, with one backup and one set of access controls.</p>
+  </div>
+
+  <pre><code><span class="tok-c">-- one query: dense search + a real pre-filter, in plain SQL</span>
+<span class="tok-k">SELECT</span> id, content
+<span class="tok-k">FROM</span> chunks
+<span class="tok-k">WHERE</span> tenant_id = <span class="tok-n">42</span>           <span class="tok-c">-- pre-filter (correctness + isolation)</span>
+<span class="tok-k">ORDER BY</span> embedding &lt;=&gt; :query_vec  <span class="tok-c">-- &lt;=&gt; is cosine distance in pgvector</span>
+<span class="tok-k">LIMIT</span> <span class="tok-n">10</span>;</code></pre>
+
+  <div class="prose">
+    <p><strong>When pgvector is the right call:</strong> you are already on Postgres, your corpus is up to roughly 10 million vectors, and you value operational simplicity and transactional consistency between vectors and metadata over specialized scale. For the vast majority of products that is exactly the situation, one fewer system to run, deploy, secure, and keep in sync.</p>
+    <p><strong>When a dedicated vector DB earns its keep:</strong></p>
+    <ul>
+      <li><strong>Pinecone</strong> — fully managed, designed to scale horizontally without you operating it; pay for the convenience.</li>
+      <li><strong>Qdrant / Weaviate</strong> — first-class metadata filtering, payload indexing, and easy per-vector delete and update; reach for these when rich filtering and frequent mutation are central.</li>
+      <li><strong>Milvus</strong> — built for very large scale (hundreds of millions to billions of vectors) with tunable index types.</li>
+    </ul>
+    <p>The honest senior take: <strong>start with pgvector if you are already on Postgres</strong> and only adopt a specialized store when you outgrow it on scale, filtering ergonomics, or update frequency. Most teams reach for a dedicated vector DB sooner than they need to.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: 5 million chunks, multi-tenant, on Postgres</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>You are building retrieval for a B2B docs assistant: ~5M chunks total, hundreds of tenants, each query scoped to one tenant, already running Postgres. Walk the choices.</p>
+  </div>
+  <div class="prose">
+    <p><strong>Store:</strong> pgvector. Five million vectors is well within range, and keeping embeddings beside tenant ids and permissions in the same database makes isolation a plain <code>WHERE tenant_id = ?</code> rather than a second system to keep in sync. <strong>Index:</strong> HNSW for the recall-latency balance, since 5M&times;768 floats fit comfortably in RAM. <strong>Metric:</strong> cosine (the <code>&lt;=&gt;</code> operator) matching how the embedding model was trained, with normalized vectors so it is effectively a fast dot product. <strong>Filter:</strong> pre-filter on <code>tenant_id</code>, always, because it is a correctness and security boundary; a post-filter could both leak another tenant's data and starve recall by dropping most of a small top-k. <strong>When to revisit:</strong> if you cross tens of millions of vectors or need very high write/delete churn per tenant, evaluate Qdrant or Milvus, until then pgvector is the lower-operations choice.</p>
+  </div>
+
+  <h2>Why this matters for you as an AI engineer</h2>
+  <div class="callout key">
+    <span class="label">Three consequences, derived not memorized</span>
+    <p><b>Dense retrieval is geometry</b> &larr; the embedder front-loads the semantics, so search is nearest-neighbor by cosine, and matching the model's trained metric matters.<br>
+    <b>ANN is mandatory at scale</b> &larr; brute force is O(N&middot;d) and collapses, so you trade a little recall for sub-linear speed, defaulting to HNSW.<br>
+    <b>Pre-filter for isolation</b> &larr; tenant scoping is a correctness and security constraint, so it lives in the data layer as a pre-filter or namespace, never a post-hoc drop.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Say each answer out loud in full sentences, as if to an interviewer. Then open the solution and compare. The gap is your lesson.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>Your prototype does exact cosine search over 20,000 chunks and is fast. Marketing wants to ingest 30 million more. What breaks, and what is your migration plan, in two moves?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>What breaks is latency: exact search is O(N&middot;d), so at ~30M vectors every query scans all of them and response time grows linearly into the seconds, which is unservable. The two moves: (1) switch from brute force to an <strong>ANN index</strong>, defaulting to HNSW for the best recall-latency balance, accepting ~98 to 99 percent recall for sub-linear lookup; (2) if 30M&times;d floats no longer fit comfortably in RAM, move to IVF (probe a subset of clusters) and, at the extreme, add PQ compression (IVF-PQ). Then verify recall on a golden set after the switch, because ANN is approximate and you want to confirm the recall hit is acceptable, tuning index parameters (HNSW ef / IVF nprobe) to trade recall against latency.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>A multi-tenant RAG app occasionally returns another customer's document. The engineer "fixed" it by fetching top-20 then dropping rows where <code>tenant_id</code> mismatches. Why is this still broken, and what is the correct fix?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>This is <strong>post-filtering</strong>, and it is broken two ways. First, recall: if the correct tenant's best chunks sit below rank 20 (crowded out by other tenants' similar content), they are never fetched, so the user gets a worse answer or none. Second, it treats a <em>security boundary</em> as a display filter, the moment the drop logic has a bug, off-by-one, a forgotten code path, the wrong tenant's data leaks. The correct fix is a <strong>pre-filter</strong>: scope the search to <code>tenant_id = ?</code> before ANN runs (in pgvector, a <code>WHERE</code> clause the index respects; in a dedicated store, a filtered search or a per-tenant namespace), so other tenants' vectors are never candidates in the first place. Tenant isolation belongs in the data layer, not in post-processing.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>Your team is debating pgvector versus Pinecone for a new feature: ~2M chunks, already on Postgres, frequent filtered queries by project and date. Make the call and name the one condition that would flip it.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Choose <strong>pgvector</strong>. Two million chunks is comfortably within its range, you are already running Postgres so there is no new system to operate, secure, and back up, and the frequent filters by project and date are just SQL <code>WHERE</code> clauses on columns that live in the same table as the vectors, with transactional consistency for free. Pinecone would add a managed system and a sync problem (keeping vectors and your relational metadata in step) to solve a scale problem you do not have at 2M. The condition that flips it: if the corpus grows toward tens of millions of vectors with high query concurrency, or if operating Postgres at that vector load becomes a burden, then a managed store like Pinecone (for hands-off scale) or Qdrant/Milvus (for filtering ergonomics or huge scale) becomes worth the extra system.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's RAG &amp; Retrieval slice and common 2026 screens. Drill the one-line keys, then expand each into a 90-second answer with Claude using protocol prompt #2.</p>
+  <ul class="q-list">
+    <li>What is dense retrieval and what is the embedder doing?
+      <div class="a">Key: encodes query and chunk to fixed-dim vectors; rank by cosine/dot; trained so semantic neighbors are close in the space.</div></li>
+    <li>Why ANN instead of brute-force cosine search?
+      <div class="a">Key: brute force is O(N&middot;d) and hits a scaling cliff; ANN (HNSW/IVF/PQ) trades a little recall for big, sub-linear speed.</div></li>
+    <li>Compare HNSW, IVF, PQ, and LSH; what is your default?
+      <div class="a">Key: HNSW graph = best recall/latency (default); IVF clustering = lower memory; PQ = compression for billions; LSH = legacy. HNSW unless memory forces IVF/IVF-PQ.</div></li>
+    <li>Cosine vs dot product, and when are they equivalent?
+      <div class="a">Key: cosine = angle (length-independent); dot = cosine scaled by magnitude; identical ranking when vectors are normalized, and dot is then cheaper.</div></li>
+    <li>Pre-filter vs post-filter for metadata, why does it matter?
+      <div class="a">Key: post-filter drops after retrieval and starves recall (and leaks data); pre-filter restricts before ANN and preserves recall. Always pre-filter for tenant isolation.</div></li>
+    <li>pgvector vs Pinecone vs Qdrant/Weaviate vs Milvus?
+      <div class="a">Key: pgvector = vectors next to relational data (up to ~10M); Pinecone = managed scale; Qdrant/Weaviate = first-class filter/delete; Milvus = huge scale.</div></li>
+    <li>When is pgvector the right default and when do you outgrow it?
+      <div class="a">Key: right when already on Postgres, up to ~10M vectors, valuing simplicity and transactional metadata; outgrow it on scale, heavy filtering ergonomics, or high write/delete churn.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (15&ndash;25 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Stand up vector search in Postgres. Using the <a href="https://github.com/pgvector/pgvector">pgvector</a> README, create a table with a <code>vector</code> column, insert a handful of embedded sentences (use any embedding API or a local Sentence-Transformers model), and add an HNSW index. Then run an <code>ORDER BY embedding &lt;=&gt; :query LIMIT 5</code> query and confirm semantically similar sentences rank above unrelated ones. Finally, add a <code>tenant_id</code> column and rewrite the query as a pre-filter (<code>WHERE tenant_id = ?</code>) to feel how isolation becomes a plain SQL clause. Skim the pgvector docs on <a href="https://github.com/pgvector/pgvector#indexing">HNSW vs IVFFlat</a> to see the index trade-offs in practice.</p>
+    <p class="muted" style="font-size:13.5px">No database handy? Embed five sentences with the Claude-adjacent or Sentence-Transformers API, compute cosine similarities in a notebook by hand, and confirm the ranking matches your intuition. See <a href="../../tools.html">Tools &amp; Claude</a>.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>This is the offline-to-online seam you own on MaiQ: a <strong>FastAPI ingestion service</strong> that embeds chunks and writes them into <strong>pgvector</strong>, then serves dense retrieval on the query path. You can speak to the specific design rationale interviewers love: "we chose pgvector because our chunks, their embeddings, and the relational metadata live in one Postgres database, so a scoped semantic search is a single SQL query with the filter pushed into the index, no second system to keep in sync." Your <strong>Sentence-Transformers</strong> background (and the JURIX thesis, which fine-tuned Sentence-BERT for hybrid legal retrieval on the Japanese Civil Code) means you can also explain what the embedder is actually doing, not just call an API. When asked "why not Pinecone," your answer is grounded: at MaiQ's scale, Postgres-native vectors win on operational simplicity and transactional consistency.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>An embedder maps text to a fixed-dimensional vector where semantic neighbors are close, so dense retrieval is nearest-neighbor search by cosine (or dot product on normalized vectors). Brute force is O(N&middot;d) and collapses at scale, so you use ANN, defaulting to HNSW and moving to IVF or IVF-PQ only when memory forces it. Metadata filtering must be a pre-filter for correct recall and, for multi-tenancy, for security, never a post-hoc drop. pgvector keeps vectors beside your relational data and is the right default up to roughly 10 million vectors when you are already on Postgres; reach for Pinecone, Qdrant, Weaviate, or Milvus only when scale, filtering, or churn outgrow it.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d15">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: the keyword retriever that still beats dense search on codes, names, and rare tokens.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d14-chunking-strategies.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 14 &middot; Chunking strategies</div></a>
+    <a data-nav="next" class="next" href="d16-bm25-lexical.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 16 &middot; BM25 &amp; lexical search</div></a>
+  </div>
+
+  <div class="foot">Module 3 &middot; RAG &amp; Retrieval &middot; Day 15 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

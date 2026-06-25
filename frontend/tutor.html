@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Tutor — AI Engineer Mastery</title>
+<link rel="stylesheet" href="assets/base.css">
+<link rel="stylesheet" href="assets/app.css">
+</head>
+<body>
+<div class="wrap" id="app">
+  <div class="muted-center" id="loading"><span class="spinner"></span> Loading…</div>
+</div>
+
+<script src="assets/api.js"></script>
+<script>
+if (!requireAuth()) { /* redirected */ }
+renderNav("tutor");
+
+let kind = "chat";
+let session_id = null;
+let streaming = false;
+
+const SUGGESTIONS = [
+  "Explain RRF vs weighted fusion with an example",
+  "Quiz me on agent memory types",
+  "When should I fine-tune instead of using RAG?",
+  "Walk me through designing an LLM gateway",
+];
+
+async function load() {
+  let status;
+  try {
+    status = await tutorStatus();
+  } catch (e) {
+    document.getElementById("app").innerHTML = "Could not load: " + escapeHtml(e.message);
+    return;
+  }
+
+  const offBanner = status.ai_enabled ? "" : `
+    <div class="ai-off">
+      Live streaming is off. Set <b>ANTHROPIC_API_KEY</b> on the server to enable real-time
+      answers from the AI tutor. You can still send a message now and the server will stream
+      back a helpful note.
+    </div>`;
+
+  const chips = SUGGESTIONS
+    .map((s) => `<button class="pill" type="button" data-prompt="${escapeHtml(s)}">${escapeHtml(s)}</button>`)
+    .join("");
+
+  document.getElementById("app").innerHTML = `
+    <div class="hero" style="padding:26px 0 4px">
+      <div class="eyebrow">Ask. Probe. Understand.</div>
+      <h1 style="font-size:2rem">AI Tutor</h1>
+      <p class="lede" style="margin:6px 0 0">Get explanations, quizzes, and design walkthroughs grounded in the curriculum.</p>
+    </div>
+
+    ${offBanner}
+
+    <div class="mode-tabs" id="modeTabs">
+      <button type="button" data-kind="chat" class="active">Ask anything</button>
+      <button type="button" data-kind="deepen">Deepen a concept</button>
+    </div>
+
+    <div class="pill-row" id="suggestions" style="display:flex; gap:8px; flex-wrap:wrap; margin:4px 0 8px">${chips}</div>
+
+    <div class="chat-log" id="chatLog"></div>
+
+    <div class="composer">
+      <textarea id="msgInput" placeholder="Ask the tutor anything... (Enter to send, Shift+Enter for a new line)"></textarea>
+      <button class="btn primary" id="sendBtn" type="button">Send</button>
+    </div>`;
+
+  const chatLog = document.getElementById("chatLog");
+  const input = document.getElementById("msgInput");
+  const sendBtn = document.getElementById("sendBtn");
+
+  // mode tabs
+  document.getElementById("modeTabs").addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-kind]");
+    if (!btn) return;
+    kind = btn.getAttribute("data-kind");
+    document.querySelectorAll("#modeTabs button").forEach((b) => b.classList.toggle("active", b === btn));
+    input.focus();
+  });
+
+  // suggested prompts fill the composer
+  document.getElementById("suggestions").addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-prompt]");
+    if (!btn) return;
+    input.value = btn.getAttribute("data-prompt");
+    input.focus();
+  });
+
+  function autoscroll() {
+    chatLog.scrollTop = chatLog.scrollHeight;
+  }
+
+  function addMessage(role, who, text) {
+    const wrap = document.createElement("div");
+    wrap.className = "msg " + role;
+    const w = document.createElement("div");
+    w.className = "who";
+    w.textContent = who;
+    const body = document.createElement("span");
+    body.textContent = text || "";
+    wrap.appendChild(w);
+    wrap.appendChild(body);
+    chatLog.appendChild(wrap);
+    autoscroll();
+    return body;
+  }
+
+  async function send() {
+    const message = input.value.trim();
+    if (!message || streaming) return;
+
+    addMessage("user", "You", message);
+    const bubble = addMessage("assistant", "Tutor", "");
+    input.value = "";
+
+    streaming = true;
+    sendBtn.disabled = true;
+    try {
+      session_id = await tutorStream({ kind, message, session_id }, (chunk) => {
+        bubble.textContent += chunk;
+        autoscroll();
+      });
+    } catch (e) {
+      toast(e.message);
+      bubble.textContent += (bubble.textContent ? "\n\n" : "") + "[Could not get a reply: " + e.message + "]";
+      autoscroll();
+    } finally {
+      streaming = false;
+      sendBtn.disabled = false;
+      input.focus();
+    }
+  }
+
+  sendBtn.addEventListener("click", send);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      send();
+    }
+  });
+
+  input.focus();
+}
+
+load();
+</script>
+</body>
+</html>

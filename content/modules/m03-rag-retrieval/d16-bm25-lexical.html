@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 16 · BM25 &amp; lexical search</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 3 &middot; RAG &amp; Retrieval</span>
+    <span class="pill">Day 16</span>
+    <span class="pill">45 min</span>
+    <span class="diff" title="Difficulty: intermediate"><i class="on"></i><i class="on"></i><i></i></span>
+  </div>
+
+  <h1>BM25 &amp; lexical search</h1>
+  <p class="lede">Dense embeddings are not the whole story. The decades-old keyword retriever BM25 still beats them flat on exact matches: product codes, error strings, names, acronyms. Today you learn why, and why every serious RAG system keeps it.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Explain TF-IDF, then how BM25 improves it with length normalization and term-frequency saturation.</li>
+      <li>Reason about the k1 and b knobs without memorizing the formula.</li>
+      <li>Name what BM25+ and BM25F add.</li>
+      <li>Say precisely why lexical search still beats dense on exact-match queries.</li>
+      <li>Decide when keyword search alone is the right call, and set up tomorrow's hybrid lesson.</li>
+    </ul>
+  </div>
+
+  <h2>The case for keyword search</h2>
+  <div class="prose">
+    <p>Yesterday's dense retrieval finds passages that <em>mean</em> the same thing. That is exactly wrong for a class of queries where you do not want semantic similarity, you want the <strong>literal token</strong>. If a user searches for error code <code>ERR_4042</code>, part number <code>X-7781-B</code>, the function name <code>parse_invoice</code>, or a surname like "Nakamura," there is no useful "meaning" to embed. An embedder will happily return semantically nearby chunks (other error codes, other part numbers) and miss the one exact string the user actually needs.</p>
+    <p>Lexical (keyword) search inverts the model: it scores documents by how well their <em>words</em> match the query's words. The workhorse is <strong>BM25</strong> (Best Matching 25), a probabilistic ranking function that has been the backbone of search engines for decades and remains the strong baseline every new retriever is measured against. It is fast, interpretable, needs no GPU, and on exact-match queries it is simply better than dense retrieval.</p>
+  </div>
+
+  <h2>1 &middot; From TF-IDF to BM25</h2>
+  <div class="prose">
+    <p>BM25 is best understood as a refinement of <strong>TF-IDF</strong>, so start there. TF-IDF scores a query term in a document by multiplying two intuitions:</p>
+    <ul>
+      <li><strong>Term Frequency (TF):</strong> a term that appears more often in a document is more relevant to it. "Invoice" appearing 8 times signals the doc is about invoices.</li>
+      <li><strong>Inverse Document Frequency (IDF):</strong> a term that appears in <em>few</em> documents is more discriminating. "Invoice" is informative; "the" appears everywhere and tells you nothing, so IDF down-weights common words and up-weights rare ones.</li>
+    </ul>
+    <p>TF-IDF works but has two flaws BM25 fixes, and these two fixes are the entire point of BM25:</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"BM25 is TF-IDF plus two corrections: <strong>term-frequency saturation</strong>, so the tenth occurrence of a word adds far less than the second, and <strong>document-length normalization</strong>, so a long document does not win just by being long. That is why it has stayed the lexical baseline for decades." Say that and you have shown you understand it, not just named it.</p>
+  </div>
+
+  <div class="prose">
+    <ul>
+      <li><strong>Term-frequency saturation.</strong> In raw TF-IDF, a word appearing 100 times scores 100&times; a word appearing once, which over-rewards keyword stuffing. BM25 makes TF <em>saturate</em>: the contribution rises quickly for the first few occurrences then flattens, so going from 1 to 2 mentions matters a lot but 50 to 51 barely moves the score. Relevance is not linear in count, and BM25 models that.</li>
+      <li><strong>Document-length normalization.</strong> A long document naturally contains more of every word, so raw TF unfairly favors long docs. BM25 normalizes by length relative to the average document, so a short, tightly-on-topic passage can outscore a long one that merely mentions the term in passing.</li>
+    </ul>
+  </div>
+
+  <h2>2 &middot; The two knobs: k1 and b</h2>
+  <div class="prose">
+    <p>BM25 exposes exactly two parameters, and you can reason about both from the intuitions above, no formula needed:</p>
+    <ul>
+      <li><strong>k1 (term-frequency saturation):</strong> controls how fast the TF contribution flattens. Higher k1 means repeated terms keep helping for longer (closer to linear TF); lower k1 means the score saturates almost immediately after the first occurrence. Typical values sit around 1.2 to 2.0.</li>
+      <li><strong>b (length normalization strength):</strong> controls how much document length is penalized, on a 0-to-1 dial. b = 1 fully normalizes by length; b = 0 ignores length entirely. The common default is around 0.75, a strong but not total length penalty.</li>
+    </ul>
+    <p>You rarely need to tune these, the defaults are robust, which is part of BM25's appeal. But an interviewer may ask what they do, and "k1 is the saturation knob, b is the length-normalization knob" is the answer.</p>
+  </div>
+
+  <div class="diagram">  TERM-FREQUENCY SATURATION  (why k1 matters)
+
+   score
+     │                  ┌───────────────  raw TF-IDF (linear, never flattens)
+     │             ┌────┘
+     │        ┌────┘
+     │     ┌──┘          ___________________  BM25 (saturates: flattens out)
+     │   ┌─┘     ____----
+     │  ┌┘ __----
+     │ ┌─-
+     └─┴──────────────────────────────────────►  term count in document
+        1   2   3   ...                  50  51
+        └─ early mentions: big gain    └─ later mentions: tiny gain</div>
+
+  <h2>3 &middot; BM25+ and BM25F</h2>
+  <div class="prose">
+    <p>Two named variants you should recognize:</p>
+    <ul>
+      <li><strong>BM25+</strong> adds a small lower-bound correction so that very long documents containing a query term are never scored essentially zero just because length normalization pushed them down. It patches an edge case where standard BM25 can over-penalize long docs.</li>
+      <li><strong>BM25F</strong> ("F" for fields) handles documents with multiple <em>fields</em> of differing importance, a title, an abstract, a body, and lets you weight a match in the title more heavily than a match buried in the body. Useful when structure carries signal (a query word in the title is a stronger relevance cue than the same word on page 9).</li>
+    </ul>
+    <p>You do not need to implement these. Knowing they exist, and what each fixes, is enough to sound fluent.</p>
+  </div>
+
+  <h2>4 &middot; Why lexical still beats dense on exact match</h2>
+  <div class="prose">
+    <p>This is the heart of the lesson, and the reason BM25 is not going anywhere. Dense embeddings compress text into a smooth semantic space, and that compression is <em>lossy on exactly the things that must match literally</em>:</p>
+    <ul>
+      <li><strong>Rare tokens and out-of-vocabulary strings.</strong> A part number <code>X-7781-B</code> or a fresh error code carries no learned semantics; the embedder has nothing meaningful to place it near, so it gets a vague vector. BM25 just matches the literal token and ranks it first.</li>
+      <li><strong>Names, codes, acronyms, identifiers.</strong> "Nakamura," <code>SKU-42</code>, <code>NullPointerException</code> need exact equality, not nearness. Dense search will surface other names or other exceptions; lexical search surfaces <em>the</em> one.</li>
+      <li><strong>Precision when the user knows the exact word.</strong> When someone types a precise term, they want that term, not its semantic cousins. Lexical search respects that intent; dense search may "helpfully" generalize away from it.</li>
+    </ul>
+    <p>The flip side, and why you do not use BM25 alone, is that lexical search is blind to <strong>synonyms and paraphrase</strong>: "reset my password" and "recover my login" share no tokens, so BM25 scores them as unrelated, while a dense model nails it. The two methods fail on opposite queries. That complementarity is the whole reason for tomorrow's lesson.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Concept</span>
+    <p>Lexical and dense retrieval have <strong>complementary failure modes</strong>. BM25 misses synonyms and paraphrase but nails exact tokens (codes, names, acronyms, rare strings). Dense nails meaning but blurs exact identifiers. Neither alone is enough, which is precisely why production RAG fuses both.</p>
+  </div>
+
+  <h2>5 &middot; When keyword search alone is the right call</h2>
+  <div class="prose">
+    <p>Sometimes you do not need embeddings at all, and reaching for them is over-engineering. BM25 alone is the right call when:</p>
+    <ul>
+      <li>The corpus is dominated by <strong>identifiers and structured tokens</strong>, log search, code search, SKU and part lookups, where queries are almost always exact strings.</li>
+      <li>You need <strong>full interpretability</strong>: BM25 can show exactly which query terms matched and why a document ranked where it did, which a vector score cannot.</li>
+      <li>You have <strong>no GPU budget or tight latency</strong>, BM25 is cheap, CPU-only, and battle-tested at massive scale (it is what classic search engines run on).</li>
+      <li>You are building a <strong>baseline</strong>: always measure BM25 first. A surprising number of "we need fancy embeddings" problems are solved by a well-tuned keyword index, and you cannot claim dense retrieval helped until you have beaten the BM25 baseline.</li>
+    </ul>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: BM25 intuition on a tiny corpus</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>Three documents, query: <code>invoice error</code>. Watch how saturation, IDF, and length normalization combine, qualitatively.</p>
+  </div>
+  <div class="diagram">  D1 (short):  "Invoice error: code 4042 on submit."
+  D2 (long):   "...invoice... [400 more words of unrelated text] ...invoice...invoice..."
+  D3 (short):  "Payment received; thank you for your order."
+
+  term "invoice":  appears in D1, D2  → moderate IDF (common-ish here)
+  term "error":    appears in D1 only → HIGH IDF (rare, discriminating)
+
+  D1: has BOTH terms, short doc → "error" (high IDF) scores strongly,
+      length normalization rewards the tight match            → RANK 1
+  D2: has "invoice" 3× but TF SATURATES (3rd mention ≈ 2nd),
+      missing "error" entirely, and it is LONG (penalized)     → RANK 2
+  D3: has neither query term                                   → score ~0, not returned</div>
+  <div class="prose">
+    <p>Read what each correction did. <strong>IDF</strong> made "error" worth more than "invoice" because it is rarer and more discriminating. <strong>Saturation</strong> stopped D2 from winning on three repetitions of "invoice." <strong>Length normalization</strong> rewarded short, on-topic D1 over long, padded D2. The document with both terms, tightly, ranks first, which is exactly what a human would pick. No neural network, no GPU, fully explainable.</p>
+  </div>
+
+  <h2>Why this matters for you as an AI engineer</h2>
+  <div class="callout key">
+    <span class="label">Three consequences, derived not memorized</span>
+    <p><b>Keep BM25, always</b> &larr; it nails exact tokens (codes, names, acronyms) that dense retrieval blurs, so it is not legacy, it is the half of retrieval embeddings cannot do.<br>
+    <b>Measure the baseline first</b> &larr; BM25 is the bar every retriever must clear, so you cannot claim dense or hybrid helped until you have beaten a tuned keyword index.<br>
+    <b>Failure modes are complementary</b> &larr; BM25 misses paraphrase, dense misses identifiers, which is the entire argument for the hybrid fusion you build tomorrow.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Say each answer out loud in full sentences, as if to an interviewer. Then open the solution and compare. The gap is your lesson.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>Your pure-dense RAG system is great at conceptual questions but users complain it "can't find" specific error codes and order numbers they paste in. Explain mechanically why, and what you would add.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>An error code like <code>ERR_4042</code> or an order number is a rare, essentially out-of-vocabulary token with no learned semantics, so the embedder produces a vague, uninformative vector and dense search returns <em>semantically nearby</em> chunks (other codes, other orders) rather than the exact-string match the user wants. Dense retrieval is lossy on precisely the literal identifiers these queries hinge on. The fix is to add a <strong>lexical retriever (BM25)</strong> that matches the exact token, then fuse it with dense results (tomorrow's hybrid search), so conceptual queries are served by embeddings and exact-token queries are served by BM25. The two cover each other's blind spots.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>A teammate says "BM25 is obsolete, embeddings replaced it." Give the two-sentence correction, naming one query type where BM25 wins decisively and one where it fails.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>BM25 is not obsolete; it has complementary strengths to dense retrieval and remains the baseline every new retriever is benchmarked against, which is why production systems run both. It wins decisively on <strong>exact-match queries</strong>, product codes, error strings, names, acronyms, rare tokens, where the user wants the literal token and embeddings only return semantic neighbors. It fails on <strong>synonym and paraphrase queries</strong> ("reset password" vs "recover login"), where there is no token overlap and a dense model is needed. Because they fail on opposite query types, the right architecture fuses them rather than choosing one.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>You set <code>b = 0</code> in BM25 and suddenly long, rambling documents dominate the results for every query. Explain what b does and why this happened.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>The parameter <code>b</code> controls <strong>document-length normalization</strong> on a 0-to-1 dial: at <code>b = 1</code> scores are fully normalized for length, at <code>b = 0</code> length is ignored entirely. With <code>b = 0</code> you removed the penalty that stops long documents from winning just by being long, a long, rambling document contains more occurrences of almost every term simply because it has more words, so its raw term-frequency contribution inflates and it outranks short, tightly-on-topic passages. Restore <code>b</code> toward the usual default of about 0.75 so length is penalized strongly (but not totally), letting a concise on-topic chunk outscore a long one that merely mentions the term in passing. This is exactly the flaw in plain TF-IDF that BM25's length normalization was designed to fix.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's RAG &amp; Retrieval slice and common 2026 screens. Drill the one-line keys, then expand each into a 90-second answer with Claude using protocol prompt #2.</p>
+  <ul class="q-list">
+    <li>What is BM25 and why does it still matter?
+      <div class="a">Key: probabilistic bag-of-words ranking (TF-IDF + length normalization + TF saturation); dominates exact-match queries, codes, names, acronyms, and is the lexical baseline.</div></li>
+    <li>How does BM25 improve on plain TF-IDF?
+      <div class="a">Key: two corrections, term-frequency saturation (repeats add diminishing value) and document-length normalization (long docs do not win by length alone).</div></li>
+    <li>What do the k1 and b parameters control?
+      <div class="a">Key: k1 = how fast TF saturates (higher = repeats keep helping); b = strength of length normalization on a 0-to-1 dial (default ~0.75).</div></li>
+    <li>Why does lexical search beat dense retrieval on exact-match queries?
+      <div class="a">Key: identifiers, codes, names, rare tokens have no useful learned semantics, so embeddings blur them; BM25 matches the literal token and ranks it first.</div></li>
+    <li>When would you use keyword search alone, without embeddings?
+      <div class="a">Key: identifier-heavy corpora (logs, code, SKUs), need for interpretability, no GPU/tight latency, or as the baseline you must beat first.</div></li>
+    <li>What do BM25+ and BM25F add?
+      <div class="a">Key: BM25+ adds a lower-bound correction so very long docs are not scored near zero; BM25F weights matches by field (title vs body).</div></li>
+    <li>What is the one query type BM25 fails on, and what is the implication?
+      <div class="a">Key: synonyms/paraphrase (no token overlap); implies you fuse BM25 with dense retrieval, since their failure modes are complementary, the setup for hybrid search.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (15&ndash;20 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Build a BM25 index over a small corpus and probe its strengths. Use the <a href="https://github.com/dorianbrown/rank_bm25">rank_bm25</a> Python library (or your search engine's built-in BM25): index 15 to 20 short passages, half conceptual prose and half containing identifiers like error codes or part numbers. Run two kinds of query, an exact identifier (e.g. the code itself) and a paraphrase of a concept, and note which BM25 nails and which it whiffs. Then re-run the same queries against the dense search you built on Day 15 and confirm the failure modes are opposite. You have just motivated tomorrow's hybrid lesson with your own eyes.</p>
+    <p class="muted" style="font-size:13.5px">No environment? Reason it through in the Claude web app: give Claude five short docs and a query, ask it to rank them by keyword overlap with length and rarity factored in, and compare to your own ranking. See <a href="../../tools.html">Tools &amp; Claude</a>.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>BM25 is the lexical half of the <strong>hybrid retrieval</strong> you run on MaiQ, where you combine BM25 with dense embeddings. That choice is not academic for you: a product-management tool is full of exact identifiers (ticket IDs, project keys, code symbols, error strings) that an embedder alone would blur, which is exactly the failure mode BM25 covers. When an interviewer asks "why not just embeddings?", your grounded answer is "because our users paste literal identifiers and exact terms, and dense search returns semantic neighbors instead of the exact match, so we keep BM25 for precision and fuse it with dense for paraphrase." Your <strong>11+ retrieval experiments</strong> mean you have measured this trade-off rather than assumed it, BM25 was a baseline you beat with the fused system, not a thing you skipped.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>BM25 is a probabilistic bag-of-words ranker: TF-IDF plus term-frequency saturation and document-length normalization, with two robust knobs (k1 for saturation, b for length). It still beats dense retrieval decisively on exact-match queries, codes, names, acronyms, and rare tokens, because embeddings are lossy on the things that must match literally. It fails on synonyms and paraphrase, which is the exact opposite of where dense retrieval fails, so their strengths are complementary. Use BM25 alone for identifier-heavy corpora or as the baseline you must beat, and fuse it with dense retrieval everywhere else, the subject of tomorrow's hybrid search lesson.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d16">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: run BM25 and dense in parallel and fuse them with Reciprocal Rank Fusion.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d15-embeddings-vector-search.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 15 &middot; Embeddings &amp; vector search</div></a>
+    <a data-nav="next" class="next" href="d17-hybrid-search-fusion.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 17 &middot; Hybrid search &amp; fusion</div></a>
+  </div>
+
+  <div class="foot">Module 3 &middot; RAG &amp; Retrieval &middot; Day 16 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

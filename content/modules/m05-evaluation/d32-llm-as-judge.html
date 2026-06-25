@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 32 · LLM-as-judge</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 5 &middot; Evaluation &amp; Observability</span>
+    <span class="pill">Day 32</span>
+    <span class="pill">60 min</span>
+    <span class="diff" title="Difficulty: advanced"><i class="on"></i><i class="on"></i><i class="on"></i></span>
+  </div>
+
+  <h1>LLM-as-judge</h1>
+  <p class="lede">Most of what an AI product produces, an answer, a summary, a tone, has no string-equality ground truth. You cannot diff it. LLM-as-judge is how you score the un-scoreable at scale: an LLM grades outputs against a rubric, approximating human judgment for cents instead of dollars. This is the technique that powers your whole evaluation story, so we build it properly.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Explain what LLM-as-judge is and why it exists, in one defensible sentence.</li>
+      <li>Build a stable rubric: numbered scale, explicit per-level anchors, in-context examples, reasoning before the score.</li>
+      <li>Name the three core judge biases and the concrete mitigation for each.</li>
+      <li>Calibrate a judge against human labels and state the agreement bar you need.</li>
+      <li>Identify the cases where LLM-as-judge is the wrong tool and reach for something else.</li>
+    </ul>
+  </div>
+
+  <h2>What it is and why it exists</h2>
+  <div class="prose">
+    <p>An <strong>LLM-as-judge</strong> is an LLM you prompt to evaluate another model's output against a rubric and return a score (and ideally a justification). That is the whole idea. You are using a language model not to generate the product output, but to play the role of a human grader reading that output and assigning it marks.</p>
+    <p>It exists because of an arithmetic problem. Human evaluation is the gold standard for subjective quality, but a human reading and scoring an answer costs minutes and real money, so you can label maybe dozens of cases a week. You need to score hundreds of cases on every pull request. A judge closes that gap: it approximates a careful human reader for a fraction of a cent per case, so you can run it nightly, in CI, over a whole golden set, every time. It does not replace humans, it <em>scales</em> a thin slice of human judgment to where you need it.</p>
+    <p>The catch, and the reason this is an advanced lesson, is that a sloppy judge is worse than no judge: it gives you a confident number that is wrong, and you will optimize toward it. A judge is only trustworthy if its rubric is stable and its score agrees with humans. Everything below is about earning that trust.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"LLM-as-judge uses an LLM to score outputs against an explicit rubric, so I can scale human-style evaluation to hundreds of cases per run for cents instead of dollars. It is an approximation of a human grader, so I treat it as an instrument that must be calibrated: I build a numbered rubric with per-level anchors, force the judge to reason before scoring, mitigate position and verbosity bias, and validate its agreement with my own human labels before I trust its numbers."</p>
+  </div>
+
+  <h2>Building a stable rubric</h2>
+  <div class="prose">
+    <p>The rubric is the judge. A vague rubric ("rate the helpfulness 1 to 10") produces noisy, drifting scores that mean nothing across runs. A good rubric is a precise grading contract. Four properties make it stable:</p>
+    <ul>
+      <li><strong>A numbered scale, kept short.</strong> Use a small discrete scale (1 to 5, or even 1 to 3 / pass-fail for binary qualities). Wide scales like 1 to 10 invite false precision, no one can reliably distinguish a 7 from an 8, and the judge cannot either, so the extra granularity is just noise. Fewer, well-defined levels are more reliable.</li>
+      <li><strong>Explicit per-level anchors.</strong> Define, in plain language, exactly what each number means. Not "5 is great" but "5 = every claim in the answer is directly supported by the provided context, no unsupported statements." When a level is described concretely, the judge has something to match against instead of a feeling. This is the single highest-leverage thing you do.</li>
+      <li><strong>In-context examples (one or two per level).</strong> Show the judge a sample output that earns a 5, a 3, and a 1, with a one-line reason. Examples pin down the boundaries that prose cannot, and they sharply reduce variance. This is few-shot prompting applied to grading.</li>
+      <li><strong>Reasoning before the score.</strong> Force the judge to write its justification <em>first</em>, then emit the number. If it states the score first, the number is an unconstrained guess and the "reasoning" becomes post-hoc rationalization. Reasoning-then-score makes the judge actually inspect the output against the anchors, and it gives you an auditable trail for every grade. This one change reliably improves agreement with humans.</li>
+    </ul>
+    <p>One more rule that prevents a whole class of garbage: <strong>one rubric scores one dimension.</strong> Do not ask a single judge call to rate "quality" as a blend of faithfulness, helpfulness, and tone, you will get a mushy average that hides which thing failed. Score faithfulness with one rubric, relevance with another, tone with a third. Separate axes, separate calls, separate numbers.</p>
+  </div>
+
+  <div class="diagram">  ANATOMY OF A STABLE JUDGE PROMPT
+  ┌────────────────────────────────────────────────────────────┐
+  │ ROLE        You are a strict evaluator of faithfulness.     │
+  │ TASK        Score ONLY whether every claim in the ANSWER    │
+  │             is supported by the CONTEXT.                    │
+  │ SCALE       1–5, integer.                                   │
+  │ ANCHORS     5 = every claim supported, no extras            │
+  │             3 = mostly supported, one minor unsupported     │
+  │             1 = key claims unsupported / contradicted       │
+  │ EXAMPLES    [one short example per level, with a reason]    │
+  │ INPUTS      CONTEXT: …    QUESTION: …    ANSWER: …          │
+  │ OUTPUT      First write reasoning, THEN a line "Score: N"   │
+  └────────────────────────────────────────────────────────────┘</div>
+
+  <h2>The three biases (and how to kill each)</h2>
+  <div class="prose">
+    <p>Judges are LLMs, so they inherit predictable, well-studied biases. If you do not mitigate them, your scores are systematically skewed, not just noisy. Three matter most:</p>
+  </div>
+
+  <table>
+    <tr><th>Bias</th><th>What goes wrong</th><th>Mitigation</th></tr>
+    <tr><td><b>Position</b></td><td>When comparing two answers A vs B, the judge tends to favor whichever comes first (or sometimes last), regardless of quality.</td><td>Run the comparison <em>both</em> orders (A,B and B,A) and average, or require agreement. Randomize order across the set so any residual bias is not correlated with the thing you are testing.</td></tr>
+    <tr><td><b>Verbosity</b></td><td>The judge rewards longer, more elaborate answers even when the short one is more correct, length reads as effort.</td><td>State in the rubric that length is not a virtue and conciseness is preferred when correct. Normalize for length, or compare answers of similar length. Watch for it explicitly in calibration.</td></tr>
+    <tr><td><b>Self-preference</b></td><td>A model tends to rate outputs from its own family more highly, it recognizes its own style as "good."</td><td>Use a judge from a <em>different</em> model family than the generator. At minimum, never let a model be the sole judge of its own outputs in a benchmark you report.</td></tr>
+  </table>
+
+  <div class="prose">
+    <p>These are not exotic edge cases, they show up in nearly every naive judge setup. The position-bias fix in particular (randomize and average both orders) is something an interviewer will specifically look for when you describe pairwise judging. Mention it unprompted and you signal you have actually built one.</p>
+  </div>
+
+  <h2>Calibration: does the judge agree with humans?</h2>
+  <div class="prose">
+    <p>A judge you have not validated is a number generator, not a measurement. Calibration is the step that turns it into an instrument: you take a sample of cases, have a human (ideally a domain expert) score them, have the judge score the same cases, and measure agreement.</p>
+    <p>Use the right statistic for the data:</p>
+    <ul>
+      <li><strong>Cohen's kappa</strong> for categorical or discrete labels (pass/fail, or the 1 to 5 buckets treated as categories). Kappa corrects for agreement that would happen by chance, so it is honest in a way raw percent-agreement is not.</li>
+      <li><strong>Spearman correlation</strong> when you care about the <em>ranking</em> the judge induces, does it order answers the same way a human would, even if the absolute numbers differ slightly.</li>
+    </ul>
+    <p>A common practical bar is agreement around <strong>0.6 or higher</strong> (substantial agreement) before you trust the judge to gate decisions. Below that, the judge disagrees with humans too often to drive a ship/no-ship call, and you go back and fix the rubric, usually by sharpening the anchors or adding examples for the levels where judge and human diverge most. Calibration is not one-and-done: re-check it when you change the judge model, the rubric, or the task, because any of those can quietly break the agreement you established.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Say this in an interview</span>
+    <p>"I never trust a judge I have not calibrated. I sample cases, get human labels, and measure agreement, Cohen's kappa for the discrete scores, Spearman if I care about ranking, and I want substantial agreement, roughly 0.6 plus, before the judge gates anything. If it is below that, the fix is the rubric: sharper per-level anchors and examples for the levels where we disagreed."</p>
+  </div>
+
+  <h2>When LLM-as-judge is the WRONG tool</h2>
+  <div class="prose">
+    <p>Reaching for a judge reflexively is a junior tell. A senior engineer knows its boundaries. Do not use it when:</p>
+    <ul>
+      <li><strong>There is a deterministic ground truth.</strong> If the answer is a number, a piece of code, valid JSON, an exact entity, or anything you can check with an assertion, use a <em>programmatic</em> check. It is free, instant, and perfectly reliable. Asking an LLM "is 2 + 2 equal to 4" is slower, costlier, and less reliable than <code>==</code>. The bottom layer of yesterday's pyramid exists for this.</li>
+      <li><strong>The domain needs expert judgment the LLM lacks.</strong> For legal correctness, medical safety, or any specialized field where the right answer depends on expertise the model does not reliably have, the judge will be confidently wrong. Use a human expert. A judge cannot evaluate what it does not itself understand.</li>
+      <li><strong>The cost or latency does not justify it.</strong> A judge call is a full LLM inference. Running it on every single production request to score live traffic is usually too slow and too expensive, that is what a sampled rolling evaluation and cheap online signals are for. Reserve the judge for offline runs and small samples, not the hot path.</li>
+    </ul>
+    <p>The unifying rule: a judge is for <em>subjective</em> quality at <em>offline</em> scale where humans are too slow. Outside that box, something cheaper or more reliable wins.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: a faithfulness judge in Python</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>A minimal but real faithfulness judge. Note the rubric anchors, the forced reasoning-before-score, and the parse of a structured result. This is the skeleton you will flesh out in the Day 36 lab.</p>
+  </div>
+
+<pre><code><span class="tok-k">import</span> re, json
+<span class="tok-k">from</span> anthropic <span class="tok-k">import</span> Anthropic
+
+client = Anthropic()
+
+<span class="tok-c"># One dimension per judge. This one scores ONLY faithfulness.</span>
+RUBRIC = <span class="tok-s">"""You are a strict evaluator of FAITHFULNESS.
+Score ONLY whether every claim in the ANSWER is supported by the CONTEXT.
+Ignore style, tone, and length. Conciseness is fine; length is not a virtue.
+
+Scale (integer 1-5):
+5 = every claim is directly supported by the context; nothing invented.
+4 = supported, with one trivial unsupported detail that does not mislead.
+3 = mostly supported; one clear claim is unsupported by the context.
+2 = several claims unsupported, or one important claim invented.
+1 = key claims contradict or are absent from the context.
+
+First write a brief REASONING that cites the specific claim(s) you checked.
+Then, on the final line, output exactly: Score: N
+"""</span>
+
+<span class="tok-k">def</span> <span class="tok-f">judge_faithfulness</span>(context: str, question: str, answer: str) -&gt; dict:
+    user = <span class="tok-s">f"CONTEXT:\n{context}\n\nQUESTION:\n{question}\n\nANSWER:\n{answer}"</span>
+    msg = client.messages.create(
+        model=<span class="tok-s">"claude-sonnet-4-5"</span>,   <span class="tok-c"># judge != generator family is the safe default</span>
+        max_tokens=<span class="tok-n">400</span>,
+        temperature=<span class="tok-n">0</span>,                  <span class="tok-c"># judging wants determinism, not creativity</span>
+        system=RUBRIC,
+        messages=[{<span class="tok-s">"role"</span>: <span class="tok-s">"user"</span>, <span class="tok-s">"content"</span>: user}],
+    )
+    text = msg.content[<span class="tok-n">0</span>].text
+    m = re.search(<span class="tok-s">r"Score:\s*([1-5])"</span>, text)
+    <span class="tok-k">if</span> <span class="tok-k">not</span> m:
+        <span class="tok-k">raise</span> ValueError(<span class="tok-s">f"judge did not emit a score:\n{text}"</span>)
+    <span class="tok-k">return</span> {<span class="tok-s">"score"</span>: int(m.group(<span class="tok-n">1</span>)), <span class="tok-s">"reasoning"</span>: text}
+
+<span class="tok-c"># --- run it over a golden set and average ---</span>
+golden = [
+    {<span class="tok-s">"context"</span>: <span class="tok-s">"The refund window is 30 days from delivery."</span>,
+     <span class="tok-s">"question"</span>: <span class="tok-s">"How long do I have to return an item?"</span>,
+     <span class="tok-s">"answer"</span>: <span class="tok-s">"You have 30 days from delivery to return it."</span>},
+    <span class="tok-c"># ... ~10 cases, mixing good and deliberately-bad answers ...</span>
+]
+scores = [judge_faithfulness(**g)[<span class="tok-s">"score"</span>] <span class="tok-k">for</span> g <span class="tok-k">in</span> golden]
+<span class="tok-f">print</span>(<span class="tok-s">"mean faithfulness:"</span>, sum(scores) / len(scores))
+</code></pre>
+
+  <div class="prose">
+    <p>Three design choices to defend out loud: <code>temperature=0</code> because a judge should be as deterministic as possible (you want the same case to get the same score across runs), a different model family from the generator to dodge self-preference, and a regex parse of an exact <code>Score: N</code> line because a structured, machine-readable output is non-negotiable when you are aggregating hundreds of grades. If you wanted hardening, you would also run pairwise comparisons in both orders for position bias and add a couple of in-context examples per level.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Say each answer out loud in full sentences, as if to an interviewer. Then open the solution and compare. The gap is your lesson.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>Your judge gives a rambling, beautifully-written but partly-fabricated answer a 5, and a terse, fully-correct answer a 3. Name the bias, prove it is the bias and not a rubric flaw, and give two fixes.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>This is <strong>verbosity bias</strong>: the judge is rewarding length and polish over correctness, which is exactly backwards for a faithfulness or correctness rubric. To prove it is the bias and not a rubric flaw, run a controlled check, take the same correct content and present it once tersely and once padded with extra unsupported sentences; if the padded version scores higher despite being less faithful, the judge is responding to length, not substance. Fixes: (1) state explicitly in the rubric that length is not a virtue and conciseness is preferred when correct, and add an in-context example where a short correct answer earns a 5 and a long padded one earns a low score; (2) force reasoning-before-score so the judge must cite which specific claims are supported, which exposes the fabrication instead of being charmed by the prose. A stronger third move is to normalize or control for length when comparing.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>You use the same model (say Claude) as both the generator and the judge, and your judge scores are suspiciously high across the board. What is the risk, why does it happen, and what is the cleanest fix without changing your product model?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>The risk is <strong>self-preference bias</strong>: a model tends to rate outputs that match its own style and tendencies more favorably, so using the same model to generate and judge inflates the scores and makes the evaluation untrustworthy, you are grading your own homework. It happens because the judge recognizes its own characteristic phrasing and structure as "good." The cleanest fix without touching the product generator is to swap only the <em>judge</em> to a different model family (e.g. generate with Claude, judge with a comparable model from another provider). Your product model stays exactly as is; only the evaluator changes. If you are forced to keep one family, at minimum disclose it, calibrate hard against human labels, and never report a head-to-head benchmark where a model judges itself.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>A teammate wants to use an LLM-as-judge to grade the correctness of generated SQL queries and generated date arithmetic. Is this the right tool? Where exactly should the line be drawn?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Mostly the wrong tool, because both have a <strong>deterministic ground truth</strong>. For generated SQL, do not ask a judge "is this query correct", run it against a test database and compare the result set to the expected rows, that is exact, free, and reliable, whereas a judge can be confidently wrong about edge-case semantics. For date arithmetic, compute the answer programmatically and assert equality. The line: anything checkable by execution or assertion belongs in the programmatic layer. An LLM-as-judge earns its place only for the genuinely subjective parts, e.g. "is this SQL <em>readable</em> and idiomatic" or "is the natural-language explanation of the query faithful to what it does." Use the cheap deterministic check for correctness and reserve the judge for the qualities that have no string-equality answer.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's Evaluation &amp; Observability slice and common 2026 screens. Drill the one-line keys, then expand each into a 90-second answer with Claude using protocol prompt #2.</p>
+  <ul class="q-list">
+    <li>What is LLM-as-judge and where does it break?
+      <div class="a">Key: an LLM scores outputs against a rubric, scales human-style eval cheaply. Breaks on biases (position, verbosity, self-preference) and must be calibrated against humans (Cohen's kappa / Spearman around 0.6+).</div></li>
+    <li>How do you build a stable judge rubric?
+      <div class="a">Key: short numbered scale, explicit per-level anchors, one or two in-context examples per level, force reasoning before the score, and one rubric scores one dimension.</div></li>
+    <li>How do you mitigate judge biases?
+      <div class="a">Key: position, run both orders and average / randomize; verbosity, state length is not a virtue and normalize length; self-preference, use a different model family for the judge.</div></li>
+    <li>When is LLM-as-judge the wrong tool?
+      <div class="a">Key: deterministic ground truth (math, code, structured) goes programmatic; expert domains (legal, medical) go to humans; and it is too slow/costly to run on every live request, sample instead.</div></li>
+    <li>How do you know your judge is trustworthy?
+      <div class="a">Key: calibrate, sample cases, get human labels, measure agreement (Cohen's kappa for discrete, Spearman for ranking), require substantial agreement (~0.6+), re-check when judge/rubric/task changes.</div></li>
+    <li>Why force reasoning before the score, and why temperature 0?
+      <div class="a">Key: reasoning-first makes the judge actually inspect output against anchors and gives an audit trail (score-first becomes rationalization); temperature 0 makes grades deterministic so the same case scores the same across runs.</div></li>
+    <li>What RAG-style metrics would you have a judge score, and which do you trust most?
+      <div class="a">Key: faithfulness (trust most, claims supported by context), answer relevancy, contextual precision/recall. Faithfulness directly catches hallucination, which is the highest-stakes failure.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (15&ndash;25 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Using the Anthropic <a href="https://docs.claude.com/en/docs/build-with-claude/overview">API</a>, build the faithfulness judge from the worked example. Write a system prompt with a 1 to 5 scale, explicit anchors, and a forced <code>Score: N</code> final line. Then deliberately feed it three answers to the same question: one fully grounded, one with a small invented detail, and one that contradicts the context. Check the judge gives roughly 5 / 3 / 1. Now run the bias probe: take the correct short answer and a padded longer version of the same correct content, score both, and see whether length nudges the score, that is verbosity bias, live. If you have 10 minutes more, label all three cases yourself and compute simple agreement with the judge. The official RAGAS docs (<a href="https://docs.ragas.io/">docs.ragas.io</a>) are worth a skim for how a production library frames faithfulness and answer-relevancy judges.</p>
+    <p class="muted" style="font-size:13.5px">No API key yet? Paste the rubric into the Claude web app and judge three answers by hand. See <a href="../../tools.html">Tools &amp; Claude</a>.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>This is your signature. The LLM-as-judge evaluation framework you built on MaiQ is precisely the technique this lesson formalizes, and it is what let your 11+ retrieval and chunking experiments be <em>decisions</em> instead of guesses. When you cut inference cost 37 percent with only a 2 percent retrieval-quality drop, the judge is the instrument that measured that 2 percent, without it, "quality barely dropped" is a hope, not a fact. In interviews, do not just say "I built an LLM-as-judge." Show the engineering judgment around it: "I scored faithfulness on a fixed scale with anchored levels and reasoning-before-score, used a separate model family to avoid self-preference, and sanity-checked the judge against my own labels before I trusted it to gate experiments." That sentence proves you understand the technique's failure modes, which is exactly the senior signal a panel is listening for. Your resume bullet earns its weight here.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>LLM-as-judge scores subjective quality at scale by having an LLM grade outputs against a rubric, it scales human judgment, it does not replace it. The rubric is the judge: short numbered scale, anchored levels, in-context examples, reasoning before score, one dimension per call. Mitigate the three biases, randomize order for position, discount length for verbosity, use a different model family for self-preference. Never trust an uncalibrated judge: validate agreement with human labels (kappa or Spearman, around 0.6+). And know when not to use it, deterministic truth goes programmatic, expert domains go to humans. Master this and your evaluation story is unassailable.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d32">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: the golden set, building eval datasets that do not rot, and mining production for the cases that matter.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d31-why-eval-is-the-job.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 31 &middot; Why evaluation is the job</div></a>
+    <a data-nav="next" class="next" href="d33-eval-datasets.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 33 &middot; Building eval datasets</div></a>
+  </div>
+
+  <div class="foot">Module 5 &middot; Evaluation &amp; Observability &middot; Day 32 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

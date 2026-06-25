@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 33 · Building eval datasets</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 5 &middot; Evaluation &amp; Observability</span>
+    <span class="pill">Day 33</span>
+    <span class="pill">50 min</span>
+    <span class="diff" title="Difficulty: intermediate"><i class="on"></i><i class="on"></i><i></i></span>
+  </div>
+
+  <h1>Building eval datasets</h1>
+  <p class="lede">A judge and a metric are useless without something to measure. The dataset is the foundation of your whole evaluation stack, and the quiet truth is that most teams' eval sets are stale, unrepresentative, and slowly lying to them. Today you learn to build a golden set that stays honest.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Define a golden set and say what fields each item carries and why.</li>
+      <li>Seed an initial set by intent so it covers what users actually do, not just what is easy.</li>
+      <li>Mine production traces to keep the set growing toward real failures, so it does not rot.</li>
+      <li>Tag items so you can slice evaluation by intent, difficulty, and freshness.</li>
+      <li>Use synthetic generation and replay sets without poisoning your measurements.</li>
+    </ul>
+  </div>
+
+  <h2>The golden set</h2>
+  <div class="prose">
+    <p>A <strong>golden set</strong> is a curated, version-controlled collection of test cases that represents what your system must get right. It is the fixed reference your offline evaluation runs against, the "expected" side of every comparison. For a RAG or retrieval system, each item typically carries three things:</p>
+    <ul>
+      <li><strong><code>query</code></strong>, the input, the actual question or request a user might send.</li>
+      <li><strong><code>ideal_answer</code></strong>, the reference response a great system would produce. It anchors generation-quality scoring (faithfulness, relevance) and gives a human reviewer something to compare against.</li>
+      <li><strong><code>ideal_chunks</code></strong>, the document passages that <em>should</em> be retrieved to answer correctly. This is what lets you measure retrieval directly (recall@k, MRR) and separate a retrieval failure from a generation failure, the single most important diagnostic split in RAG.</li>
+    </ul>
+    <p>That third field is the one juniors forget and seniors insist on. Without <code>ideal_chunks</code>, when an answer is wrong you cannot tell whether retrieval failed to find the right passage or generation fumbled a passage it had. With it, you can score the two stages independently and fix the one that is actually broken. We meet recall@k and friends again in Day 34.</p>
+  </div>
+
+  <div class="diagram">  ONE GOLDEN-SET ITEM (RAG)
+  {
+    "id": "g-0142",
+    "query":        "How long is the refund window after delivery?",
+    "ideal_answer": "30 days from the delivery date.",
+    "ideal_chunks": ["doc_returns#p3"],          ← what retrieval MUST find
+    "tags": { "intent": "policy_lookup",
+              "difficulty": "easy",
+              "source": "prod_trace",
+              "last_reviewed": "2026-06-01" }
+  }</div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"My golden set stores query, ideal answer, and ideal chunks per item, so I can score retrieval and generation independently and tell a retrieval miss apart from a generation error. I seed it by user intent, then continuously mine production traces, especially low-confidence cases and reported bugs, so it tracks the real input distribution instead of rotting. Every item is tagged with intent, difficulty, and a last-reviewed date so I can slice results and prune stale cases."</p>
+  </div>
+
+  <h2>Seeding by intent (not by convenience)</h2>
+  <div class="prose">
+    <p>The failure mode when you build the first version of a golden set is to write the cases that come easily to mind, which are almost always the clean, simple, happy-path questions. You end up with 40 variations of "what is the refund policy" and zero of the gnarly multi-part questions that actually break the system. Then your eval says everything is great while users suffer.</p>
+    <p>The fix is to seed <strong>by intent</strong>. Enumerate the distinct things users come to your product <em>to do</em>, the intents, and deliberately write cases for each, including the hard ones:</p>
+    <ul>
+      <li>List the intents (policy lookup, troubleshooting, comparison, multi-step how-to, out-of-scope, ambiguous, follow-up referring to earlier turns).</li>
+      <li>Write several cases per intent, and inside each intent span easy to hard.</li>
+      <li>Deliberately include <strong>negative and edge cases</strong>: questions the system <em>should refuse</em> or say "I do not know" to, questions with no good answer in the corpus, adversarial phrasings. A set with only answerable questions cannot detect a system that hallucinates on the unanswerable ones.</li>
+    </ul>
+    <p>Intent coverage, not case count, is what makes a small set powerful. Fifty well-chosen cases spanning every intent and difficulty beat five hundred near-duplicate easy ones.</p>
+  </div>
+
+  <h2>Mining production so the set does not rot</h2>
+  <div class="prose">
+    <p>Here is the single most important idea in this lesson: <strong>a static golden set decays.</strong> The day you write it, it reflects what you imagined users would ask. But real usage drifts, new features ship, new edge cases appear, the product changes, and a set that never updates slowly stops representing reality. An eval that does not track production becomes a comfortable lie.</p>
+    <p>The cure is to continuously <strong>mine production traces</strong> back into the set. Your observability pipeline (Day 35) is already logging every request. Pull the cases that are most informative:</p>
+    <ul>
+      <li><strong>Low-confidence interactions.</strong> Where the model hedged, retrieval scores were weak, or the judge scored the live answer poorly, these are the system's current weak spots and exactly what you want under test.</li>
+      <li><strong>Bug reports and thumbs-down.</strong> Every user complaint or negative rating is a free, real-world failure case. Triage it, write the correct <code>ideal_answer</code> and <code>ideal_chunks</code>, and add it. Now that exact failure is regression-tested forever.</li>
+      <li><strong>New-intent traffic.</strong> Queries that do not match any existing intent tag signal usage you did not anticipate, seed new cases for them.</li>
+    </ul>
+    <p>This turns evaluation from a one-time chore into a living system that gets stronger every time the product fails, because each failure becomes a permanent test. Set a cadence: a quarterly refresh to prune dead cases and rebalance, plus continuous trickle from trace mining. That rhythm keeps the set both current and stable.</p>
+  </div>
+
+  <div class="diagram">  THE DATASET FLYWHEEL (why it does not rot)
+       seed by intent
+            │
+            ▼
+     ┌─────────────┐      run eval        ┌──────────────┐
+     │  GOLDEN SET │ ───────────────────► │ scores + gaps│
+     └─────────────┘                      └──────┬───────┘
+            ▲                                     │
+            │  add fixed case                     │ ship change
+            │  (now a regression test)            ▼
+     ┌──────┴───────────────────────────────────────────┐
+     │  PRODUCTION: low-confidence + thumbs-down + bugs   │
+     │  + new-intent traffic   → mine → triage → label    │
+     └────────────────────────────────────────────────────┘
+                 quarterly: prune stale, rebalance intents</div>
+
+  <h2>Tagging: turn one number into many</h2>
+  <div class="prose">
+    <p>An aggregate score ("mean faithfulness 4.4") hides where you are strong and weak. <strong>Tags</strong> let you slice it. Tag every item with at least:</p>
+    <ul>
+      <li><strong>intent</strong>, so you can see "we are great at policy lookups but failing multi-step how-tos." That diagnostic is invisible in the average and obvious once you slice by intent.</li>
+      <li><strong>difficulty</strong> (easy / medium / hard), so a regression on hard cases is not masked by a wall of easy ones. A mean can rise while your hardest, highest-value cases quietly get worse.</li>
+      <li><strong>last_reviewed</strong> (a date), so you know which cases a human has actually verified recently and which may be stale. When you refresh, you revisit the oldest first.</li>
+      <li><strong>source</strong> (seed / prod_trace / synthetic), so you can weight or audit by origin, useful when you suspect synthetic cases are skewing results.</li>
+    </ul>
+    <p>With tags, one evaluation run becomes a breakdown: per-intent scores, hard-case scores, and a freshness audit, all from the same harness. That is how you find the specific thing to fix instead of staring at a single number that went down 0.1.</p>
+  </div>
+
+  <h2>Synthetic data and its risks</h2>
+  <div class="prose">
+    <p>You can use an LLM to <strong>generate</strong> eval cases: feed it a document and ask for plausible questions and ideal answers. This is genuinely useful for cold-starting a set before you have traffic, and for cheaply expanding coverage of an under-tested intent. But treat synthetic data with suspicion, because it carries three real risks:</p>
+    <ul>
+      <li><strong>Distribution mismatch.</strong> LLM-generated questions are often cleaner, more formal, and more "textbook" than what messy real users type. A set that is all synthetic measures the system on questions nobody actually asks.</li>
+      <li><strong>Circularity.</strong> If the same model generates the cases and answers them and judges them, you are grading inside one model's worldview, easy questions for it, scored generously by it. The measurement can look great while meaning nothing.</li>
+      <li><strong>Hidden errors.</strong> The generated <code>ideal_answer</code> can itself be wrong or hallucinated. An unverified synthetic "correct answer" silently corrupts every score computed against it.</li>
+    </ul>
+    <p>The discipline: use synthetic data to <em>bootstrap and to fill coverage gaps</em>, tag it as synthetic, have a human spot-check a sample of the generated answers, and replace it with real mined cases as traffic arrives. Synthetic gets you off zero; production data gets you to truth.</p>
+  </div>
+
+  <h2>Replay sets and frozen regressions</h2>
+  <div class="prose">
+    <p>Two specialized cousins of the golden set earn their own names:</p>
+    <ul>
+      <li>A <strong>replay set</strong> is a snapshot of real production inputs (the queries, not necessarily labeled answers) that you re-run a new system version against to see what changed. It answers "across real recent traffic, does the new version behave differently?" even where you have no ideal answer, you diff outputs old-vs-new and inspect the deltas. It captures the real input distribution in a way a hand-curated set never fully does.</li>
+      <li>A <strong>regression set</strong> is the discipline of <strong>freezing every past bug as a permanent test</strong>. When you fix a specific failure, you do not just patch it, you add a reproduction case to the set so the bug can never silently return. Over time this becomes your shield against the most demoralizing failure in AI systems: re-breaking something you already fixed, because a later prompt or model change quietly undid it. Each frozen repro is cheap insurance against regression.</li>
+    </ul>
+    <p>Together with the intent-seeded core and the trace-mined additions, these give you a dataset that is representative (replay), durable (regression), and current (mining). That is a golden set that earns the name.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: build a 12-case set for a docs assistant</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>You are starting a support-docs RAG assistant and have no traffic yet. Watch the set come together.</p>
+    <p><strong>1. List intents.</strong> policy_lookup, troubleshooting, how_to_multistep, comparison, out_of_scope, ambiguous_followup. Six intents.</p>
+    <p><strong>2. Seed two cases per intent (12 total), spanning difficulty.</strong> For each, write the <code>query</code>, the <code>ideal_answer</code> from the real docs, and the <code>ideal_chunks</code> (the exact doc passage IDs). Crucially, the two out_of_scope cases have <code>ideal_answer</code> = "I do not have information on that" and empty <code>ideal_chunks</code>, these test that the system refuses instead of hallucinating.</p>
+    <p><strong>3. Tag everything.</strong> intent, difficulty, source=seed, last_reviewed=today.</p>
+    <p><strong>4. Bootstrap a few more synthetically.</strong> Feed three docs to an LLM, ask for plausible questions plus answers, generate 6 candidates, personally verify 4 of them are correct and realistic, keep those 4 tagged source=synthetic, discard 2 that are too textbook.</p>
+    <p><strong>5. Ship it as v1 and wire the flywheel.</strong> The day real traffic starts, begin mining: every thumbs-down and every low-retrieval-score query gets triaged and, if valid, labeled and added. By month two the set is half real production cases and the synthetic scaffolding has done its job.</p>
+  </div>
+  <div class="prose">
+    <p>Sixteen cases that span every intent, include refusals, and are already set up to grow beats a thousand auto-generated lookalikes. The set is small, honest, and built to stay honest.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Say each answer out loud in full sentences, as if to an interviewer. Then open the solution and compare. The gap is your lesson.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>Your team's golden set has scored a steady 4.6 for six months while user complaints keep climbing. Both observations are accurate. Diagnose the disconnect and prescribe a fix.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>The golden set has <strong>rotted</strong>: it is static, so it still measures the clean cases someone imagined six months ago, while real usage has drifted to inputs the set does not contain, new features, new intents, messier phrasings. A stable 4.6 on an unrepresentative set is meaningless; the complaints are the real signal. The fix is to make the set track production: stand up trace mining, pull the queries behind the complaints plus low-confidence and low-retrieval-score interactions, triage them, write correct <code>ideal_answer</code> and <code>ideal_chunks</code>, and add them, ideally tagged by the new intents you discover. Add a quarterly refresh to prune dead cases and rebalance toward current intent distribution. Within a cycle the set's score will drop to reflect reality, and now it is a number worth optimizing. The lesson: an eval set is a living asset, not a one-time artifact.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>To save time, a colleague builds the entire eval set by asking an LLM to generate questions and ideal answers from the docs, no human review, then uses the same model to answer and judge. Scores are near-perfect. What is wrong, ranked by severity?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Stacked problems, worst first. (1) <strong>Circularity</strong>: one model generates, answers, and judges, so it is grading questions it finds easy with a worldview it shares, near-perfect scores are an artifact of the closed loop, not evidence of quality. (2) <strong>Unverified ideal answers</strong>: with no human review, any hallucinated "correct" answer silently corrupts every score computed against it, you may be rewarding wrong outputs. (3) <strong>Distribution mismatch</strong>: LLM-generated questions are cleaner and more textbook than real user queries, so even if everything else were sound, the set measures questions nobody asks. Fixes: break the loop (different model family to judge, ideally to generate too), human-verify a sample of synthetic answers and tag source=synthetic, and treat synthetic only as a bootstrap to be progressively replaced by mined real traffic. Synthetic gets you off zero; it does not get you to truth.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>You fix a nasty bug where the assistant confidently invented a refund amount. The fix works. What do you do with this incident so it pays off for years, and how is that different from just deploying the fix?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Freeze it as a <strong>regression test</strong>. Deploying the fix solves the bug <em>today</em>; adding the exact reproduction to the eval set, the precise query, the correct <code>ideal_answer</code> ("the refund amount is not specified in the docs" / the true value), and the <code>ideal_chunks</code>, ensures the bug can never silently return. The difference matters because AI systems regress invisibly: a later prompt tweak, model upgrade, or retrieval change can quietly undo your fix, and without a frozen repro nobody notices until a user is harmed again. The regression set is your shield against re-breaking solved problems. Tag it (source=prod_trace, the intent, difficulty=hard) so it also enriches your slices. One incident, handled this way, becomes permanent protection rather than a one-time patch.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's Evaluation &amp; Observability slice and common 2026 screens. Drill the one-line keys, then expand each into a 90-second answer with Claude using protocol prompt #2.</p>
+  <ul class="q-list">
+    <li>How do you build a golden set that does not rot?
+      <div class="a">Key: seed by intent, continuously mine production traces (low-confidence + bug reports + new intents), tag intent / difficulty / last-reviewed, freeze fixed bugs as regression tests, refresh quarterly.</div></li>
+    <li>What fields does a RAG eval item carry and why ideal_chunks?
+      <div class="a">Key: query, ideal_answer, ideal_chunks. ideal_chunks lets you score retrieval (recall@k, MRR) independently of generation, so you can tell a retrieval miss apart from a generation error.</div></li>
+    <li>Why seed by intent instead of just writing cases?
+      <div class="a">Key: ad-hoc cases cluster on easy happy paths and miss the hard intents that actually break the system. Intent coverage (incl. refusals and edge cases) makes a small set powerful.</div></li>
+    <li>What are the risks of synthetic eval data and how do you use it safely?
+      <div class="a">Key: distribution mismatch (too clean), circularity (same model gen/answer/judge), unverified wrong answers. Use it to bootstrap and fill gaps, tag it, human-verify a sample, replace with mined real cases.</div></li>
+    <li>What is a regression set and why does it matter for AI systems?
+      <div class="a">Key: every fixed bug frozen as a permanent reproduction test, so it cannot silently return. AI systems regress invisibly under prompt/model/retrieval changes, the frozen repro is the shield.</div></li>
+    <li>What is a replay set and what does it capture that a curated set cannot?
+      <div class="a">Key: a snapshot of real production inputs re-run against a new version to diff behavior, even without labels. Captures the true input distribution, where hand-curated sets are biased toward what you imagined.</div></li>
+    <li>Why tag eval items, and which tags matter most?
+      <div class="a">Key: tags turn one aggregate into sliceable breakdowns. Intent (find weak intents), difficulty (stop easy cases masking hard regressions), last_reviewed (freshness), source (audit synthetic).</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (15&ndash;25 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Pick any small document you know well (a product README, a policy page, your own resume). By hand, build a 10-item golden set as JSON: each item has <code>query</code>, <code>ideal_answer</code>, <code>ideal_chunks</code> (the section it should pull from), and <code>tags</code> with intent / difficulty / last_reviewed. List at least four distinct intents and force yourself to include two cases the system <em>should refuse</em> (questions the document cannot answer). Then use the Anthropic <a href="https://docs.claude.com/en/docs/build-with-claude/overview">API</a> or the Claude web app to <em>synthetically</em> generate five more candidate items from the same doc, and personally verify each generated ideal_answer against the source, keep the correct ones tagged <code>source: synthetic</code>, discard the wrong or too-textbook ones. Notice how many synthetic answers needed correcting, that number is exactly why you never trust synthetic data blind. The RAGAS testset-generation docs (<a href="https://docs.ragas.io/">docs.ragas.io</a>) show how a library does this at scale.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>Your 11+ retrieval and chunking experiments on MaiQ only mean something because they ran against a consistent set of cases, change the dataset between experiments and the comparison is worthless. When you describe the 37 percent cost cut at 2 percent quality drop, an interviewer who knows evaluation will ask "what did you measure that against?" The strong answer names the dataset discipline: a fixed golden set with known-good retrievals (the <code>ideal_chunks</code> idea) so you could attribute every change to retrieval versus generation, and the habit of feeding real MaiQ failures back into that set so it tracked how the product was actually used, not how you imagined it. That last point, mining production into the eval set, is what separates a one-off benchmark from an evaluation practice, and it pairs naturally with the hybrid BM25-plus-dense retrieval and pgvector ingestion you built, the set is how you proved those choices were improvements.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>The golden set is the foundation of evaluation: for RAG, store query, ideal_answer, and ideal_chunks so you can split retrieval from generation. Seed by intent with edge and refusal cases, so coverage, not count, drives quality. A static set rots, so mine production (low-confidence, thumbs-down, bugs, new intents) continuously and refresh quarterly. Tag by intent, difficulty, freshness, and source to turn one number into a diagnostic breakdown. Use synthetic data only to bootstrap and verify it; freeze every fixed bug as a regression test. A living dataset is what keeps your whole eval honest.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d33">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: offline versus online eval, RAG metrics you trust, shadow mode, canary, and a prompt CI gate.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d32-llm-as-judge.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 32 &middot; LLM-as-judge</div></a>
+    <a data-nav="next" class="next" href="d34-offline-online-eval.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 34 &middot; Offline vs online eval</div></a>
+  </div>
+
+  <div class="foot">Module 5 &middot; Evaluation &amp; Observability &middot; Day 33 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

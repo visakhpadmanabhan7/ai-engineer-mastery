@@ -1,0 +1,39 @@
+# Render blueprint — one-click deploy (free Docker web service + free Postgres).
+#
+#   1. Push the learning-app/ folder to a GitHub repo.
+#   2. Render dashboard -> New -> Blueprint -> select the repo.
+#   3. When prompted, paste your GROQ_API_KEY (free, no card: https://console.groq.com).
+#   4. Open the URL Render gives you. Dev login: visakh@local / learn.
+#
+# The free web service sleeps after 15 min idle (cold start ~1 min). The free Postgres
+# is fine for a demo; for a long-lived DB use Neon (see DEPLOY.md) and set DATABASE_URL + PG_SSL=true.
+
+services:
+  - type: web
+    name: ai-engineer-mastery
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: free
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: JWT_SECRET
+        generateValue: true
+      - key: LLM_PROVIDER
+        value: groq
+      - key: GROQ_API_KEY
+        sync: false            # set in the dashboard (kept out of git)
+      - key: GROQ_MODEL
+        value: llama-3.3-70b-versatile
+      - key: GROQ_JUDGE_MODEL
+        value: llama-3.1-8b-instant
+      - key: DATABASE_URL
+        fromDatabase:
+          name: mastery-db
+          property: connectionString
+
+databases:
+  - name: mastery-db
+    plan: free
+    postgresMajorVersion: "16"

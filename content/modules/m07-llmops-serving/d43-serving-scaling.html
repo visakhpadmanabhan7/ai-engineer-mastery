@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day 43 · Serving &amp; scaling</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div id="scrollProgress" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--gold);z-index:100;transition:width .1s"></div>
+
+<div class="topbar"><div class="inner">
+  <a class="brand" href="../../index.html" style="text-decoration:none"><span class="dot"></span> AI Engineer Mastery Path</a>
+  <nav class="navlinks">
+    <a href="../../index.html">Path</a>
+    <a href="../../question-bank.html">Question Bank</a>
+    <a href="../../tools.html">Tools &amp; Claude</a>
+    <a href="../../resources.html">Resources</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+  <div class="meta-row" style="margin-top:30px">
+    <span class="pill gold">Module 7 &middot; LLMOps &amp; Serving</span>
+    <span class="pill">Day 43</span>
+    <span class="pill">55 min</span>
+    <span class="diff" title="Difficulty: advanced"><i class="on"></i><i class="on"></i><i class="on"></i></span>
+  </div>
+
+  <h1>Serving &amp; scaling</h1>
+  <p class="lede">When throughput, latency, or privacy push you off a hosted API, you reach for a serving stack. Today you learn the optimization ladder, which rung to climb when, and the one diagram (continuous batching) that interviewers love.</p>
+
+  <div class="callout key">
+    <span class="label">By the end you can</span>
+    <ul class="objectives">
+      <li>Decide between a hosted API and self-hosting on first principles, not vibes.</li>
+      <li>Order the inference-optimization ladder and say what each rung buys.</li>
+      <li>Explain continuous batching and why it gives 2-4x throughput over static batching.</li>
+      <li>Reason about KV cache memory as the real constraint on concurrency and context length.</li>
+      <li>Say when quantization and speculative decoding are worth it, and their risks.</li>
+    </ul>
+  </div>
+
+  <h2>1 &middot; Self-host or use an API?</h2>
+  <div class="prose">
+    <p>Start with the default: <strong>use a hosted API</strong>. You get frontier models, autoscaling, and zero GPU ops, and you pay per token. Self-hosting only earns its keep when one of a few specific pressures shows up:</p>
+    <ul>
+      <li><strong>Data residency / privacy</strong>: regulated data that cannot leave your boundary.</li>
+      <li><strong>Cost at high, steady volume</strong>: when token spend on an open model would clearly beat renting GPUs that stay busy. Idle GPUs are pure loss, so this needs real utilization.</li>
+      <li><strong>Latency / control</strong>: you need a fixed model version, custom quantization, or tight tail latency you cannot get from a shared endpoint.</li>
+      <li><strong>A fine-tuned open model</strong> (Module 6) that you must serve yourself.</li>
+    </ul>
+    <p>The honest trade is: API = speed-to-ship and no ops, higher per-token price, less control. Self-host = lower marginal cost at scale and full control, but you now own batching, GPU memory, autoscaling, and on-call. Most teams stay on the API far longer than they expect, and that is usually correct.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"I default to a hosted API and only self-host for data residency, a fine-tuned open model, or genuine cost-at-scale where the GPUs stay busy. Self-hosting trades a higher engineering and ops burden, batching, KV-cache memory, autoscaling, for a lower marginal token cost and full control. The break-even is about utilization, not list price."</p>
+  </div>
+
+  <h2>2 &middot; The inference-optimization ladder</h2>
+  <div class="prose">
+    <p>When you do serve a model, you climb a ladder of techniques, cheapest and safest first. Do not jump to the bottom rung; each higher rung adds complexity or risk:</p>
+  </div>
+
+  <div class="diagram">  rung                       what it does                         when to climb it
+  ──────────────────────────────────────────────────────────────────────────────────
+  1 prompt caching           reuse a shared prefix across calls   long shared system prompts
+  2 KV caching               reuse attention K/V within a request always on; agent loops
+  3 continuous batching      pack many requests onto the GPU      you have concurrency
+  4 quantization             shrink weights (INT8/INT4)           VRAM-bound, latency-sensitive
+  5 speculative decoding     draft small + verify big             decode latency is the pain</div>
+
+  <div class="prose">
+    <p>Rungs 1 and 2 are essentially free wins and should always be on. Rung 3 is where most serving throughput comes from. Rungs 4 and 5 are situational and carry quality or complexity costs, so you reach for them only when a measured bottleneck demands it. Prompt caching gets its own lesson tomorrow (Day 44); here we focus on the serving-side rungs.</p>
+  </div>
+
+  <h2>3 &middot; KV caching and why memory is the limit</h2>
+  <div class="prose">
+    <p>Recall causal attention: token <em>t</em> attends to all earlier tokens. Naively, generating each new token would recompute the Keys and Values for every prior token, which is wasteful because those do not change. The <strong>KV cache</strong> stores the per-layer Key and Value tensors for every token already processed, so each new token only computes its own K/V and attends to the cached rest.</p>
+    <p>KV caching is what makes decode tractable, and it matters most when there is a <strong>long shared prefix</strong> reused many times: agent loops that keep re-reading the same growing context, or chat with a big system prompt. The catch is memory: the KV cache grows with <code>(layers × heads × head_dim × sequence_length × batch)</code> and lives in precious GPU VRAM. So the real ceiling on how many concurrent requests and how long a context you can serve is usually <em>KV cache memory</em>, not raw compute. This is why long context and high concurrency fight each other on a fixed GPU.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"KV caching stores each layer's Key and Value tensors for tokens already seen, so each new token attends without recomputing the past. It is biggest on long shared prefixes and agent loops. The trade is VRAM: the cache scales with sequence length and batch size, so KV-cache memory, not FLOPs, is what caps concurrency and max context on a given GPU."</p>
+  </div>
+
+  <h2>4 &middot; Continuous batching: the throughput rung</h2>
+  <div class="prose">
+    <p>GPUs are most efficient when processing many sequences at once, but LLM requests arrive at random times and finish at random lengths. <strong>Static batching</strong> waits to fill a batch, runs it, and cannot return any result until the <em>longest</em> sequence in the batch finishes, so short requests are held hostage by long ones and the GPU sits half-idle between batches.</p>
+    <p><strong>Continuous batching</strong> (also called in-flight batching, the headline feature of <strong>vLLM</strong>) operates at the token level: it adds new requests into the running batch and evicts finished ones every step, so a slot freed by a completed sequence is immediately filled by a waiting one. The GPU stays saturated and short requests are not blocked. The payoff is on the order of <strong>2-4x higher throughput</strong> versus static batching, which directly lowers cost-per-request because you serve more on the same hardware.</p>
+  </div>
+
+  <div class="diagram">  STATIC BATCHING (sequences locked together)
+  step →    1    2    3    4    5    6    7    8
+  reqA   [====================done]               ← all wait for the longest
+  reqB   [======done]    · · · ·  (idle, can't leave)
+  reqC   [===========done]· · · ·  (idle, can't leave)
+         └ batch returns only after step 8; GPU underused ┘
+
+  CONTINUOUS BATCHING (token-level add/evict)
+  step →    1    2    3    4    5    6    7    8
+  reqA   [====================done]
+  reqB   [======done]→ reqD enters here [=========done]
+  reqC   [===========done]→ reqE enters [=====done]
+         └ freed slots refill every step; GPU stays saturated ┘  2-4x throughput</div>
+
+  <h2>5 &middot; Quantization: trade precision for VRAM and speed</h2>
+  <div class="prose">
+    <p><strong>Quantization</strong> stores weights (and sometimes activations) in fewer bits, typically <strong>INT8</strong> or <strong>INT4</strong> instead of 16-bit. This shrinks the memory footprint, which lets a model fit on a smaller GPU and frees VRAM for a bigger KV cache, and it can speed up memory-bound decode.</p>
+    <p>The cost is quality. INT8 is usually close to lossless for many models; INT4 saves more but can visibly degrade reasoning and edge-case behavior, so you must <em>measure</em> on your own eval set (Module 5) before shipping it. Rule of thumb: reach for quantization when you are <strong>VRAM-bound and latency-sensitive</strong> on self-hosted hardware, start at INT8, and only drop to INT4 if your evals say quality holds. Quantization is not a free win; it is a measured trade.</p>
+  </div>
+
+  <h2>6 &middot; Speculative decoding: same answer, faster</h2>
+  <div class="prose">
+    <p>Decode is serial, one token per forward pass of a big model. <strong>Speculative decoding</strong> breaks that bottleneck with a draft-and-verify scheme: a small, fast <em>draft</em> model proposes the next N tokens, then the big <em>target</em> model verifies all N in a single parallel forward pass, accepting the longest prefix that matches what it would have produced and discarding the rest.</p>
+    <p>The key property for a skeptic: when done correctly, the output distribution is <em>identical</em> to running the big model alone. You are not approximating; you are using cheap guesses that the expensive model checks in parallel. When the draft is good, you get several tokens per expensive pass, so latency drops with no quality change. When the draft is bad, you fall back to roughly normal speed. The win depends on how well the draft model predicts the target, which is why drafts are usually a smaller member of the same family.</p>
+  </div>
+
+  <div class="callout concept">
+    <span class="label">Interview-grade phrasing</span>
+    <p>"Speculative decoding has a small draft model propose N tokens and the big model verify them in one parallel pass, accepting the matching prefix. Crucially the output distribution is unchanged, so it is faster, not approximate. The speedup tracks the draft's acceptance rate, and it falls back to normal decode when the draft is wrong."</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Worked example: pick the rung for three problems</h2>
+  <div class="callout example">
+    <span class="label">Example</span>
+    <p>You self-host one open model and hit three separate issues. Match each to the right rung.</p>
+    <ul>
+      <li><strong>"Throughput is low even though each request is fast and the GPU is at 40% during traffic."</strong> The GPU is idling between requests, that is a batching problem. Turn on continuous batching (vLLM). Expect 2-4x throughput, no quality change.</li>
+      <li><strong>"The model barely fits in VRAM and there is no room for a bigger batch."</strong> You are VRAM-bound. Quantize to INT8 to free memory for a larger KV cache and batch, then verify quality on your eval set before INT4.</li>
+      <li><strong>"Per-token decode latency is the user complaint on long answers."</strong> Decode is the bottleneck. Add speculative decoding with a small same-family draft model; the output distribution is unchanged, so it is a safe latency win.</li>
+    </ul>
+    <p>Notice the discipline: each symptom points to a specific rung, and you never reach past the rung the bottleneck demands. Climbing to INT4 or speculative decoding when the real fix was batching just adds risk for no reason.</p>
+  </div>
+
+  <h2>Why this matters for you as an AI engineer</h2>
+  <div class="callout key">
+    <span class="label">Serving is where cost becomes real</span>
+    <p>On a hosted API the provider has already climbed most of this ladder for you, which is why the API is cheap to ship on. The moment you self-host, every rung becomes your job, and getting them right is the difference between a serving cost that scales and one that bankrupts the feature. Even if you never run vLLM yourself, understanding KV-cache memory and continuous batching lets you reason about why long context is expensive and why concurrency has a ceiling, which shapes the systems you design in Module 10.</p>
+  </div>
+
+  <hr class="section-rule">
+
+  <h2>Practice &mdash; do these before revealing</h2>
+  <p class="muted">Say each answer out loud in full sentences, as if to an interviewer. Then open the solution and compare. The gap is your lesson.</p>
+
+  <div class="callout practice">
+    <span class="label">Problem 1</span>
+    <p>Your self-hosted endpoint serves long-context agent loops. Concurrency tops out far below what the GPU's compute suggests it should handle. What is the likely constraint, and name two levers to raise concurrency.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>The constraint is almost certainly KV-cache memory, not compute: long contexts make each request's cache large, and many concurrent long-context requests exhaust VRAM well before FLOPs become the limit. Levers: (1) quantize weights (e.g. INT8) to free VRAM for more KV cache, and (2) shorten the effective context, prune agent history, lower retrieved top-k, so each request's cache is smaller. Continuous batching helps utilization but does not create memory; the real ceiling here is bytes of KV cache, so you either free VRAM or shrink per-request context.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 2</span>
+    <p>A colleague wants to switch from static to continuous batching but worries it will change model outputs. Reassure or correct them, and explain where the 2-4x actually comes from.</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>Reassure them: continuous batching is a scheduling change, not a math change, so per-request outputs are unaffected. The speedup comes from GPU utilization. Static batching holds the whole batch until the longest sequence finishes and idles the GPU between batches, so short requests wait and capacity is wasted. Continuous batching adds and evicts sequences at the token level, refilling freed slots every step, so the GPU stays saturated and finished requests return immediately. Same outputs, far better hardware utilization, hence 2-4x throughput.</p>
+  </div></details>
+
+  <div class="callout practice">
+    <span class="label">Problem 3</span>
+    <p>You quantize a model to INT4 and throughput improves, but a few hard reasoning cases now fail that passed before. What happened, and what is the disciplined response?</p>
+  </div>
+  <details class="solution"><summary>Show solution</summary>
+  <div class="body prose">
+    <p>INT4 quantization traded precision for memory and speed, and the lost precision degraded the model on exactly the hardest, most precision-sensitive cases, which is the classic INT4 failure mode. The disciplined response is to measure, not eyeball: run your eval set (Module 5) on INT4 vs INT8 vs full precision, and choose the lowest precision whose quality stays within your acceptable bound. If INT4 fails the bar, step back to INT8 (often near-lossless) and accept the smaller memory win. Never ship a quantization level you have not evaluated.</p>
+  </div></details>
+
+  <hr class="section-rule">
+
+  <h2>Interview questions for this topic</h2>
+  <p class="muted">From your Notion bank's LLMOps slice and common 2026 screens. Drill the one-line keys, then expand each into a 90-second answer with Claude using protocol prompt #2.</p>
+  <ul class="q-list">
+    <li>What inference-time optimizations exist and when do you use each?
+      <div class="a">Key: prompt caching → KV caching → continuous batching → quantization → speculative decoding; climb cheapest/safest first, only as the bottleneck demands.</div></li>
+    <li>What is KV caching and when does it matter most?
+      <div class="a">Key: cache per-layer K/V so each new token attends without recompute; biggest win on long shared prefixes and agent loops; limited by VRAM.</div></li>
+    <li>What is continuous batching and where does the speedup come from?
+      <div class="a">Key: dynamically add/evict sequences in the serving batch (vLLM) at token level so the GPU stays saturated; 2-4x throughput vs static; outputs unchanged.</div></li>
+    <li>When is quantization (INT8/INT4) worth it?
+      <div class="a">Key: self-hosting + VRAM-bound + latency-sensitive; start INT8 (near-lossless), measure before INT4 (can degrade quality).</div></li>
+    <li>Explain speculative decoding to a skeptic.
+      <div class="a">Key: small draft proposes N tokens, big model verifies in one parallel pass, accepts the matching prefix; same output distribution, faster; speedup tracks acceptance rate.</div></li>
+    <li>Self-host vs API: how do you decide?
+      <div class="a">Key: default API; self-host for data residency, fine-tuned open model, or cost-at-scale with high GPU utilization; trade ops burden for control + lower marginal cost.</div></li>
+    <li>Why do long context and high concurrency compete on one GPU?
+      <div class="a">Key: both consume KV-cache VRAM; the cache scales with sequence length × batch, so memory, not compute, caps how much you can serve at once.</div></li>
+  </ul>
+
+  <hr class="section-rule">
+
+  <h2>Build it (15&ndash;20 min)</h2>
+  <div class="callout example">
+    <span class="label">Hands-on</span>
+    <p>Read the <a href="https://docs.vllm.ai/en/latest/">vLLM docs</a> intro and the continuous-batching section, then spin up a tiny open model locally with <code>vllm serve &lt;small-model&gt;</code> (or Ollama if you lack a GPU). Send 10 concurrent short requests and 1 long request at the same time, and observe that the short ones return while the long one is still generating, that is continuous batching in action. Note the tokens-per-second it reports. If you have no GPU, instead sketch on paper how KV-cache memory grows as you double sequence length and double batch size, and predict which hits the VRAM wall first.</p>
+    <p class="muted" style="font-size:13.5px">No local GPU? The conceptual sketch above is the real learning; serving infra is rented on demand in practice. See <a href="../../tools.html">Tools &amp; Claude</a>.</p>
+  </div>
+
+  <h2>Connect it to your work</h2>
+  <div class="callout connect">
+    <span class="label">Your MaindTec story</span>
+    <p>MaiQ runs on a hosted Claude API, so the provider climbed this ladder for you, which is exactly the right default for a startup shipping features fast. The lesson connects through your cost work: your 37% reduction came from the application-side levers (caching, smaller context, routing) rather than from owning a serving stack, and that is a sound senior judgment to articulate. If asked "why not self-host to save money," your answer is the break-even logic from this lesson: at MaiQ's volume and team size, renting frontier quality through an API and optimizing the application beats owning GPU ops, unless data residency or steady high-utilization volume changed the math.</p>
+  </div>
+
+  <div class="callout key">
+    <span class="label">Today's takeaways</span>
+    <p>Default to a hosted API; self-host only for residency, a fine-tuned open model, or cost-at-scale with busy GPUs. The optimization ladder runs prompt caching, KV caching, continuous batching, quantization, speculative decoding, climbed cheapest-and-safest first. KV-cache memory, not compute, is the real ceiling on concurrency and context length. Continuous batching gives 2-4x throughput by keeping the GPU saturated, with no change to outputs. Quantization and speculative decoding are situational: one trades quality for VRAM and must be measured, the other keeps the distribution and only speeds decode.</p>
+  </div>
+
+  <!-- complete -->
+  <div class="complete-bar" id="completeBar">
+    <button class="btn primary" id="completeBtn" data-day="d43">Mark this day complete</button>
+    <span class="muted" style="font-size:14px">Tomorrow: the five cache layers and how prompt caching becomes your biggest cheap win.</span>
+  </div>
+
+  <!-- nav -->
+  <div class="lesson-nav">
+    <a data-nav="prev" href="d42-inference-economics.html"><div class="dir">&larr; Prev</div><div class="ttl">Day 42 &middot; Inference economics</div></a>
+    <a data-nav="next" class="next" href="d44-caching-strategies.html"><div class="dir">Next &rarr;</div><div class="ttl">Day 44 &middot; Caching strategies</div></a>
+  </div>
+
+  <div class="foot">Module 7 &middot; LLMOps &amp; Serving &middot; Day 43 of 68 &middot; <a href="../../index.html">All days</a> &middot; <a href="../../question-bank.html">Question Bank</a> &middot; use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to move between lessons</div>
+
+</div>
+<script src="../../assets/app.js"></script>
+</body>
+</html>
