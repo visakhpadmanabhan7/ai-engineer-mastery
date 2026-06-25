@@ -98,6 +98,9 @@ with TestClient(app) as c:  # context manager triggers startup (ingest + seed)
           f"(embeddings={m2.get('embeddings')} memory={m2.get('memory')} cache={m2.get('cache')})")
     sr = c.post("/api/search", headers=h, json={"query": "evaluate a RAG retriever", "k": 5}).json()
     check("semantic search", len(sr.get("results", [])) > 0, f"(mode={sr.get('mode')} n={len(sr.get('results', []))})")
+    qb = c.get("/api/questions", headers=h).json()
+    check("question bank", qb.get("total", 0) >= 100 and len(qb.get("topics", [])) >= 5,
+          f"(total={qb.get('total')} topics={len(qb.get('topics', []))})")
     check("usage endpoint", c.get("/api/usage", headers=h).status_code == 200)
     if m2.get("ai_enabled"):
         qa = {"kind": "grade", "message": "What is RRF?", "user_answer": "Reciprocal rank fusion."}

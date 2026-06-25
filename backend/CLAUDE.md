@@ -15,7 +15,7 @@ app/
   routers/       # auth, lessons, progress, review, tutor, analytics, notes, search, usage
   services/      # ai, srs (FSRS-6), ingest, activity, embeddings, memory (LangChain),
                  #   cache, tracing, indexing, ratelimit
-check.py         # in-process smoke test (27 assertions)
+check.py         # in-process smoke test (28 assertions)
 eval_grader.py   # calibration harness for the LLM judge (eval-the-grader)
 alembic/         # migrations (async env wired to the models); dev still uses create_all
 ```

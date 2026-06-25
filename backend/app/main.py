@@ -13,7 +13,7 @@ from sqlalchemy import func, select
 from .config import BACKEND_DIR, settings
 from .database import SessionLocal, init_db
 from .models import Lesson, Question, User
-from .routers import analytics, auth, lessons, notes, progress, review, search, tutor, usage
+from .routers import analytics, auth, lessons, notes, progress, questions, review, search, tutor, usage
 from .security import hash_password
 from .services import embeddings, memory, srs
 from .services.ai import ai_available, provider_info
@@ -83,7 +83,8 @@ app.add_middleware(
 )
 
 for r in (auth.router, lessons.router, progress.router, review.router,
-          tutor.router, analytics.router, notes.router, search.router, usage.router):
+          tutor.router, analytics.router, notes.router, search.router, usage.router,
+          questions.router):
     app.include_router(r)
 
 

@@ -72,7 +72,7 @@ ai-engineer-mastery/
 │   ├── security.py      # bcrypt + JWT
 │   ├── routers/         # auth, lessons, progress, review, tutor, analytics, notes
 │   └── services/        # ai (provider-agnostic), srs (FSRS-6), ingest, activity
-│   └── check.py         # in-process smoke test (27 assertions)
+│   └── check.py         # in-process smoke test (28 assertions)
 ├── frontend/            # vanilla JS; index/login/lesson/review/tutor/mock/analytics + assets/
 ├── content/             # bundled curriculum: lessons (modules/) + question-bank.html (Q + answers)
 ├── docs/                # styled HTML documentation (open docs/index.html)
@@ -94,7 +94,7 @@ Interactive OpenAPI docs at **`/docs`** while the server runs.
 
 ## Test
 ```bash
-make test          # boots the app in-process and runs 27 assertions
+make test          # boots the app in-process and runs 28 assertions
 ```
 
 ## Deploy (free)

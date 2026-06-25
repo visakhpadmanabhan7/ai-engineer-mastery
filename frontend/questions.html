@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script>(function(){try{var t=localStorage.getItem('aimp_theme')||((window.matchMedia&&matchMedia('(prefers-color-scheme: light)').matches)?'light':'dark');document.documentElement.setAttribute('data-theme',t);}catch(e){document.documentElement.setAttribute('data-theme','dark');}})();</script>
+<title>Question Bank — AI Engineer Mastery</title>
+<link rel="stylesheet" href="assets/base.css">
+<link rel="stylesheet" href="assets/app.css">
+</head>
+<body>
+<div class="wrap wrap-wide" id="app" style="padding-top:8px">
+  <div class="muted-center" id="loading"><span class="spinner"></span> Loading the question bank…</div>
+</div>
+
+<script src="assets/api.js"></script>
+<script>
+if (!requireAuth()) { /* redirected */ }
+renderNav("questions");
+
+const NAMES = {
+  foundations: "LLM Foundations", prompting: "Prompting & Context", rag: "RAG & Retrieval",
+  agents: "Agents & Tool Use", eval: "Evaluation", finetune: "Fine-tuning",
+  llmops: "LLMOps & Serving", backend: "Backend & APIs", sysdesign: "System Design",
+  livecoding: "Live Coding", behavioral: "Behavioral", askback: "Questions to Ask",
+};
+const nice = (t) => NAMES[t] || (t || "general").replace(/[-_]/g, " ");
+
+async function load() {
+  let data;
+  try {
+    data = await getQuestions();
+  } catch (e) {
+    document.getElementById("app").innerHTML = "Could not load: " + escapeHtml(e.message);
+    return;
+  }
+
+  document.getElementById("app").innerHTML = `
+    <div class="hero" style="padding:30px 0 6px">
+      <div class="eyebrow">Interview prep</div>
+      <h1 style="font-size:2rem">Question Bank</h1>
+      <p class="lede" style="font-size:1.05rem">${data.total} questions with answer keys, grouped by topic. Click a question to reveal the answer.</p>
+    </div>
+    <div class="qbank-tools">
+      <input class="qbank-search" id="q" type="search" placeholder="Search questions and answers…" autocomplete="off">
+      <button class="btn ghost" id="expand">Expand all</button>
+      <button class="btn ghost" id="collapse">Collapse all</button>
+    </div>
+    <div id="topics"></div>
+    <div class="qbank-empty" id="empty" style="display:none">No questions match your search.</div>`;
+
+  document.getElementById("topics").innerHTML = data.topics
+    .map((t, i) => `
+      <div class="qtopic ${i === 0 ? "" : "collapsed"}">
+        <div class="qtopic-head" onclick="this.closest('.qtopic').classList.toggle('collapsed')">
+          <span class="qt-name">${escapeHtml(nice(t.topic))}</span>
+          <span class="qt-count">${t.count}</span>
+          <span class="qt-chev">&#9656;</span>
+        </div>
+        <div class="qlist">
+          ${t.questions
+            .map(
+              (q) => `
+            <details class="qa">
+              <summary>${escapeHtml(q.prompt)}</summary>
+              <div class="qa-body"><span class="lab">Answer</span>${escapeHtml(q.answer_key || "No answer key recorded for this question.")}</div>
+            </details>`
+            )
+            .join("")}
+        </div>
+      </div>`)
+    .join("");
+
+  // live search: filter by question + answer text, auto-open and reveal matches
+  const search = document.getElementById("q");
+  search.addEventListener("input", () => {
+    const term = search.value.trim().toLowerCase();
+    let anyVisible = false;
+    document.querySelectorAll(".qtopic").forEach((topic) => {
+      let hit = false;
+      topic.querySelectorAll("details.qa").forEach((d) => {
+        const match = !term || d.textContent.toLowerCase().includes(term);
+        d.style.display = match ? "" : "none";
+        d.open = !!term && match;
+        if (match) hit = true;
+      });
+      topic.style.display = hit ? "" : "none";
+      if (term) topic.classList.toggle("collapsed", !hit);
+      if (hit) anyVisible = true;
+    });
+    document.getElementById("empty").style.display = anyVisible ? "none" : "";
+  });
+
+  document.getElementById("expand").addEventListener("click", () => {
+    document.querySelectorAll(".qtopic").forEach((t) => t.classList.remove("collapsed"));
+    document.querySelectorAll("details.qa").forEach((d) => (d.open = true));
+  });
+  document.getElementById("collapse").addEventListener("click", () => {
+    document.querySelectorAll(".qtopic").forEach((t) => t.classList.add("collapsed"));
+    document.querySelectorAll("details.qa").forEach((d) => (d.open = false));
+  });
+}
+
+load();
+</script>
+</body>
+</html>

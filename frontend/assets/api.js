@@ -93,6 +93,7 @@ const getProgress = () => api("/api/progress");
 const setProgress = (lesson_id, completed = true, secs = 0) =>
   api("/api/progress", { method: "POST", body: { lesson_id, completed, time_spent_seconds: secs } });
 const getLesson = (day) => api(`/api/lessons/${day}`);
+const getQuestions = () => api("/api/questions");
 
 /* ---------- review (SRS) ---------- */
 const getReviewQueue = (limit = 20) => api(`/api/review/queue?limit=${limit}`);
@@ -141,6 +142,7 @@ function renderNav(active) {
        <nav class="navlinks">
          ${link("dash", "index.html", "Dashboard")}
          ${link("review", "review.html", "Review", ' <span id="navDue" class="nav-badge"></span>')}
+         ${link("questions", "questions.html", "Questions")}
          ${link("tutor", "tutor.html", "AI Tutor")}
          ${link("mock", "mock.html", "Mock")}
          ${link("analytics", "analytics.html", "Analytics")}
