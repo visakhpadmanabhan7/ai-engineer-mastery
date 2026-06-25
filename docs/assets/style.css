@@ -338,16 +338,28 @@ tr:hover td { background: var(--hover); }
 /* ---------- module / day list (index) ---------- */
 .module { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); margin: 14px 0; overflow: hidden; box-shadow: var(--shadow-sm); }
 .module > header {
-  display: flex; align-items: center; gap: 14px; padding: 16px 20px;
+  display: flex; align-items: center; gap: 12px; padding: 15px 18px;
   background: linear-gradient(180deg, var(--surface-2), var(--surface));
   border-bottom: 1px solid var(--border);
+  cursor: pointer; user-select: none; transition: background-color .15s ease;
 }
+.module > header:hover { background: linear-gradient(180deg, var(--surface-3), var(--surface-2)); }
+.module.collapsed > header { border-bottom-color: transparent; }
+.module.collapsed .days { display: none; }
 .module > header .mnum {
   font-family: var(--mono); font-weight: 700; color: var(--primary-ink);
   background: linear-gradient(180deg, #ffd97a, var(--gold)); border-radius: 8px; padding: 4px 9px; font-size: 13px; flex-shrink: 0;
 }
-.module > header .mtitle { font-weight: 760; font-size: 1.08rem; }
-.module > header .mtag { margin-left: auto; }
+.module > header .mtitle { font-weight: 760; font-size: 1.06rem; }
+.module > header .mweek { color: var(--muted); font-weight: 600; font-size: 13px; }
+.module > header .mcount {
+  margin-left: auto; font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--muted);
+  background: var(--surface-2); border: 1px solid var(--border-2); border-radius: 999px; padding: 2px 10px; flex-shrink: 0;
+}
+.module > header .mcount.complete { color: var(--green-text); border-color: color-mix(in srgb, var(--green) 40%, transparent); background: var(--green-soft); }
+.module > header .mcore { color: var(--gold-text); font-size: 10.5px; font-weight: 800; letter-spacing: .6px; text-transform: uppercase; flex-shrink: 0; }
+.module > header .chev { color: var(--faint); font-size: 12px; transition: transform .18s ease; flex-shrink: 0; }
+.module:not(.collapsed) > header .chev { transform: rotate(90deg); }
 .days { list-style: none; margin: 0; padding: 6px 8px; }
 .day { display: flex; align-items: center; gap: 12px; padding: 9px 12px; border-radius: 8px; }
 .day:hover { background: var(--hover); }

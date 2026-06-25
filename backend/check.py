@@ -2,10 +2,13 @@
 exercises the core flows. Run: PYTHONPATH=backend .venv/bin/python backend/check.py
 """
 import sys
+from datetime import date, timedelta
 
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.models import User
+from app.services.activity import touch_streak
 
 ok = 0
 fail = 0
@@ -87,6 +90,17 @@ with TestClient(app) as c:  # context manager triggers startup (ingest + seed)
     # analytics
     an = c.get("/api/analytics", headers=h).json()
     check("analytics", an.get("lessons_total", 0) >= 60, f"(completed={an.get('lessons_completed')})")
+
+# streak logic: day-boundary correctness (pure, no HTTP)
+su = User(); su.current_streak = 0; su.longest_streak = 0; su.last_active_date = None
+d0 = date(2026, 1, 1)
+touch_streak(su, d0); touch_streak(su, d0)            # two lessons same day
+check("streak same-day = 1", su.current_streak == 1, f"({su.current_streak})")
+touch_streak(su, d0 + timedelta(days=1))             # consecutive day
+check("streak consecutive +1", su.current_streak == 2, f"({su.current_streak})")
+touch_streak(su, d0 + timedelta(days=3))             # skipped a day
+check("streak gap resets to 1", su.current_streak == 1, f"({su.current_streak})")
+check("streak longest tracked", su.longest_streak == 2, f"({su.longest_streak})")
 
 print(f"\n{ok} passed, {fail} failed")
 sys.exit(1 if fail else 0)

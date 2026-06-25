@@ -11,7 +11,6 @@ from ..deps import get_current_user
 from ..models import Attempt, Lesson, Note, TutorMessage, TutorSession, User
 from ..schemas import GradeOut, TutorAskIn, TutorMessageOut, TutorSessionOut
 from ..services import ai
-from ..services.activity import touch_streak
 from ..services.ratelimit import SlidingWindowLimiter
 
 router = APIRouter(prefix="/api/tutor", tags=["tutor"])
@@ -79,7 +78,6 @@ async def chat(data: TutorAskIn, user: User = Depends(get_current_user), db: Asy
     api_messages.append({"role": "user", "content": data.message})
 
     db.add(TutorMessage(session_id=session_id, role="user", content=data.message))
-    touch_streak(user)
     await db.commit()
 
     system = ai.system_for(kind, context)
@@ -113,7 +111,6 @@ async def grade(data: TutorAskIn, user: User = Depends(get_current_user), db: As
         kind="grade", user_answer=answer, score=res["score"],
         feedback=res["feedback"], model_answer=res["model_answer"],
     ))
-    touch_streak(user)
     await db.commit()
     return GradeOut(
         score=res["score"] if res["score"] is not None else 0.0,
