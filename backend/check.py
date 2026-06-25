@@ -91,6 +91,22 @@ with TestClient(app) as c:  # context manager triggers startup (ingest + seed)
     an = c.get("/api/analytics", headers=h).json()
     check("analytics", an.get("lessons_total", 0) >= 60, f"(completed={an.get('lessons_completed')})")
 
+    # new subsystems: embeddings/memory/cache in meta, semantic search, usage tracing + grade cache
+    m2 = c.get("/api/meta").json()
+    check("meta embeddings/memory/cache",
+          all(m2.get(k) for k in ("embeddings", "memory", "cache")),
+          f"(embeddings={m2.get('embeddings')} memory={m2.get('memory')} cache={m2.get('cache')})")
+    sr = c.post("/api/search", headers=h, json={"query": "evaluate a RAG retriever", "k": 5}).json()
+    check("semantic search", len(sr.get("results", [])) > 0, f"(mode={sr.get('mode')} n={len(sr.get('results', []))})")
+    check("usage endpoint", c.get("/api/usage", headers=h).status_code == 200)
+    if m2.get("ai_enabled"):
+        qa = {"kind": "grade", "message": "What is RRF?", "user_answer": "Reciprocal rank fusion."}
+        c.post("/api/tutor/grade", headers=h, json=qa)
+        c.post("/api/tutor/grade", headers=h, json=qa)  # identical -> cache hit
+        usg = c.get("/api/usage", headers=h).json()
+        check("usage traced", usg.get("calls", 0) >= 1, f"(calls={usg.get('calls')} tokens={usg.get('total_tokens')})")
+        check("grade cache hit", usg.get("cache_hits", 0) >= 1, f"(cache_hits={usg.get('cache_hits')})")
+
 # streak logic: day-boundary correctness (pure, no HTTP)
 su = User(); su.current_streak = 0; su.longest_streak = 0; su.last_active_date = None
 d0 = date(2026, 1, 1)

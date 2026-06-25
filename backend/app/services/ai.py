@@ -4,16 +4,21 @@ Supports two backends, chosen by `LLM_PROVIDER` (or auto-detected from whichever
 key is set):
   - anthropic : Claude (Opus 4.8 tutor, Haiku 4.5 judge)
   - groq      : any OpenAI-compatible endpoint (Groq by default; free tier)
-Degrades gracefully when no key is configured.
+
+Every call is traced (tokens / est. cost / latency, see services/tracing) and
+grading results are cached (services/cache). Degrades gracefully with no key.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
+import time
 from collections.abc import AsyncIterator
 
 from ..config import settings
+from . import cache, tracing
 
 log = logging.getLogger("app.ai")
 
@@ -29,12 +34,17 @@ def ai_available() -> bool:
     return settings.ai_enabled
 
 
+def _tutor_model() -> str:
+    return settings.tutor_model if provider() == "anthropic" else settings.groq_model
+
+
+def _judge_model() -> str:
+    return settings.judge_model if provider() == "anthropic" else settings.groq_judge_model
+
+
 def provider_info() -> dict:
     p = provider()
-    model = {
-        "anthropic": settings.tutor_model,
-        "groq": settings.groq_model,
-    }.get(p, "")
+    model = {"anthropic": settings.tutor_model, "groq": settings.groq_model}.get(p, "")
     return {"provider": p, "model": model, "enabled": p != "none"}
 
 
@@ -97,7 +107,7 @@ def system_for(kind: str, context: str = "") -> str:
 
 
 # ------------------------------------------------------------------ streaming
-async def stream_chat(system: str, messages: list[dict]) -> AsyncIterator[str]:
+async def stream_chat(system: str, messages: list[dict], *, user_id: int | None = None) -> AsyncIterator[str]:
     p = provider()
     if p == "none":
         yield (
@@ -106,21 +116,35 @@ async def stream_chat(system: str, messages: list[dict]) -> AsyncIterator[str]:
             "Everything else in the app works without it."
         )
         return
+
+    t0 = time.monotonic()
+    pin = pout = 0
+    model = _tutor_model()
     try:
         if p == "anthropic":
             client = _anthropic()
             async with client.messages.stream(
-                model=settings.tutor_model, max_tokens=2000, system=system, messages=messages
+                model=model, max_tokens=2000, system=system, messages=messages
             ) as stream:
                 async for text in stream.text_stream:
                     yield text
+                try:
+                    final = await stream.get_final_message()
+                    pin, pout = final.usage.input_tokens, final.usage.output_tokens
+                except Exception:  # pragma: no cover
+                    pass
         else:  # groq / openai-compatible
             client = _openai()
             oai_messages = [{"role": "system", "content": system}, *messages]
             stream = await client.chat.completions.create(
-                model=settings.groq_model, messages=oai_messages, max_tokens=2000, stream=True
+                model=model, messages=oai_messages, max_tokens=2000,
+                stream=True, stream_options={"include_usage": True},
             )
             async for chunk in stream:
+                usage = getattr(chunk, "usage", None)
+                if usage:
+                    pin = getattr(usage, "prompt_tokens", 0) or 0
+                    pout = getattr(usage, "completion_tokens", 0) or 0
                 if chunk.choices:
                     delta = chunk.choices[0].delta.content
                     if delta:
@@ -130,6 +154,12 @@ async def stream_chat(system: str, messages: list[dict]) -> AsyncIterator[str]:
         yield (
             "\n\n[tutor error: the request to the AI provider failed. Check the server logs "
             "and your API key / model access.]"
+        )
+    finally:
+        await tracing.record(
+            kind="tutor", provider=p, model=model,
+            prompt_tokens=pin, completion_tokens=pout,
+            latency_ms=int((time.monotonic() - t0) * 1000), user_id=user_id,
         )
 
 
@@ -174,7 +204,7 @@ def _normalize_grade(data: dict, fallback_text: str) -> dict:
     }
 
 
-async def grade(question: str, answer: str) -> dict:
+async def grade(question: str, answer: str, *, user_id: int | None = None) -> dict:
     p = provider()
     if p == "none":
         return {
@@ -183,23 +213,39 @@ async def grade(question: str, answer: str) -> dict:
             "one_fix": "",
             "model_answer": "",
         }
+
+    model = _judge_model()
+    key = "grade:" + hashlib.sha256(f"{model}|{question}|{answer}".encode("utf-8")).hexdigest()
+    cached = await cache.get(key)
+    if cached is not None:
+        await tracing.record(kind="grade", provider=p, model=model, cache_hit=True, user_id=user_id)
+        return cached
+
+    t0 = time.monotonic()
+    pin = pout = 0
     user = f"QUESTION:\n{question}\n\nCANDIDATE ANSWER:\n{answer}"
     try:
         if p == "anthropic":
             client = _anthropic()
             msg = await client.messages.create(
-                model=settings.judge_model, max_tokens=900, system=GRADE_SYSTEM,
+                model=model, max_tokens=1200, system=GRADE_SYSTEM,
                 messages=[{"role": "user", "content": user}],
             )
             text = "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
+            pin, pout = msg.usage.input_tokens, msg.usage.output_tokens
         else:  # groq / openai-compatible
             client = _openai()
             resp = await client.chat.completions.create(
-                model=settings.groq_judge_model, max_tokens=900,
+                model=model, max_tokens=1200,
+                response_format={"type": "json_object"},  # force valid, complete JSON
                 messages=[{"role": "system", "content": GRADE_SYSTEM}, {"role": "user", "content": user}],
             )
             text = resp.choices[0].message.content or ""
-        return _normalize_grade(_extract_json(text), text)
+            if resp.usage:
+                pin, pout = resp.usage.prompt_tokens, resp.usage.completion_tokens
+        result = _normalize_grade(_extract_json(text), text)
+        await cache.set(key, result)
+        return result
     except Exception:  # pragma: no cover
         log.exception("grade failed")
         return {
@@ -208,3 +254,9 @@ async def grade(question: str, answer: str) -> dict:
             "one_fix": "",
             "model_answer": "",
         }
+    finally:
+        await tracing.record(
+            kind="grade", provider=p, model=model,
+            prompt_tokens=pin, completion_tokens=pout,
+            latency_ms=int((time.monotonic() - t0) * 1000), user_id=user_id,
+        )

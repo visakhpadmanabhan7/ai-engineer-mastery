@@ -12,9 +12,12 @@ app/
   schemas.py     # Pydantic v2 request/response contracts
   security.py    # bcrypt (sha256-prehash) + JWT
   deps.py        # get_current_user (OAuth2 bearer)
-  routers/       # auth, lessons, progress, review, tutor, analytics, notes
-  services/      # ai (provider-agnostic), srs (FSRS-6), ingest, activity
-check.py         # in-process smoke test (18 assertions)
+  routers/       # auth, lessons, progress, review, tutor, analytics, notes, search, usage
+  services/      # ai, srs (FSRS-6), ingest, activity, embeddings, memory (LangChain),
+                 #   cache, tracing, indexing, ratelimit
+check.py         # in-process smoke test (27 assertions)
+eval_grader.py   # calibration harness for the LLM judge (eval-the-grader)
+alembic/         # migrations (async env wired to the models); dev still uses create_all
 ```
 
 ## Run / test

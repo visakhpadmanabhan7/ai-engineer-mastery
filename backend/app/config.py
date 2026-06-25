@@ -47,6 +47,21 @@ class Settings(BaseSettings):
 
     # Optional infra
     redis_url: str = ""
+    cache_enabled: bool = True        # cache grading results (Redis if REDIS_URL set, else in-process)
+    cache_ttl_seconds: int = 86400
+
+    # Conversation memory (LangChain): windowed tutor history
+    tutor_history_messages: int = 12  # max prior messages kept in the tutor context
+
+    # Embeddings / semantic search (pgvector when available, JSON on SQLite)
+    embeddings_provider: str = "auto"            # auto | local | openai | hash | none
+    embedding_model: str = "all-MiniLM-L6-v2"    # sentence-transformers model (local)
+    embeddings_api_key: str = ""                 # for an OpenAI-compatible embeddings API
+    embeddings_base_url: str = "https://api.openai.com/v1"
+    embeddings_api_model: str = "text-embedding-3-small"
+
+    # Tracing: record tokens / est. cost / latency per LLM call
+    trace_enabled: bool = True
 
     # Content (blank = use the bundled content/ dir; set a path to override)
     content_dir: str = ""

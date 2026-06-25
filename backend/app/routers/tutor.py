@@ -10,18 +10,18 @@ from ..database import SessionLocal, get_db
 from ..deps import get_current_user
 from ..models import Attempt, Lesson, Note, TutorMessage, TutorSession, User
 from ..schemas import GradeOut, TutorAskIn, TutorMessageOut, TutorSessionOut
-from ..services import ai
+from ..services import ai, embeddings, memory
 from ..services.ratelimit import SlidingWindowLimiter
 
 router = APIRouter(prefix="/api/tutor", tags=["tutor"])
 
 # Per-user cap on calls that hit the LLM provider (protects the owner's API key
-# on a public instance). In-memory / per-process; see services/ratelimit.py.
+# on a public instance). Redis-backed when REDIS_URL is set, else in-process.
 _ai_limiter = SlidingWindowLimiter(settings.ai_rate_per_min, 60.0)
 
 
-def _rate_limit(user: User) -> None:
-    if not _ai_limiter.allow(str(user.id)):
+async def _rate_limit(user: User) -> None:
+    if not await _ai_limiter.allow_async(str(user.id)):
         raise HTTPException(status_code=429, detail="Too many tutor requests; please wait a moment.")
 
 
@@ -34,26 +34,41 @@ async def _valid_lesson_id(db: AsyncSession, lesson_id: int | None) -> int | Non
     return lesson_id if ok else None
 
 
-async def _build_context(db: AsyncSession, user: User, lesson_id: int | None) -> str:
+async def _relevant_notes(db: AsyncSession, user: User, query: str, k: int = 4) -> list[Note]:
+    """RAG over the learner's notes: rank by embedding similarity to the query,
+    falling back to most-recent when embeddings are unavailable."""
+    rows = (await db.execute(
+        select(Note).where(Note.user_id == user.id).order_by(Note.id.desc()).limit(50)
+    )).scalars().all()
+    if not rows:
+        return []
+    embedded = [n for n in rows if n.embedding]
+    if query and embeddings.available() and embedded:
+        qv = await embeddings.embed_one(query)
+        ranked = sorted(embedded, key=lambda n: embeddings.cosine(qv, n.embedding), reverse=True)
+        return ranked[:k]
+    return rows[:k]
+
+
+async def _build_context(db: AsyncSession, user: User, lesson_id: int | None, query: str = "") -> str:
     parts: list[str] = []
     if lesson_id:
         lesson = (await db.execute(select(Lesson).where(Lesson.id == lesson_id))).scalar_one_or_none()
         if lesson:
-            parts.append(f"Current lesson: Day {lesson.day} — {lesson.title}. {lesson.summary}")
-    notes = (await db.execute(
-        select(Note).where(Note.user_id == user.id).order_by(Note.id.desc()).limit(5)
-    )).scalars().all()
+            parts.append(f"Current lesson: Day {lesson.day}: {lesson.title}. {lesson.summary}")
+    notes = await _relevant_notes(db, user, query)
     if notes:
-        parts.append("Learner's recent notes:\n" + "\n".join(f"- {n.content[:300]}" for n in notes))
+        label = "Learner's most relevant notes" if (query and embeddings.available()) else "Learner's recent notes"
+        parts.append(label + ":\n" + "\n".join(f"- {n.content[:300]}" for n in notes))
     return "\n\n".join(parts)
 
 
 @router.post("/chat")
 async def chat(data: TutorAskIn, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    _rate_limit(user)
+    await _rate_limit(user)
     kind = data.kind if data.kind in ("deepen", "mock", "chat") else "chat"
     lesson_id = await _valid_lesson_id(db, data.lesson_id)
-    context = await _build_context(db, user, lesson_id)
+    context = await _build_context(db, user, lesson_id, data.message)
 
     # resolve / create session
     session = None
@@ -70,21 +85,22 @@ async def chat(data: TutorAskIn, user: User = Depends(get_current_user), db: Asy
         await db.flush()
     session_id = session.id
 
-    # prior turns for multi-turn coherence
+    # prior turns, trimmed to a window by LangChain (services/memory)
     prior = (await db.execute(
         select(TutorMessage).where(TutorMessage.session_id == session_id).order_by(TutorMessage.id)
     )).scalars().all()
-    api_messages = [{"role": m.role, "content": m.content} for m in prior]
-    api_messages.append({"role": "user", "content": data.message})
+    history = memory.window([{"role": m.role, "content": m.content} for m in prior])
+    api_messages = [*history, {"role": "user", "content": data.message}]
 
     db.add(TutorMessage(session_id=session_id, role="user", content=data.message))
     await db.commit()
 
     system = ai.system_for(kind, context)
+    uid = user.id
 
     async def gen():
         acc: list[str] = []
-        async for chunk in ai.stream_chat(system, api_messages):
+        async for chunk in ai.stream_chat(system, api_messages, user_id=uid):
             acc.append(chunk)
             yield chunk
         # persist assistant message with a fresh session (request session is closing)
@@ -100,11 +116,11 @@ async def chat(data: TutorAskIn, user: User = Depends(get_current_user), db: Asy
 
 @router.post("/grade", response_model=GradeOut)
 async def grade(data: TutorAskIn, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    _rate_limit(user)
+    await _rate_limit(user)
     question = data.question or data.message
     answer = data.user_answer or ""
     lesson_id = await _valid_lesson_id(db, data.lesson_id)
-    res = await ai.grade(question, answer)
+    res = await ai.grade(question, answer, user_id=user.id)
     db.add(Attempt(
         user_id=user.id, question_id=None, lesson_id=lesson_id,
         topic=(data.kind if data.kind not in ("grade", "chat") else ""),

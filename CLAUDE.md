@@ -21,7 +21,7 @@ Anyone running this can plug in **whatever key/provider they want** via `backend
 ## Run / test / deploy
 ```bash
 ./run.sh                 # local: venv + deps + seed + server on :8000 (SQLite, zero-config)
-make test                # in-process smoke test (18 assertions)
+make test                # in-process smoke test (27 assertions)
 docker compose up --build    # full stack: API + Postgres(pgvector) + Redis
 ```
 Dev login (local SQLite only): **visakh@local / learn**, seeded on first start. On a Postgres deploy the seed is skipped (no shared default login), so register an account. Hosting (Render + Groq + optional Neon) is in `DEPLOY.md`; one-click via `render.yaml`. The HTML docs are in `docs/` (open `docs/index.html`).
@@ -52,7 +52,7 @@ ai-engineer-mastery/
 - **AI grounding (when touching the tutor persona):** the tutor may reference Visakh's real work (MaiQ, the 37%/2% chunk-eval result, hybrid BM25+dense+RRF into pgvector, the MaiQ Skill Store). Never fabricate experience beyond what `VISAKH_CONTEXT` states. American English, no em-dashes in UI copy.
 - **Secrets:** never commit `backend/.env` (it is gitignored). Keys go in `.env` locally or the host's env in production.
 - **Security defaults (do not regress):** the public default `JWT_SECRET` is auto-replaced by a random per-process secret at startup (set a stable `JWT_SECRET` in prod for persistent sessions); the `visakh@local/learn` seed account is created **only on local SQLite**, never on a Postgres deploy with the default password (`allow_seed_user`); registration honors `ALLOW_REGISTRATION`; tutor endpoints are per-user rate-limited (`AI_RATE_PER_MIN`, `services/ratelimit.py`); CORS sends credentials only for explicit, non-`*` origins; SQLite enforces foreign keys; and `lesson_id`/`question_id` are validated (404) before writes. Provider/runtime errors are logged server-side, never echoed verbatim to clients.
-- **After changes:** run `make test` (18 assertions) before committing.
+- **After changes:** run `make test` (27 assertions) before committing.
 
 ## Commands cheat-sheet
 | Task | Command |

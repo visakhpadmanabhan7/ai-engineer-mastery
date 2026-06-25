@@ -9,7 +9,7 @@ install:        ## create venv + install deps
 docker:         ## full stack: API + Postgres(pgvector) + Redis
 	docker compose up --build
 
-test:           ## run the in-process smoke check (18 assertions)
+test:           ## run the in-process smoke check (27 assertions)
 	cd backend && DATABASE_URL="sqlite+aiosqlite:///./_check.db" PYTHONPATH=. ./.venv/bin/python check.py && rm -f ./_check.db
 
 clean:

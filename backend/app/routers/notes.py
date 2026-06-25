@@ -8,6 +8,7 @@ from ..database import get_db
 from ..deps import get_current_user
 from ..models import Note, User
 from ..schemas import NoteIn, NoteOut
+from ..services import embeddings
 
 router = APIRouter(prefix="/api/notes", tags=["notes"])
 
@@ -15,6 +16,11 @@ router = APIRouter(prefix="/api/notes", tags=["notes"])
 @router.post("", response_model=NoteOut)
 async def create_note(data: NoteIn, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     note = Note(user_id=user.id, lesson_id=data.lesson_id, content=data.content)
+    if embeddings.available():
+        try:
+            note.embedding = await embeddings.embed_one(data.content)
+        except Exception:
+            pass
     db.add(note)
     await db.commit()
     await db.refresh(note)

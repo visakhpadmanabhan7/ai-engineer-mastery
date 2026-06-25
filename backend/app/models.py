@@ -243,3 +243,24 @@ class Attempt(Base):
     feedback: Mapped[str] = mapped_column(Text, default="")
     model_answer: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+# ---------------------------------------------------------------- observability
+
+class LlmTrace(Base):
+    """One LLM call: tokens, estimated cost, latency, provider/model (observability)."""
+
+    __tablename__ = "llm_traces"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    kind: Mapped[str] = mapped_column(String(20), index=True)  # tutor | grade | embed
+    provider: Mapped[str] = mapped_column(String(20), default="")
+    model: Mapped[str] = mapped_column(String(80), default="")
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    total_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    est_cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
+    latency_ms: Mapped[int] = mapped_column(Integer, default=0)
+    cache_hit: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
