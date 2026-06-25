@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<script>(function(){try{var t=localStorage.getItem('aimp_theme')||((window.matchMedia&&matchMedia('(prefers-color-scheme: light)').matches)?'light':'dark');document.documentElement.setAttribute('data-theme',t);}catch(e){document.documentElement.setAttribute('data-theme','dark');}})();</script>
 <title>Lesson — AI Engineer Mastery</title>
 <link rel="stylesheet" href="assets/base.css">
 <link rel="stylesheet" href="assets/app.css">
@@ -52,7 +53,7 @@ async function load() {
     <div id="lessonBody"></div>
 
     <div class="lesson-actions">
-      <button class="btn ${done ? "" : "primary"}" id="completeBtn">${done ? "&#10003; Completed" : "Mark complete"}</button>
+      <button class="btn ${done ? "done" : "primary"}" id="completeBtn">${done ? "&#10003; Completed" : "Mark complete"}</button>
     </div>
 
     <h2>Go deeper with the tutor</h2>
@@ -94,6 +95,7 @@ async function load() {
       await setProgress(lesson.id, next);
       done = next;
       completeBtn.classList.toggle("primary", !done);
+      completeBtn.classList.toggle("done", done);
       completeBtn.innerHTML = done ? "&#10003; Completed" : "Mark complete";
       toast(done ? "Day " + day + " complete" : "Marked incomplete");
     } catch (e) {

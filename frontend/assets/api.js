@@ -6,6 +6,25 @@ const getToken = () => localStorage.getItem(TOKEN_KEY);
 const setToken = (t) => localStorage.setItem(TOKEN_KEY, t);
 const clearToken = () => localStorage.removeItem(TOKEN_KEY);
 
+/* ---------- theme (light / dark) ---------- */
+const THEME_KEY = "aimp_theme";
+const prefersLight = () => window.matchMedia && matchMedia("(prefers-color-scheme: light)").matches;
+const storedTheme = () => { try { return localStorage.getItem(THEME_KEY); } catch (_) { return null; } };
+const getTheme = () => storedTheme() || (prefersLight() ? "light" : "dark");
+const currentTheme = () => document.documentElement.getAttribute("data-theme") || getTheme();
+const themeIcon = (t) => (t === "light" ? "🌙" : "☀️");
+function setTheme(t) {
+  document.documentElement.setAttribute("data-theme", t);
+  try { localStorage.setItem(THEME_KEY, t); } catch (_) {}
+  document.querySelectorAll(".theme-toggle").forEach((b) => {
+    b.textContent = themeIcon(t);
+    b.title = t === "light" ? "Switch to dark theme" : "Switch to light theme";
+  });
+}
+function toggleTheme() { setTheme(currentTheme() === "light" ? "dark" : "light"); }
+// Ensure the attribute is set even if a page lacks the pre-paint head snippet.
+setTheme(currentTheme());
+
 async function api(path, { method = "GET", body, auth = true, raw = false } = {}) {
   const headers = {};
   const isForm = body instanceof FormData;
@@ -126,6 +145,7 @@ function renderNav(active) {
          ${link("mock", "mock.html", "Mock")}
          ${link("analytics", "analytics.html", "Analytics")}
          <span class="nav-streak" id="navStreak"></span>
+         <button class="theme-toggle" onclick="toggleTheme()" aria-label="Toggle light/dark theme">${themeIcon(currentTheme())}</button>
          <a href="#" onclick="logout();return false;" class="nav-logout">Sign out</a>
        </nav>
      </div></div>`
