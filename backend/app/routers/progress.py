@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -38,6 +38,11 @@ async def set_progress(data: ProgressIn, user: User = Depends(get_current_user),
         select(Progress).where(Progress.user_id == user.id, Progress.lesson_id == data.lesson_id)
     )).scalar_one_or_none()
     if data.completed:
+        lesson_exists = (await db.execute(
+            select(Lesson.id).where(Lesson.id == data.lesson_id)
+        )).scalar_one_or_none()
+        if not lesson_exists:
+            raise HTTPException(status_code=404, detail="Lesson not found")
         if row is None:
             row = Progress(user_id=user.id, lesson_id=data.lesson_id)
             db.add(row)

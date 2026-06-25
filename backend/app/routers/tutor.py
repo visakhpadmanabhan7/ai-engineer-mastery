@@ -1,18 +1,38 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..config import settings
 from ..database import SessionLocal, get_db
 from ..deps import get_current_user
 from ..models import Attempt, Lesson, Note, TutorMessage, TutorSession, User
 from ..schemas import GradeOut, TutorAskIn, TutorMessageOut, TutorSessionOut
 from ..services import ai
 from ..services.activity import touch_streak
+from ..services.ratelimit import SlidingWindowLimiter
 
 router = APIRouter(prefix="/api/tutor", tags=["tutor"])
+
+# Per-user cap on calls that hit the LLM provider (protects the owner's API key
+# on a public instance). In-memory / per-process; see services/ratelimit.py.
+_ai_limiter = SlidingWindowLimiter(settings.ai_rate_per_min, 60.0)
+
+
+def _rate_limit(user: User) -> None:
+    if not _ai_limiter.allow(str(user.id)):
+        raise HTTPException(status_code=429, detail="Too many tutor requests; please wait a moment.")
+
+
+async def _valid_lesson_id(db: AsyncSession, lesson_id: int | None) -> int | None:
+    """Coerce an unknown lesson_id to None so an optional lesson reference never
+    triggers a foreign-key error when the row is persisted."""
+    if lesson_id is None:
+        return None
+    ok = (await db.execute(select(Lesson.id).where(Lesson.id == lesson_id))).scalar_one_or_none()
+    return lesson_id if ok else None
 
 
 async def _build_context(db: AsyncSession, user: User, lesson_id: int | None) -> str:
@@ -31,8 +51,10 @@ async def _build_context(db: AsyncSession, user: User, lesson_id: int | None) ->
 
 @router.post("/chat")
 async def chat(data: TutorAskIn, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    _rate_limit(user)
     kind = data.kind if data.kind in ("deepen", "mock", "chat") else "chat"
-    context = await _build_context(db, user, data.lesson_id)
+    lesson_id = await _valid_lesson_id(db, data.lesson_id)
+    context = await _build_context(db, user, lesson_id)
 
     # resolve / create session
     session = None
@@ -42,7 +64,7 @@ async def chat(data: TutorAskIn, user: User = Depends(get_current_user), db: Asy
         )).scalar_one_or_none()
     if session is None:
         session = TutorSession(
-            user_id=user.id, lesson_id=data.lesson_id, kind=kind,
+            user_id=user.id, lesson_id=lesson_id, kind=kind,
             title=(data.message[:60] or kind.title()),
         )
         db.add(session)
@@ -80,11 +102,13 @@ async def chat(data: TutorAskIn, user: User = Depends(get_current_user), db: Asy
 
 @router.post("/grade", response_model=GradeOut)
 async def grade(data: TutorAskIn, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    _rate_limit(user)
     question = data.question or data.message
     answer = data.user_answer or ""
+    lesson_id = await _valid_lesson_id(db, data.lesson_id)
     res = await ai.grade(question, answer)
     db.add(Attempt(
-        user_id=user.id, question_id=None, lesson_id=data.lesson_id,
+        user_id=user.id, question_id=None, lesson_id=lesson_id,
         topic=(data.kind if data.kind not in ("grade", "chat") else ""),
         kind="grade", user_answer=answer, score=res["score"],
         feedback=res["feedback"], model_answer=res["model_answer"],

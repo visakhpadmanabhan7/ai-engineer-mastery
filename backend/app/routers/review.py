@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -63,6 +63,11 @@ async def queue(limit: int = 20, user: User = Depends(get_current_user), db: Asy
 @router.post("/grade")
 async def grade_card(data: ReviewGradeIn, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     now = datetime.now(timezone.utc)
+    q_exists = (await db.execute(
+        select(Question.id).where(Question.id == data.question_id)
+    )).scalar_one_or_none()
+    if not q_exists:
+        raise HTTPException(status_code=404, detail="Question not found")
     card = (await db.execute(
         select(ReviewCard).where(ReviewCard.user_id == user.id, ReviewCard.question_id == data.question_id)
     )).scalar_one_or_none()

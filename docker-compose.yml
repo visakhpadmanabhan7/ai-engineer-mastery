@@ -1,7 +1,7 @@
 # Production-shaped local stack: API + Postgres(pgvector) + Redis.
 #   GROQ_API_KEY=gsk_... docker compose up --build      # free tutor via Groq
 #   ANTHROPIC_API_KEY=sk-ant-... docker compose up --build   # or Claude
-# Then open http://localhost:8000
+# Then open http://localhost:8000 and click Register (Postgres skips the demo seed account).
 
 services:
   db:

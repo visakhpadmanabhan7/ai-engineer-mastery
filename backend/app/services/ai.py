@@ -125,9 +125,12 @@ async def stream_chat(system: str, messages: list[dict]) -> AsyncIterator[str]:
                     delta = chunk.choices[0].delta.content
                     if delta:
                         yield delta
-    except Exception as exc:  # pragma: no cover - network/runtime
+    except Exception:  # pragma: no cover - network/runtime
         log.exception("tutor stream failed")
-        yield f"\n\n[tutor error: {exc}. Check your API key and model access.]"
+        yield (
+            "\n\n[tutor error: the request to the AI provider failed. Check the server logs "
+            "and your API key / model access.]"
+        )
 
 
 # ------------------------------------------------------------------ grading
@@ -197,6 +200,11 @@ async def grade(question: str, answer: str) -> dict:
             )
             text = resp.choices[0].message.content or ""
         return _normalize_grade(_extract_json(text), text)
-    except Exception as exc:  # pragma: no cover
+    except Exception:  # pragma: no cover
         log.exception("grade failed")
-        return {"score": None, "feedback": f"Grading error: {exc}", "one_fix": "", "model_answer": ""}
+        return {
+            "score": None,
+            "feedback": "Grading failed due to an AI provider error. Check the server logs.",
+            "one_fix": "",
+            "model_answer": "",
+        }

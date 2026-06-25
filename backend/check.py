@@ -1,5 +1,5 @@
 """In-process smoke test: boots the app (runs lifespan: ingest + seed) and
-exercises the core flows. Run: PYTHONPATH=backend .venv/bin/python backend/smoke_test.py
+exercises the core flows. Run: PYTHONPATH=backend .venv/bin/python backend/check.py
 """
 import sys
 
@@ -67,6 +67,12 @@ with TestClient(app) as c:  # context manager triggers startup (ingest + seed)
         check("grade card (FSRS)", g.status_code == 200 and g.json().get("ok"), f"(due={g.json().get('due')})")
     st = c.get("/api/review/stats", headers=h).json()
     check("review stats", "due_now" in st, f"(total_cards={st.get('total_cards')})")
+
+    # input validation: unknown ids are rejected cleanly (404), not 500 / silent orphan
+    bad_p = c.post("/api/progress", headers=h, json={"lesson_id": 999999, "completed": True})
+    check("reject bad lesson_id", bad_p.status_code == 404, f"(status={bad_p.status_code})")
+    bad_g = c.post("/api/review/grade", headers=h, json={"question_id": 999999, "rating": 3})
+    check("reject bad question_id", bad_g.status_code == 404, f"(status={bad_g.status_code})")
 
     # notes
     n = c.post("/api/notes", headers=h, json={"content": "RRF is rank-only fusion.", "lesson_id": None})

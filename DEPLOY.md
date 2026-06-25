@@ -15,7 +15,7 @@ The app is self-contained and deploy-ready: the 68 lessons are baked into the im
 1. Push the `learning-app/` folder to its own GitHub repo.
 2. Render dashboard -> **New -> Blueprint** -> select the repo. It reads `render.yaml` and provisions the web service **and** a free Postgres.
 3. When prompted, paste your `GROQ_API_KEY`.
-4. Open the URL Render assigns. Sign in with **visakh@local / learn** (then create your own account from the login page).
+4. Open the URL Render assigns and click **Register** to create your account. (The demo seed account is intentionally not created on the hosted Postgres database, so there is no shared default login.)
 
 ### Option B: manual web service
 1. Render -> **New -> Web Service** -> connect the repo -> **Runtime: Docker**.

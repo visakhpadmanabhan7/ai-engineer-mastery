@@ -14,7 +14,7 @@ app/
   deps.py        # get_current_user (OAuth2 bearer)
   routers/       # auth, lessons, progress, review, tutor, analytics, notes
   services/      # ai (provider-agnostic), srs (FSRS-6), ingest, activity
-check.py         # in-process smoke test (16 assertions)
+check.py         # in-process smoke test (18 assertions)
 ```
 
 ## Run / test

@@ -3,7 +3,8 @@
 #   1. Push the learning-app/ folder to a GitHub repo.
 #   2. Render dashboard -> New -> Blueprint -> select the repo.
 #   3. When prompted, paste your GROQ_API_KEY (free, no card: https://console.groq.com).
-#   4. Open the URL Render gives you. Dev login: visakh@local / learn.
+#   4. Open the URL Render gives you and click "Register" to create your account.
+#      (The demo seed account is intentionally NOT created on the hosted Postgres DB.)
 #
 # The free web service sleeps after 15 min idle (cold start ~1 min). The free Postgres
 # is fine for a demo; for a long-lived DB use Neon (see DEPLOY.md) and set DATABASE_URL + PG_SSL=true.

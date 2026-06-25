@@ -30,6 +30,17 @@ engine = create_async_engine(
     settings.db_url, echo=False, pool_pre_ping=True, connect_args=connect_args
 )
 
+# SQLite ignores foreign keys unless asked per-connection. Enforce them so a bad
+# lesson_id/question_id fails the same way it would on Postgres (no silent orphans).
+if settings.db_url.startswith("sqlite"):
+    from sqlalchemy import event
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _sqlite_enable_fk(dbapi_conn, _record):  # noqa: ANN001
+        cur = dbapi_conn.cursor()
+        cur.execute("PRAGMA foreign_keys=ON")
+        cur.close()
+
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
 

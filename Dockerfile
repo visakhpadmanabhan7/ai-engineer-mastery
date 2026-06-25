@@ -10,7 +10,8 @@ RUN pip install --no-cache-dir -r /app/backend/requirements.txt
 
 COPY backend /app/backend
 COPY frontend /app/frontend
-COPY content /app/content          # bundled lessons + question bank (self-contained image)
+# bundled lessons + question bank (keeps the image self-contained)
+COPY content /app/content
 
 WORKDIR /app/backend
 EXPOSE 8000
